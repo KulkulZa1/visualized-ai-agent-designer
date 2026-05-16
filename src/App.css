@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+/* ── Atelier design tokens ─────────────────────────────────────────────── */
+:root {
+  --bg:          #0e0f13;
+  --surface:     #15171c;
+  --surface-2:   #1c1f26;
+  --surface-3:   #23262f;
+  --border:      rgba(255,255,255,0.06);
+  --border-md:   rgba(255,255,255,0.12);
+  --text:        #e6e7eb;
+  --muted:       #9097a3;
+  --hint:        #5d6473;
+  --accent:      #e5a142;
+  --accent-soft: rgba(229,161,66,0.12);
+  --accent-dim:  rgba(229,161,66,0.06);
+  --green:       #5fbf7f;
+  --blue:        #7c9eff;
+  --red:         #e07575;
+  --purple:      #b88bd9;
+  --orange:      #d97757;
+  --teal:        #5fbfb5;
+  --font-mono:   "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, "Inter", BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Custom scrollbar ──────────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border-md); border-radius: 3px; }
+
+/* ── React Flow dark overrides ─────────────────────────────────────────── */
+.react-flow__renderer         { background: transparent; }
+.react-flow__controls         { background: var(--surface-2) !important; border: 1px solid var(--border) !important; border-radius: 6px !important; box-shadow: none !important; }
+.react-flow__controls-button  { background: transparent !important; border: none !important; color: var(--muted) !important; }
+.react-flow__controls-button:hover { background: var(--surface-3) !important; color: var(--text) !important; }
+.react-flow__minimap          { background: rgba(15,16,20,0.88) !important; border: 1px solid var(--border) !important; border-radius: 6px !important; }
+.react-flow__minimap-mask     { fill: rgba(14,15,19,0.75); }
+.react-flow__handle           { width: 10px; height: 10px; border: 2px solid white; border-radius: 50%; }
+.react-flow__handle-left      { left: -5px; }
+.react-flow__handle-right     { right: -5px; }
+.react-flow__node             { cursor: default; }
+.react-flow__pane             { cursor: default; }
+
+/* ── Animations ────────────────────────────────────────────────────────── */
+@keyframes pulse-running { 0%,100%{opacity:1} 50%{opacity:0.35} }
+@keyframes slide-up      { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }
+@keyframes auditProgress { 0%{background-position:200% 0} 100%{background-position:-200% 0} }

@@ -1,0 +1,655 @@
+# harness-studio-project.harness.yaml
+# ═══════════════════════════════════════════════════════════════════════════════
+# THE ACTIVE PROJECT HARNESS — Harness Studio developing itself.
+#
+# This is the workflow used to continue building Harness Studio from Phase 4+.
+# Load it in the canvas, study the agent structure, then use it to guide work.
+#
+# Model assignment:
+#   Orchestrator  : claude-opus-4.6          → fallback: gpt-5.5-xhigh  (RL)
+#   Workers       : claude-haiku-4.5         → fallback: gpt-5.5-high   (RL)
+#   Visual Insp.  : claude-sonnet-4.6        (Claude family only)
+#   Critic        : claude-opus-4.6          → fallback: gpt-5.5-xhigh  (RL)
+#   Gateway       : claude-haiku-4.5         (lightweight routing)
+#   Memory/Hook   : no model (runtime only)
+#
+# RL = rate_limit trigger
+# ═══════════════════════════════════════════════════════════════════════════════
+
+meta:
+  name: Harness Studio — Active Project
+  version: "1.0.0"
+  description: >
+    Active multi-agent workflow for building Harness Studio (Phase 4+).
+    Orchestrator reads the current goal, routes tasks by domain, specialists implement,
+    Visual Inspector checks design compliance, Critic gates quality.
+    Automatic fallback to GPT 5.5 tiers when Claude rate limits are hit.
+  projectRoot: "D:\\toy_project\\AI_agent"
+  createdAt: "2026-05-16T00:00:00Z"
+  updatedAt: "2026-05-16T00:00:00Z"
+
+agents:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-0 ── Project Orchestrator
+  # Role: orchestrator  |  Primary: Opus  |  Fallback: GPT 5.5 xHigh (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Project Orchestrator
+    role: orchestrator
+    model: claude-opus-4.6
+    fallback:
+      model: gpt-5.5-xhigh
+      trigger: rate_limit
+    temperature: 0.7
+    maxTokens: 8192
+    maxSteps: 20
+    timeoutSeconds: 300
+    description: >
+      Master coordinator for Harness Studio development. Reads PROJECT_STATUS.md + TODO.md,
+      selects the highest-priority task, decomposes it into domain-specific subtasks,
+      and routes to Task Router. After all specialists complete, aggregates results.
+    promptSource:
+      type: file
+      path: docs/PROJECT_STATUS.md
+    tools:
+      - read_file
+      - list_files
+      - todo_write
+      - subagent_dispatch
+    preHook:
+      path: .harness/hooks/pre_run_consent.sh
+      requireConsent: true
+    memoryRead:
+      - current-goal
+      - test-results
+      - review-verdict
+      - visual-verdict
+      - dev-history
+    memoryWrite:
+      - task-plan
+      - orchestrator-context
+    tokens:
+      used: 0
+      budget: 64000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-1 ── Task Router
+  # Role: gateway  |  Primary: Haiku  (lightweight, routes cheaply)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Task Router
+    role: gateway
+    model: claude-haiku-4.5
+    temperature: 0.2
+    maxTokens: 1024
+    maxSteps: 5
+    timeoutSeconds: 30
+    description: >
+      Classifies the task from Orchestrator into a domain: UI/Frontend, Rust/Backend,
+      Tests/QA, Documentation, or Mixed. Routes to the appropriate specialist worker(s).
+    condition: "domain ∈ {ui, rust, test, doc, mixed}"
+    promptSource:
+      type: inline
+      content: |
+        Classify the task into exactly one domain:
+          "ui"   — React/TypeScript frontend, CSS, component changes
+          "rust" — Tauri commands, Cargo.toml, src-tauri/
+          "test" — Vitest tests, cargo test, example YAML validation
+          "doc"  — Markdown docs, GUIDE.md, AGENT_WORKFLOW_SPEC.md, CLAUDE.md
+          "mixed"— spans multiple domains (route to both UI and Rust workers)
+
+        Output JSON: { "domain": "...", "rationale": "..." }
+    tools:
+      - classify
+    memoryRead:
+      - task-plan
+    memoryWrite:
+      - routing-decision
+    tokens:
+      used: 0
+      budget: 4000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-2 ── Frontend Worker (UI / React / TypeScript)
+  # Role: worker  |  Primary: Haiku  |  Fallback: GPT 5.5 High (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Frontend Worker
+    role: worker
+    model: claude-haiku-4.5
+    fallback:
+      model: gpt-5.5-high
+      trigger: rate_limit
+    temperature: 0.3
+    maxTokens: 16384
+    maxSteps: 40
+    timeoutSeconds: 600
+    description: >
+      Implements React/TypeScript changes for Harness Studio.
+      Follows the Atelier design system (CSS variables, NodeIcon for icons,
+      Zustand for state, typed Tauri IPC). No hex colors, no files > 300 lines.
+    promptSource:
+      type: inline
+      content: |
+        You are the Frontend Worker for Harness Studio (React 19 + TypeScript + Tauri 2).
+
+        REQUIRED PATTERNS — never violate:
+        1. Colors: use CSS variables only — var(--accent), var(--surface-2), var(--text), etc.
+           Never hardcode hex colors.
+        2. Icons: use <NodeIcon name="..." /> from @/components/nodes/NodeIcon.tsx.
+           Never import from lucide-react directly.
+        3. State: all workflow data in Zustand stores (src/store/).
+           Component-local UI state only in useState.
+        4. IPC: all Tauri calls through src/ipc/tauriCommands.ts.
+           Never call invoke() directly.
+        5. Types: validate all IPC data through Zod schemas (src/schemas/).
+        6. Files: max 300 lines per file. Split when approaching limit.
+        7. Fonts: use var(--font-mono) for all code/IDs/numbers in inline styles.
+        8. After any change: run bash("cd D:\\toy_project\\AI_agent && npx tsc --noEmit").
+           Fix all TypeScript errors before reporting complete.
+
+        CODEBASE ROOT: D:\toy_project\AI_agent\src\
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+      - fs.append
+      - list_files
+      - grep
+      - bash
+    preHook:
+      path: .harness/hooks/path_scope.py
+      requireConsent: false
+    memoryRead:
+      - task-plan
+      - routing-decision
+      - review-verdict
+    memoryWrite:
+      - frontend-changes
+      - impl-status
+    tokens:
+      used: 0
+      budget: 80000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-3 ── Backend Worker (Rust / Tauri)
+  # Role: worker  |  Primary: Haiku  |  Fallback: GPT 5.5 High (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Backend Worker
+    role: worker
+    model: claude-haiku-4.5
+    fallback:
+      model: gpt-5.5-high
+      trigger: rate_limit
+    temperature: 0.3
+    maxTokens: 12288
+    maxSteps: 30
+    timeoutSeconds: 600
+    description: >
+      Implements Rust/Tauri backend changes. Follows Rust idioms, uses anyhow for errors,
+      atomic file writes (.tmp → rename), path traversal prevention via resolve_safe_path(),
+      and registers commands in lib.rs invoke_handler.
+    promptSource:
+      type: inline
+      content: |
+        You are the Backend Worker for Harness Studio (Rust + Tauri 2 + serde_yaml).
+
+        REQUIRED PATTERNS:
+        1. File I/O: always use resolve_safe_path() before any filesystem access.
+           Atomic writes only: write to .tmp then fs::rename.
+        2. Error handling: use AppError enum (src-tauri/src/error.rs).
+           All commands return AppResult<T>.
+        3. New commands: register in src-tauri/src/lib.rs invoke_handler![] macro.
+        4. Serialization: serde(rename = "camelCase") for all public-facing fields.
+        5. After any change: run bash("cd D:\\toy_project\\AI_agent\\src-tauri && cargo build").
+           Fix all compiler errors before reporting complete.
+        6. Security: never bypass path validation. Never allow shell=true.
+
+        CODEBASE ROOT: D:\toy_project\AI_agent\src-tauri\
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+      - list_files
+      - grep
+      - bash
+    preHook:
+      path: .harness/hooks/destructive_guard.sh
+      requireConsent: false
+    memoryRead:
+      - task-plan
+      - routing-decision
+      - review-verdict
+    memoryWrite:
+      - backend-changes
+      - impl-status
+    tokens:
+      used: 0
+      budget: 48000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-4 ── Test Worker (Vitest + cargo test + example YAML validation)
+  # Role: worker  |  Primary: Haiku  |  Fallback: GPT 5.5 Mid (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Test Worker
+    role: worker
+    model: claude-haiku-4.5
+    fallback:
+      model: gpt-5.5-mid
+      trigger: rate_limit
+    temperature: 0.2
+    maxTokens: 8192
+    maxSteps: 20
+    timeoutSeconds: 300
+    description: >
+      Writes and runs tests for Harness Studio changes. Covers Vitest unit tests
+      (src/schemas, src/utils, src/store), React Testing Library component tests,
+      and Rust cargo tests. Also validates new .harness.yaml files against Zod schema.
+    promptSource:
+      type: inline
+      content: |
+        You are the Test Worker. Write tests for the changed code:
+
+        For TypeScript/React changes:
+          - src/schemas/ changes → tests/unit/schemas/
+          - src/utils/ changes   → tests/unit/utils/
+          - src/store/ changes   → tests/unit/store/
+          - New examples         → tests/unit/examples/
+          Follow the pattern in existing test files exactly.
+
+        For Rust changes:
+          - Add #[cfg(test)] mod tests {} block to the changed .rs file
+          - Test path validation, serialization roundtrips, error cases
+
+        After writing tests, run:
+          bash("cd D:\\toy_project\\AI_agent && npx vitest run")
+          bash("cd D:\\toy_project\\AI_agent\\src-tauri && cargo test")
+
+        Report: total tests passing / total tests written.
+        Only mark DONE when ALL tests pass (0 failures).
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+      - list_files
+      - grep
+      - bash
+      - test
+    memoryRead:
+      - frontend-changes
+      - backend-changes
+      - impl-status
+    memoryWrite:
+      - test-results
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-5 ── Visual Inspector
+  # Role: critic  |  Primary: Sonnet 4.6  (Claude family — design-aware)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Visual Inspector
+    role: critic
+    model: claude-sonnet-4.6
+    temperature: 0.4
+    maxTokens: 8192
+    maxSteps: 10
+    timeoutSeconds: 180
+    description: >
+      Reviews visual and UX aspects of frontend changes against the Atelier design system.
+      Checks CSS token usage, node card anatomy, spacing, typography, and the prototype
+      reference (.design/). Returns APPROVED or REVISE with specific line-level feedback.
+    promptSource:
+      type: inline
+      content: |
+        You are the Visual Inspector for Harness Studio.
+        Reference design system: .design/Documents/design.md
+        Reference prototype: .design/Components/atelier.jsx
+
+        Review the changed frontend files for:
+        1. CSS TOKENS: all colors use CSS vars (var(--accent), var(--surface-2), etc.)?
+           Any hardcoded hex values → REVISE.
+        2. TYPOGRAPHY: UI text uses Inter/system-ui, code/IDs use var(--font-mono)?
+        3. SPACING: 4/6/8/12/16/24px grid respected?
+        4. NODE ANATOMY: header (role chip + name + status) / prompt preview / footer / token bar?
+        5. DARK THEME: all panels use --bg or --surface colors, not white?
+        6. CONSISTENCY: matches the prototype in .design/?
+
+        Return:
+        {
+          "verdict": "APPROVED" | "REVISE",
+          "issues": [{"file": "...", "rule": "...", "line": "...", "fix": "..."}],
+          "summary": "..."
+        }
+    tools:
+      - read_file
+      - fs.read
+      - grep
+    memoryRead:
+      - frontend-changes
+      - test-results
+    memoryWrite:
+      - visual-verdict
+    tokens:
+      used: 0
+      budget: 24000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-6 ── Code Critic (Architecture + Security + Quality)
+  # Role: critic  |  Primary: Opus  |  Fallback: GPT 5.5 xHigh (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Code Critic
+    role: critic
+    model: claude-opus-4.6
+    fallback:
+      model: gpt-5.5-xhigh
+      trigger: rate_limit
+    temperature: 0.3
+    maxTokens: 8192
+    maxSteps: 12
+    timeoutSeconds: 240
+    description: >
+      Final quality gate. Reviews all changes for architectural integrity, security,
+      code quality, and compliance with the project's development rules.
+      Returns APPROVED, REVISE (actionable), or ESCALATE (human must review).
+    promptSource:
+      type: inline
+      content: |
+        You are the Code Critic for Harness Studio. You have the highest standards.
+
+        Review ALL changed files against these axes:
+
+        ARCHITECTURE
+        - State in Zustand stores (not component state)?
+        - File sizes ≤ 300 lines?
+        - No duplicated logic (check existing utils/ before creating new)?
+        - IPC calls typed through tauriCommands.ts?
+
+        SECURITY
+        - API keys in code? → REVISE immediately.
+        - Path traversal risk? → REVISE.
+        - Hook execution without consent gate? → REVISE.
+        - Shell injection risk (string concat in bash calls)? → REVISE.
+
+        CODE QUALITY
+        - No `any` types without justification comment?
+        - Error handling (not silent catch)?
+        - No TODO/FIXME left in shipped code?
+
+        TESTS
+        - New functionality has tests?
+        - All existing tests still pass?
+
+        Return:
+        {
+          "verdict": "APPROVED" | "REVISE" | "ESCALATE",
+          "issues": [{"severity": "error"|"warn", "file": "...", "message": "..."}],
+          "summary": "..."
+        }
+
+        ESCALATE if: security vulnerability, data loss risk, or fundamental architecture violation.
+    tools:
+      - read_file
+      - fs.read
+      - grep
+      - list_files
+    memoryRead:
+      - frontend-changes
+      - backend-changes
+      - test-results
+      - visual-verdict
+    memoryWrite:
+      - review-verdict
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-7 ── Documentation Worker
+  # Role: worker  |  Primary: Haiku  |  Fallback: GPT 5.5 Mid (RL)
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Documentation Worker
+    role: worker
+    model: claude-haiku-4.5
+    fallback:
+      model: gpt-5.5-mid
+      trigger: rate_limit
+    temperature: 0.5
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 120
+    description: >
+      Updates project documentation after every successful cycle.
+      Writes to PROJECT_STATUS.md, DEVELOPMENT_LOG.md, CHANGELOG.md, and AGENT.md.
+      Also regenerates CLAUDE.md and AGENTS.md if agent configurations changed.
+    promptSource:
+      type: inline
+      content: |
+        You are the Documentation Worker. After a successful development cycle:
+
+        1. Update docs/PROJECT_STATUS.md:
+           - Mark completed items with [x]
+           - Update verification counts (tsc errors: 0, tests: N/N pass)
+           - Set next recommended action
+
+        2. Append to docs/DEVELOPMENT_LOG.md:
+           ## {YYYY-MM-DD} — {task name}
+           ### Files Created/Modified
+           ### Key Decisions
+           ### Test Results
+
+        3. Append to docs/CHANGELOG.md under [Unreleased]:
+           ### Added / Changed / Fixed
+
+        4. If agent configs changed in any .harness.yaml:
+           Regenerate CLAUDE.md using the format in docs/AGENT_WORKFLOW_SPEC.md.
+
+        Match existing formatting exactly. Do not rewrite sections that haven't changed.
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+    memoryRead:
+      - task-plan
+      - frontend-changes
+      - backend-changes
+      - test-results
+      - review-verdict
+    memoryWrite:
+      - docs-updated
+    tokens:
+      used: 0
+      budget: 16000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-8 ── Codebase Memory
+  # Role: memory  |  No model
+  # Stores the current understanding of the Harness Studio codebase structure.
+  # Written by workers, read by Orchestrator on next session start.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Codebase Memory
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 10
+    description: >
+      Persists the codebase map across sessions. Workers write their discoveries
+      (key files, patterns, types) here. Orchestrator reads it to avoid re-scanning
+      the whole codebase on every run. Path: .harness/memory/codebase.jsonl
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - fs.append
+      - fs.read
+    memoryRead: []
+    memoryWrite:
+      - codebase-map
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-9 ── Progress Log
+  # Role: memory  |  No model
+  # Append-only journal of every development cycle result.
+  # Enables multi-session continuity without context loss.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Progress Log
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 10
+    description: >
+      Append-only journal at .harness/dev-progress.jsonl. Stores a summary of every
+      completed cycle: what was built, what tests pass, what remains.
+      Orchestrator reads this on startup for instant session context.
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - fs.append
+      - fs.read
+    memoryRead: []
+    memoryWrite:
+      - dev-history
+    tokens:
+      used: 0
+      budget: 16000
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-10 ── Test Gate Hook
+  # Role: hook  |  No model
+  # Pre-delivery gate: runs tsc + vitest + cargo test.
+  # Blocks the delivery pipeline if any check fails.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Test Gate
+    role: hook
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 120
+    description: >
+      Automated verification gate. Runs the full test suite before any output
+      is passed to the Visual Inspector or Critic. Fails fast if tsc or vitest fails.
+      Script: .harness/hooks/test_gate.sh
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - bash
+    preHook:
+      path: .harness/hooks/test_gate.sh
+      requireConsent: false
+    memoryRead:
+      - impl-status
+    memoryWrite:
+      - gate-result
+    tokens:
+      used: 0
+      budget: 0
+    status: idle
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # agent-11 ── Rate Limit Sentinel Hook
+  # Role: hook  |  No model
+  # Monitors for Claude API rate limit signals and marks the session state.
+  # Workers check this flag to decide whether to use the fallback model.
+  # ─────────────────────────────────────────────────────────────────────────────
+  - name: Rate Limit Sentinel
+    role: hook
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 10
+    description: >
+      Pre-execution hook that checks .harness/state/rate_limit.json for active
+      rate limit flags. If Anthropic is rate-limited, sets CLAUDE_RATE_LIMITED=1
+      in the environment so workers automatically use their fallback models.
+      Script: .harness/hooks/rate_limit_sentinel.py
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - fs.read
+      - fs.write
+    preHook:
+      path: .harness/hooks/rate_limit_sentinel.py
+      requireConsent: false
+    memoryRead:
+      - rate-limit-status
+    memoryWrite:
+      - rate-limit-status
+    tokens:
+      used: 0
+      budget: 0
+    status: idle
+
+# ── Connections ─────────────────────────────────────────────────────────────
+connections:
+  # Main pipeline: Orchestrator → Router → Workers → Gate → Inspectors → Doc
+  - { id: c-00, sourceAgentId: agent-0, targetAgentId: agent-1, label: task }
+  - { id: c-01, sourceAgentId: agent-1, targetAgentId: agent-2, label: "ui?",   edgeKind: dataflow }
+  - { id: c-02, sourceAgentId: agent-1, targetAgentId: agent-3, label: "rust?", edgeKind: dataflow }
+  - { id: c-03, sourceAgentId: agent-1, targetAgentId: agent-4, label: "test?", edgeKind: dataflow }
+  - { id: c-04, sourceAgentId: agent-1, targetAgentId: agent-7, label: "doc?",  edgeKind: dataflow }
+
+  # Workers → Test Gate (control — triggers verification, no data passed)
+  - { id: c-05, sourceAgentId: agent-2, targetAgentId: agent-10, edgeKind: control }
+  - { id: c-06, sourceAgentId: agent-3, targetAgentId: agent-10, edgeKind: control }
+  - { id: c-07, sourceAgentId: agent-4, targetAgentId: agent-10, edgeKind: control }
+
+  # Test Gate → Visual Inspector → Code Critic (serial review chain)
+  - { id: c-08, sourceAgentId: agent-10, targetAgentId: agent-5, label: gate-pass }
+  - { id: c-09, sourceAgentId: agent-5,  targetAgentId: agent-6, label: visual-ok }
+
+  # Code Critic → Documentation Worker (final approval)
+  - { id: c-10, sourceAgentId: agent-6, targetAgentId: agent-7, label: approved }
+
+  # Feedback loops (red edges — loop back to workers on REVISE)
+  - { id: c-11, sourceAgentId: agent-5, targetAgentId: agent-2, label: visual-fix, edgeKind: feedback }
+  - { id: c-12, sourceAgentId: agent-6, targetAgentId: agent-2, label: code-fix,   edgeKind: feedback }
+  - { id: c-13, sourceAgentId: agent-6, targetAgentId: agent-3, label: rust-fix,   edgeKind: feedback }
+
+  # Memory writes (purple dashed — persistent storage)
+  - { id: c-14, sourceAgentId: agent-2,  targetAgentId: agent-8, edgeKind: memory }
+  - { id: c-15, sourceAgentId: agent-3,  targetAgentId: agent-8, edgeKind: memory }
+  - { id: c-16, sourceAgentId: agent-7,  targetAgentId: agent-9, edgeKind: memory }
+
+  # Rate Limit Sentinel → Orchestrator (control — checked before each run)
+  - { id: c-17, sourceAgentId: agent-11, targetAgentId: agent-0, edgeKind: control }
+
+executionSettings:
+  maxParallel: 3
+  timeoutSeconds: 3600
+  retryOnFailure: true
+  maxRetries: 1
+
+# ── Node positions (LR layout — left to right) ──────────────────────────────
+nodePositions:
+  agent-0:  { x: 60,   y: 300 }   # Project Orchestrator
+  agent-1:  { x: 380,  y: 300 }   # Task Router
+  agent-2:  { x: 700,  y: 80  }   # Frontend Worker
+  agent-3:  { x: 700,  y: 280 }   # Backend Worker
+  agent-4:  { x: 700,  y: 480 }   # Test Worker
+  agent-5:  { x: 1060, y: 160 }   # Visual Inspector
+  agent-6:  { x: 1060, y: 380 }   # Code Critic
+  agent-7:  { x: 1380, y: 300 }   # Documentation Worker
+  agent-8:  { x: 700,  y: 680 }   # Codebase Memory
+  agent-9:  { x: 1380, y: 560 }   # Progress Log
+  agent-10: { x: 860,  y: 300 }   # Test Gate (hook)
+  agent-11: { x: 60,   y: 560 }   # Rate Limit Sentinel (hook)

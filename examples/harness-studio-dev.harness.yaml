@@ -1,0 +1,389 @@
+# harness-studio-dev.harness.yaml
+# Pattern: Recursive self-improvement — Harness Studio building itself.
+#
+# This workflow represents the current development goal of Harness Studio.
+# It is a meta-workflow: the agents ARE building the tool you are using.
+# Load it and observe the agents — they mirror the actual development process.
+#
+# "Recursive" = the tool describes its own development as a harness workflow.
+#
+# How to use:
+#   1. Load this file (click in sidebar or Ctrl+E → load)
+#   2. The canvas shows the development pipeline for Harness Studio
+#   3. Study how the agents are structured — this is the design pattern
+#      you would follow when building any software project with a harness
+#   4. Modify agent prompts to target your own project goals
+
+meta:
+  name: Harness Studio — Self-Development
+  version: "1.0.0"
+  description: >
+    A recursive workflow: Harness Studio building and improving itself.
+    Architect plans features → Code Searcher understands the codebase →
+    Implementer writes code → Tester runs the test suite →
+    Reviewer audits quality → Documenter updates docs.
+    The Reviewer can loop back to Implementer on failure.
+  projectRoot: ""
+  createdAt: "2026-05-16T00:00:00Z"
+  updatedAt: "2026-05-16T00:00:00Z"
+
+agents:
+  # agent-0 ── Architect (orchestrator)
+  # Plans the next development increment for Harness Studio.
+  # Reads the current PROJECT_STATUS.md and TODO.md to understand what's next.
+  - name: Architect
+    role: orchestrator
+    model: claude-opus-4.6
+    temperature: 0.7
+    maxTokens: 8192
+    maxSteps: 15
+    timeoutSeconds: 300
+    description: >
+      Plans the next development increment. Reads project status and TODO,
+      decomposes the goal into concrete subtasks, delegates to specialists.
+    promptSource:
+      type: file
+      path: docs/PROJECT_STATUS.md
+    tools:
+      - read_file
+      - list_files
+      - todo_write
+      - subagent_dispatch
+    preHook:
+      path: .harness/hooks/pre_run_consent.sh
+      requireConsent: true
+    memoryRead:
+      - current-goal
+      - test-results
+      - review-verdict
+    memoryWrite:
+      - task-plan
+      - architect-context
+    tokens:
+      used: 0
+      budget: 48000
+    status: idle
+
+  # agent-1 ── Code Searcher (worker)
+  # Understands the existing Harness Studio codebase before any change is made.
+  # Finds relevant files, types, patterns, and tests.
+  - name: Code Searcher
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.3
+    maxTokens: 8192
+    maxSteps: 20
+    timeoutSeconds: 180
+    description: >
+      Maps the relevant parts of the Harness Studio codebase for the current task.
+      Finds types, components, stores, hooks, tests. Never writes files.
+    promptSource:
+      type: inline
+      content: |
+        You are the Code Searcher for Harness Studio. Your job: understand the codebase
+        before any changes are made. Given a task from the Architect:
+
+        1. Use list_files to explore src/, tests/, docs/
+        2. Use grep to find relevant symbols, types, and patterns
+        3. Use read_file to read the most relevant files
+        4. Return a structured map:
+           {
+             "relevant_files": [...],
+             "key_types": [...],
+             "existing_patterns": [...],
+             "test_files": [...],
+             "potential_conflicts": [...]
+           }
+
+        RULES:
+        - Never write files. Read only.
+        - Always check tests/ before suggesting implementation changes.
+        - Always check if a similar utility already exists before creating a new one.
+        - Workspace root: D:\toy_project\AI_agent
+    tools:
+      - read_file
+      - list_files
+      - grep
+      - fs.read
+    preHook:
+      path: .harness/hooks/path_scope.py
+      requireConsent: false
+    memoryRead:
+      - task-plan
+    memoryWrite:
+      - codebase-map
+    tokens:
+      used: 0
+      budget: 40000
+    status: idle
+
+  # agent-2 ── Implementer (worker)
+  # Writes code for Harness Studio. Follows the existing patterns found by Code Searcher.
+  # Uses TypeScript + React for frontend, Rust for backend.
+  - name: Implementer
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.3
+    maxTokens: 16384
+    maxSteps: 40
+    timeoutSeconds: 600
+    description: >
+      Writes TypeScript/React code for Harness Studio following existing patterns.
+      Uses Atelier design tokens (CSS vars), Zustand stores, typed Tauri IPC.
+      Never installs new dependencies without explicit Architect approval.
+    promptSource:
+      type: inline
+      content: |
+        You are the Implementer for Harness Studio. Given task plan + codebase map:
+
+        RULES (never violate):
+        1. Use existing design tokens: var(--accent), var(--surface), var(--text), etc.
+        2. Use NodeIcon for icons, never lucide-react directly.
+        3. All Tauri IPC goes through src/ipc/tauriCommands.ts.
+        4. Validate all data through Zod schemas at IPC boundaries.
+        5. State lives in Zustand stores — never useState for workflow data.
+        6. Run npx tsc --noEmit after changes. Fix all type errors.
+        7. No files > 300 lines. Split if needed.
+        8. No hardcoded hex colors — use CSS variables.
+        9. Never delete existing tests without replacing them.
+        10. Atomic writes only (write .tmp then rename) for any file I/O.
+
+        Workspace: D:\toy_project\AI_agent
+        Entry: src/App.tsx, src-tauri/src/lib.rs
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+      - fs.append
+      - list_files
+      - grep
+      - bash
+    preHook:
+      path: .harness/hooks/destructive_guard.sh
+      requireConsent: false
+    memoryRead:
+      - task-plan
+      - codebase-map
+      - review-verdict
+    memoryWrite:
+      - impl-status
+      - changed-files
+    tokens:
+      used: 0
+      budget: 80000
+    status: idle
+
+  # agent-3 ── Tester (critic)
+  # Runs the Harness Studio test suite and verifies TypeScript compilation.
+  # Loops back to Implementer on failure.
+  - name: Tester
+    role: critic
+    model: claude-sonnet-4.6
+    temperature: 0.1
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 300
+    description: >
+      Runs the full Harness Studio verification suite:
+        npx tsc --noEmit (0 errors required)
+        npx vitest run (all tests must pass)
+        cargo test (Rust tests must pass)
+      Returns PASS or FAIL with specific failure details.
+    promptSource:
+      type: inline
+      content: |
+        You are the Tester for Harness Studio. Run the full verification suite:
+
+        1. bash("cd D:\\toy_project\\AI_agent && npx tsc --noEmit")
+           → Must exit 0. Any TypeScript error = FAIL.
+
+        2. bash("cd D:\\toy_project\\AI_agent && npx vitest run")
+           → All tests must pass. Any failure = FAIL.
+
+        3. bash("cd D:\\toy_project\\AI_agent\\src-tauri && cargo test")
+           → All Rust tests must pass. Any failure = FAIL.
+
+        Return:
+        {
+          "verdict": "PASS" | "FAIL",
+          "tsc_errors": [...],
+          "test_failures": [...],
+          "cargo_failures": [...],
+          "summary": "..."
+        }
+
+        On FAIL: include the exact error messages so the Implementer can fix them.
+    tools:
+      - bash
+      - read_file
+    memoryRead:
+      - changed-files
+    memoryWrite:
+      - test-results
+    tokens:
+      used: 0
+      budget: 16000
+    status: idle
+
+  # agent-4 ── Reviewer (critic)
+  # Code quality gate. Reviews the changed files for design violations,
+  # security issues, and architectural drift. Can loop back to Implementer.
+  - name: Reviewer
+    role: critic
+    model: claude-opus-4.6
+    temperature: 0.3
+    maxTokens: 8192
+    maxSteps: 10
+    timeoutSeconds: 240
+    description: >
+      Reviews code quality, design system adherence, security, and architecture.
+      Checks against CLAUDE.md rules and the design system spec.
+      Returns APPROVED, REVISE, or ESCALATE.
+    promptSource:
+      type: inline
+      content: |
+        You are the Reviewer for Harness Studio. Review the changed files:
+
+        Check for:
+        1. DESIGN: Are CSS variables used instead of hex codes? No inline Tailwind where CSS vars work better?
+        2. ARCHITECTURE: Is state in Zustand? Are IPC calls typed? Are components < 300 lines?
+        3. SECURITY: Any API keys in code? Any path traversal risk? Hook execution gated by consent?
+        4. QUALITY: No duplicate logic? No hardcoded strings that should be constants?
+        5. TESTS: Are there tests for the new functionality? Do existing tests still pass?
+
+        Return:
+        {
+          "verdict": "APPROVED" | "REVISE" | "ESCALATE",
+          "issues": [{"file": "...", "line": "...", "severity": "error|warn", "message": "..."}],
+          "summary": "..."
+        }
+
+        ESCALATE means a human must review before proceeding.
+    tools:
+      - read_file
+      - fs.read
+      - grep
+    memoryRead:
+      - changed-files
+      - test-results
+    memoryWrite:
+      - review-verdict
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # agent-5 ── Documenter (worker)
+  # Updates PROJECT_STATUS.md, DEVELOPMENT_LOG.md, and CHANGELOG.md
+  # after a successful implementation cycle.
+  - name: Documenter
+    role: worker
+    model: claude-haiku-4.5
+    temperature: 0.5
+    maxTokens: 4096
+    maxSteps: 8
+    timeoutSeconds: 120
+    description: >
+      Updates all documentation after a successful implementation cycle.
+      Writes to PROJECT_STATUS.md, DEVELOPMENT_LOG.md, and CHANGELOG.md.
+      Keeps AGENT.md in sync with the current project state.
+    promptSource:
+      type: inline
+      content: |
+        You are the Documenter for Harness Studio. After a successful cycle:
+
+        1. Read docs/PROJECT_STATUS.md and update:
+           - Current phase status
+           - Completed items (add checkmarks)
+           - Next steps
+           - Verification results (tsc + vitest counts)
+
+        2. Append an entry to docs/DEVELOPMENT_LOG.md:
+           ## {date} — {task name}
+           ### Files Created/Modified
+           ### Key Decisions
+           ### Test Results
+
+        3. Append to docs/CHANGELOG.md under [Unreleased]:
+           ### Added / Changed / Fixed
+
+        4. If AGENT.md needs updating (new Codex delegation tasks), update it.
+
+        Format: follow the existing style exactly. Do not rewrite sections that don't change.
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+    memoryRead:
+      - task-plan
+      - changed-files
+      - test-results
+      - review-verdict
+    memoryWrite:
+      - docs-updated
+    tokens:
+      used: 0
+      budget: 16000
+    status: idle
+
+  # agent-6 ── Progress Log (memory)
+  # Stores the output of every development cycle.
+  # Enables multi-session continuity — the next run can read what was done.
+  - name: Progress Log
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 10
+    description: >
+      Append-only log of every development cycle result.
+      Written to .harness/dev-progress.jsonl.
+      The Architect reads this on each new session to avoid repeating work.
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - fs.append
+      - fs.read
+    memoryRead: []
+    memoryWrite:
+      - dev-history
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+# ── Connections ─────────────────────────────────────────────────────────────
+connections:
+  # Main pipeline
+  - { id: c-00, sourceAgentId: agent-0, targetAgentId: agent-1, label: task-plan }
+  - { id: c-01, sourceAgentId: agent-1, targetAgentId: agent-2, label: codebase-map }
+  - { id: c-02, sourceAgentId: agent-2, targetAgentId: agent-3, label: impl-complete }
+  - { id: c-03, sourceAgentId: agent-3, targetAgentId: agent-4, label: test-pass }
+  - { id: c-04, sourceAgentId: agent-4, targetAgentId: agent-5, label: approved }
+
+  # Feedback loops
+  - { id: c-05, sourceAgentId: agent-3, targetAgentId: agent-2, label: fix, edgeKind: feedback }
+  - { id: c-06, sourceAgentId: agent-4, targetAgentId: agent-2, label: revise, edgeKind: feedback }
+
+  # Memory writes
+  - { id: c-07, sourceAgentId: agent-2, targetAgentId: agent-6, edgeKind: memory }
+  - { id: c-08, sourceAgentId: agent-3, targetAgentId: agent-6, edgeKind: memory }
+  - { id: c-09, sourceAgentId: agent-4, targetAgentId: agent-6, edgeKind: memory }
+  - { id: c-10, sourceAgentId: agent-5, targetAgentId: agent-6, edgeKind: memory }
+
+executionSettings:
+  maxParallel: 2
+  timeoutSeconds: 3600
+  retryOnFailure: false
+  maxRetries: 1
+
+nodePositions:
+  agent-0: { x: 60,   y: 240 }   # Architect
+  agent-1: { x: 380,  y: 240 }   # Code Searcher
+  agent-2: { x: 700,  y: 240 }   # Implementer
+  agent-3: { x: 1020, y: 120 }   # Tester
+  agent-4: { x: 1020, y: 360 }   # Reviewer
+  agent-5: { x: 1340, y: 240 }   # Documenter
+  agent-6: { x: 700,  y: 500 }   # Progress Log

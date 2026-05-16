@@ -1,0 +1,306 @@
+# parallel-research.harness.yaml
+# Pattern: Parallel fan-out with gateway routing.
+# Coordinator decomposes a query → Router classifies → 3 workers run in parallel
+# → all write to shared Scratchpad memory → Synthesizer merges → Verifier reviews.
+#
+# Load this file: click it in the Harness Studio file tree sidebar.
+# The canvas will populate with 8 nodes and 12 connections.
+
+meta:
+  name: Parallel Research
+  version: "1.0.0"
+  description: >
+    Gateway routes a user query to web, code, or docs workers in parallel.
+    All workers share a memory scratchpad. An aggregator synthesizes the results
+    and a critic verifier checks every claim against its source.
+  projectRoot: ""
+  createdAt: "2026-05-16T00:00:00Z"
+  updatedAt: "2026-05-16T00:00:00Z"
+
+# ── Agents ─────────────────────────────────────────────────────────────────
+# Node IDs are assigned by index: agents[0] → agent-0, agents[1] → agent-1, …
+agents:
+  # agent-0 ── Coordinator (orchestrator)
+  - name: Coordinator
+    role: orchestrator
+    model: claude-opus-4.6
+    temperature: 0.7
+    maxTokens: 4096
+    maxSteps: 20
+    timeoutSeconds: 300
+    description: >
+      Receives the user query, decomposes it into 1–3 sub-questions,
+      and dispatches to the Router. After workers return, hands off to Synthesizer.
+    promptSource:
+      type: inline
+      content: |
+        You are the Coordinator. Your responsibilities:
+        1. Receive the user research query.
+        2. Decompose it into ≤ 3 specific sub-questions.
+        3. Dispatch each sub-question to the Router.
+        4. After all workers have returned results, hand off to the Synthesizer.
+        Always output a JSON array of sub-questions before dispatching.
+    tools:
+      - todo_write
+      - subagent_dispatch
+    preHook:
+      path: .harness/hooks/pre_run_consent.sh
+      requireConsent: true
+    memoryRead: []
+    memoryWrite:
+      - task-plan
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # agent-1 ── Router (gateway)
+  - name: Router
+    role: gateway
+    model: claude-haiku-4.5
+    temperature: 0.3
+    maxTokens: 1024
+    maxSteps: 5
+    timeoutSeconds: 60
+    description: >
+      Classifies each sub-question into web, code, or internal_docs.
+      Routes to the matching worker. If confidence < 0.6, routes to all three.
+    condition: "classify.confidence ≥ 0.6"
+    promptSource:
+      type: inline
+      content: |
+        You are a classifier. Given a research sub-question, output JSON:
+        {"target": "web" | "code" | "docs", "confidence": 0.0-1.0}
+        If confidence < 0.6, set target to "all".
+    tools:
+      - classify
+    memoryRead: []
+    memoryWrite: []
+    tokens:
+      used: 0
+      budget: 8000
+    status: idle
+
+  # agent-2 ── Web Searcher (worker)
+  - name: Web Searcher
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.5
+    maxTokens: 8192
+    maxSteps: 15
+    timeoutSeconds: 120
+    description: >
+      Uses web_search and web_fetch to find current information.
+      Returns a structured brief with citations. No speculation beyond sources.
+    promptSource:
+      type: inline
+      content: |
+        You are a web research worker. Given a sub-question:
+        1. Use web_search to find 3–8 relevant results.
+        2. Use web_fetch on the most promising URLs.
+        3. Return a structured brief: {"summary": "...", "citations": [...]}.
+        Never speculate beyond what your sources say. Mark uncertain claims with [?].
+    tools:
+      - web_search
+      - web_fetch
+      - cite
+    preHook:
+      path: .harness/hooks/url_allowlist.py
+      requireConsent: false
+    memoryRead: []
+    memoryWrite:
+      - web-results
+    tokens:
+      used: 0
+      budget: 40000
+    status: idle
+
+  # agent-3 ── Code Searcher (worker)
+  - name: Code Searcher
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.3
+    maxTokens: 8192
+    maxSteps: 15
+    timeoutSeconds: 120
+    description: >
+      Searches the codebase for relevant implementations, patterns, and definitions.
+      Returns file paths, line ranges, and a short explanation per finding.
+    promptSource:
+      type: inline
+      content: |
+        You are a codebase research worker. Given a sub-question:
+        1. Use grep to search for relevant symbols and patterns.
+        2. Use read_file to read the most relevant sections.
+        3. Return: {"findings": [{"file": "...", "lines": "...", "explanation": "..."}]}.
+        Stay within the workspace. Never write files.
+    tools:
+      - grep
+      - read_file
+      - list_files
+    preHook:
+      path: .harness/hooks/path_scope.py
+      requireConsent: false
+    memoryRead: []
+    memoryWrite:
+      - code-results
+    tokens:
+      used: 0
+      budget: 40000
+    status: idle
+
+  # agent-4 ── Docs Searcher (worker)
+  - name: Docs Searcher
+    role: worker
+    model: claude-haiku-4.5
+    temperature: 0.3
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 90
+    description: >
+      Queries the internal vector store and returns ranked passages.
+      Always includes the source document path.
+    promptSource:
+      type: inline
+      content: |
+        You are an internal documentation worker. Given a sub-question:
+        1. Use vector_search to find the 3 most relevant passages.
+        2. Use read_file to retrieve full context if needed.
+        3. Return: {"passages": [{"content": "...", "source": "..."}]}.
+        Always cite the source document path.
+    tools:
+      - vector_search
+      - read_file
+    memoryRead: []
+    memoryWrite:
+      - docs-results
+    tokens:
+      used: 0
+      budget: 20000
+    status: idle
+
+  # agent-5 ── Scratchpad (memory)
+  - name: Scratchpad
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 30
+    description: >
+      Append-only JSONL shared memory. All workers write their intermediate
+      findings here. Compacted at 80% of budget. Survives context resets.
+    promptSource:
+      type: inline
+      content: ""
+    tools:
+      - fs.append
+      - fs.read
+    memoryRead:
+      - web-results
+      - code-results
+      - docs-results
+    memoryWrite:
+      - scratch
+    tokens:
+      used: 0
+      budget: 16000
+    status: idle
+
+  # agent-6 ── Synthesizer (aggregator)
+  - name: Synthesizer
+    role: aggregator
+    model: claude-opus-4.6
+    temperature: 0.7
+    maxTokens: 8192
+    maxSteps: 10
+    timeoutSeconds: 180
+    description: >
+      Merges the outputs of all three workers into a single coherent brief.
+      Deduplicates citations and flags contradictions explicitly.
+    promptSource:
+      type: inline
+      content: |
+        You are the Synthesizer. Given results from web, code, and docs workers:
+        1. Read all results from the scratchpad.
+        2. Merge into a single structured brief.
+        3. Deduplicate citations. Flag contradictions explicitly — do NOT paper over them.
+        4. Output: {"brief": "...", "citations": [...], "contradictions": [...]}.
+    tools:
+      - fs.read
+    memoryRead:
+      - web-results
+      - code-results
+      - docs-results
+      - scratch
+    memoryWrite:
+      - synthesis
+    tokens:
+      used: 0
+      budget: 48000
+    status: idle
+
+  # agent-7 ── Verifier (critic)
+  - name: Verifier
+    role: critic
+    model: claude-opus-4.6
+    temperature: 0.3
+    maxTokens: 4096
+    maxSteps: 8
+    timeoutSeconds: 120
+    description: >
+      Reviews the synthesized brief. Checks every claim against its citation.
+      Returns PASS or REVISE with line-level feedback. Max 2 revision loops.
+    promptSource:
+      type: inline
+      content: |
+        You are the Verifier. Review the synthesized brief:
+        1. Check every factual claim against its cited source (use web_fetch if needed).
+        2. Return either:
+           {"verdict": "PASS", "feedback": null}
+           {"verdict": "REVISE", "feedback": [{"claim": "...", "issue": "..."}]}
+        Maximum 2 revision loops. After that, always return PASS with caveats.
+    tools:
+      - fs.read
+      - web_fetch
+    memoryRead:
+      - synthesis
+    memoryWrite:
+      - verdict
+    tokens:
+      used: 0
+      budget: 24000
+    status: idle
+
+# ── Connections ─────────────────────────────────────────────────────────────
+connections:
+  - { id: c-00, sourceAgentId: agent-0, targetAgentId: agent-1, label: sub-questions }
+  - { id: c-01, sourceAgentId: agent-1, targetAgentId: agent-2, label: "web?",  edgeKind: dataflow }
+  - { id: c-02, sourceAgentId: agent-1, targetAgentId: agent-3, label: "code?", edgeKind: dataflow }
+  - { id: c-03, sourceAgentId: agent-1, targetAgentId: agent-4, label: "docs?", edgeKind: dataflow }
+  - { id: c-04, sourceAgentId: agent-2, targetAgentId: agent-5, edgeKind: memory }
+  - { id: c-05, sourceAgentId: agent-3, targetAgentId: agent-5, edgeKind: memory }
+  - { id: c-06, sourceAgentId: agent-4, targetAgentId: agent-5, edgeKind: memory }
+  - { id: c-07, sourceAgentId: agent-2, targetAgentId: agent-6, label: brief }
+  - { id: c-08, sourceAgentId: agent-3, targetAgentId: agent-6, label: findings }
+  - { id: c-09, sourceAgentId: agent-4, targetAgentId: agent-6, label: passages }
+  - { id: c-10, sourceAgentId: agent-6, targetAgentId: agent-7, label: synthesis }
+  - { id: c-11, sourceAgentId: agent-7, targetAgentId: agent-6, label: revise, edgeKind: feedback }
+
+# ── Execution settings ───────────────────────────────────────────────────────
+executionSettings:
+  maxParallel: 4
+  timeoutSeconds: 600
+  retryOnFailure: false
+  maxRetries: 0
+
+# ── Node positions (LR layout) ───────────────────────────────────────────────
+nodePositions:
+  agent-0: { x: 60,   y: 220 }   # Coordinator
+  agent-1: { x: 380,  y: 220 }   # Router
+  agent-2: { x: 680,  y: 50  }   # Web Searcher
+  agent-3: { x: 680,  y: 220 }   # Code Searcher
+  agent-4: { x: 680,  y: 390 }   # Docs Searcher
+  agent-5: { x: 680,  y: 560 }   # Scratchpad
+  agent-6: { x: 1000, y: 220 }   # Synthesizer
+  agent-7: { x: 1300, y: 220 }   # Verifier

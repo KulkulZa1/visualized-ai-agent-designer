@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Harness Studio — three layouts</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<style>
+  html, body, #root { height: 100%; margin: 0; background: #f0eee9; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  /* Prevent atelier/forge/observatory from leaking outside their artboards */
+  .dc-artboard, .dc-artboard * { box-sizing: border-box; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="workflows.jsx"></script>
+<script type="text/babel" src="shared.jsx"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="atelier.jsx"></script>
+<script type="text/babel" src="forge.jsx"></script>
+<script type="text/babel" src="observatory.jsx"></script>
+<script type="text/babel" src="expansions.jsx"></script>
+
+<script type="text/babel" data-presets="env,react">
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "workflow": "critic",
+  "density": "compact"
+}/*EDITMODE-END*/;
+
+function App() {
+  const [t, setTweak] = useTweaks(TWEAKS);
+  const workflow = window.WORKFLOWS[t.workflow] || window.WORKFLOWS.fanout;
+
+  return (
+    <>
+      <DesignCanvas
+        title="Harness Studio"
+        subtitle="Three layout explorations for an AI agent harness engineering UI"
+      >
+        <DCSection
+          id="layouts"
+          title="Three takes on the same harness"
+          subtitle="Same data model, same workflow — three different design philosophies"
+        >
+          <DCArtboard id="atelier" label="A · Atelier — refined dark, Linear / Zed lineage"
+            width={1480} height={920}>
+            <AtelierApp workflow={workflow} density={t.density}/>
+          </DCArtboard>
+
+          <DCArtboard id="forge" label="B · Forge — terminal-native, blueprint chrome"
+            width={1480} height={920}>
+            <ForgeApp workflow={workflow}/>
+          </DCArtboard>
+
+          <DCArtboard id="observatory" label="C · Observatory — telemetry-first, live trajectory"
+            width={1480} height={920}>
+            <ObservatoryApp workflow={workflow}/>
+          </DCArtboard>
+        </DCSection>
+
+        <DCSection
+          id="expansions"
+          title="Expansion surfaces"
+          subtitle="Five additional screens that round out the harness — palette, preflight, replay, evals, predictions"
+        >
+          <DCArtboard id="palette" label="1 · ⌘K command palette" width={920} height={560}>
+            <PaletteScreen/>
+          </DCArtboard>
+
+          <DCArtboard id="preflight" label="2 · Run preflight — cost, consent, dry-run" width={720} height={820}>
+            <RunPreflight/>
+          </DCArtboard>
+
+          <DCArtboard id="replay" label="3 · Trajectory replay — step-by-step inspector" width={1480} height={820}>
+            <TrajectoryReplay/>
+          </DCArtboard>
+
+          <DCArtboard id="evals" label="4 · Eval harness — regression matrix" width={1480} height={820}>
+            <EvalHarness/>
+          </DCArtboard>
+
+          <DCArtboard id="predictions" label="5 · Prediction ledger — hypothesis → outcome" width={920} height={820}>
+            <PredictionLedger/>
+          </DCArtboard>
+        </DCSection>
+      </DesignCanvas>
+
+      <TweaksPanel title="Tweaks">
+        <TweakSection label="Sample workflow">
+          <TweakSelect
+            label="Pattern"
+            value={t.workflow}
+            onChange={v => setTweak('workflow', v)}
+            options={[
+              { value: 'fanout',   label: 'Parallel fan-out / fan-in' },
+              { value: 'pipeline', label: 'Sequential pipeline' },
+              { value: 'critic',   label: 'Orchestrator + critic loop' },
+            ]}
+          />
+        </TweakSection>
+        <TweakSection label="Atelier density">
+          <TweakRadio
+            label="Density"
+            value={t.density}
+            onChange={v => setTweak('density', v)}
+            options={[
+              { value: 'compact', label: 'Compact' },
+              { value: 'regular', label: 'Regular' },
+            ]}
+          />
+        </TweakSection>
+      </TweaksPanel>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

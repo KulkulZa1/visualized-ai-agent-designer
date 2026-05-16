@@ -1,0 +1,197 @@
+meta:
+  name: Self-Critic Loop
+  version: 1.0.0
+  description: |
+    A bounded reflection loop. The Drafter produces a draft, the Critic reviews it, and the Loop Gate decides whether to ship, revise, or escalate. An iter_counter Hook prevents runaway loops (max 3 iterations). The Revision Log Memory node stores every draft and critique for context recovery.
+  projectRoot: ''
+  createdAt: 2026-05-16T00:00:00Z
+  updatedAt: 2026-05-16T18:23:56.212Z
+agents:
+- description: |
+    Produces a first draft without self-editing. Marks uncertain claims with [?]. Stops at ≤ 1200 words. On revision, reads the Critic's feedback before writing.
+  maxSteps: 10
+  maxTokens: 4096
+  memoryRead:
+  - critique
+  - current-iter
+  memoryWrite:
+  - current-draft
+  model: google/gemma-4-31b-it:free
+  name: Drafter
+  promptSource:
+    content: |
+      You are the Drafter. Your only job is to write a first draft.
+      Rules:
+      - Do NOT self-edit. Write your honest first attempt.
+      - Mark uncertain claims with [?].
+      - Stop at ≤ 1200 words.
+      - If you have received critic feedback (from memory key "critique"),
+        incorporate it in your next draft but note what you changed.
+      Save your draft to .harness/drafts/draft-{iter}.md and return the path.
+    type: inline
+  role: worker
+  status: done
+  temperature: 0.9
+  timeoutSeconds: 120
+  tokens:
+    budget: 32000
+    used: 0
+  tools:
+  - fs.write
+  - fs.read
+- description: |
+    Critiques the draft along three axes: accuracy, structure, tone. Returns line-level feedback. Vague feedback is worse than no feedback.
+  maxSteps: 5
+  maxTokens: 4096
+  memoryRead:
+  - current-draft
+  memoryWrite:
+  - critique
+  model: google/gemma-4-31b-it:free
+  name: Critic
+  promptSource:
+    content: |
+      You are the Critic. Review the current draft (read from memory key "current-draft"):
+      Evaluate on three axes:
+      1. Accuracy — are all factual claims correct?
+      2. Structure — is the argument logical and well-organized?
+      3. Tone — is the writing appropriate for the audience?
+      Return:
+      {
+        "issues": [{"line": "...", "axis": "accuracy|structure|tone", "feedback": "..."}],
+        "overall": "PASS" | "REVISE" | "ESCALATE"
+      }
+      Be specific. Vague feedback ("this could be better") is not helpful.
+    type: inline
+  role: critic
+  status: done
+  temperature: 0.3
+  timeoutSeconds: 90
+  tokens:
+    budget: 32000
+    used: 0
+  tools:
+  - fs.read
+- condition: issues.length > 0 ∧ iter < 3
+  description: |
+    Reads the critic's verdict and the current iteration count. Routes to: revise (back to Drafter), ship (to output), or escalate.
+  maxSteps: 3
+  maxTokens: 512
+  memoryRead:
+  - critique
+  - current-iter
+  memoryWrite: []
+  model: google/gemma-4-31b-it:free
+  name: Loop Gate
+  promptSource:
+    content: |
+      You are the Loop Gate. Read "critique" and "current-iter" from memory.
+      Decision logic:
+      - If critique.overall == "PASS": route to "ship"
+      - If critique.overall == "ESCALATE": route to "escalate"
+      - If critique.overall == "REVISE" and iter < 3: route to "revise"
+      - If critique.overall == "REVISE" and iter >= 3: route to "ship" (with caveat)
+      Output: {"route": "ship" | "revise" | "escalate"}
+    type: inline
+  role: gateway
+  status: done
+  temperature: 0.1
+  timeoutSeconds: 30
+  tokens:
+    budget: 32000
+    used: 0
+  tools: []
+- description: |
+    Pre-loop hook. Increments the iteration counter in .harness/state/iter.txt. Blocks execution if iterations exceed 3 to prevent runaway cost. This node runs via the control edge from Loop Gate.
+  maxSteps: 1
+  maxTokens: 0
+  memoryRead:
+  - current-iter
+  memoryWrite:
+  - current-iter
+  model: google/gemma-4-26b-a4b-it:free
+  name: iter_counter
+  preHook:
+    path: .harness/hooks/iter_counter.py
+    requireConsent: false
+  promptSource:
+    content: ''
+    type: inline
+  role: hook
+  status: done
+  temperature: 0
+  timeoutSeconds: 10
+  tokens:
+    budget: 0
+    used: 0
+  tools:
+  - fs.read
+  - fs.write
+- description: |
+    Append-only storage for every draft and critique pair. Written to .harness/revisions/{iter}.md. Survives context resets. Both Drafter and Critic write here after each iteration.
+  maxSteps: 1
+  maxTokens: 0
+  memoryRead: []
+  memoryWrite:
+  - revision-log
+  model: google/gemma-4-31b-it:free
+  name: Revision Log
+  promptSource:
+    content: ''
+    type: inline
+  role: memory
+  status: done
+  temperature: 0
+  timeoutSeconds: 10
+  tokens:
+    budget: 16000
+    used: 0
+  tools:
+  - fs.append
+connections:
+- id: c-00
+  label: draft
+  sourceAgentId: agent-0
+  targetAgentId: agent-1
+- id: c-01
+  label: verdict
+  sourceAgentId: agent-1
+  targetAgentId: agent-2
+- edgeKind: feedback
+  id: c-02
+  label: revise
+  sourceAgentId: agent-2
+  targetAgentId: agent-0
+- edgeKind: control
+  id: c-03
+  sourceAgentId: agent-2
+  targetAgentId: agent-3
+- edgeKind: memory
+  id: c-04
+  sourceAgentId: agent-0
+  targetAgentId: agent-4
+- edgeKind: memory
+  id: c-05
+  sourceAgentId: agent-1
+  targetAgentId: agent-4
+executionSettings:
+  maxParallel: 1
+  timeoutSeconds: 600
+  retryOnFailure: false
+  maxRetries: 0
+nodePositions:
+  agent-4:
+    x: 180.0
+    y: 490.0
+  agent-2:
+    x: 940.0
+    y: 220.0
+  agent-0:
+    x: 180.0
+    y: 220.0
+  agent-1:
+    x: 560.0
+    y: 220.0
+  agent-3:
+    x: 560.0
+    y: 490.0

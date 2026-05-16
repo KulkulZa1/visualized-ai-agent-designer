@@ -1,0 +1,216 @@
+# spec-to-pr.harness.yaml
+# Pattern: Sequential pipeline — spec → plan → implement → verify → report.
+# Each stage feeds the next. The Verifier can loop back to the Implementer.
+#
+# Load this file: click it in the Harness Studio file tree sidebar.
+# The canvas will populate with 5 nodes in a linear chain.
+
+meta:
+  name: Spec to PR
+  version: "1.0.0"
+  description: >
+    A sequential pipeline that takes a feature request from specification
+    through planning, implementation, verification, and PR description.
+    The Verifier gates completion — it loops back to Implementer on failure.
+  projectRoot: ""
+  createdAt: "2026-05-16T00:00:00Z"
+  updatedAt: "2026-05-16T00:00:00Z"
+
+agents:
+  # agent-0 ── Spec Writer (orchestrator)
+  - name: Spec Writer
+    role: orchestrator
+    model: claude-opus-4.6
+    temperature: 0.7
+    maxTokens: 8192
+    maxSteps: 10
+    timeoutSeconds: 180
+    description: >
+      Expands the user's feature request into a comprehensive spec.
+      Enumerates ≥ 10 testable requirements. Each starts as FAIL.
+    promptSource:
+      type: inline
+      content: |
+        You are the Spec Writer. Given a feature request:
+        1. Write a comprehensive specification with ≥ 10 testable requirements.
+        2. Format each requirement as: "REQ-N: [description] — Status: FAIL".
+        3. Save the spec to .harness/spec.md using fs.write.
+        4. Return the path to the spec file.
+    tools:
+      - todo_write
+      - fs.write
+    preHook:
+      path: .harness/hooks/pre_run_consent.sh
+      requireConsent: true
+    memoryRead: []
+    memoryWrite:
+      - spec-path
+    tokens:
+      used: 0
+      budget: 24000
+    status: idle
+
+  # agent-1 ── Planner (worker)
+  - name: Planner
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.5
+    maxTokens: 4096
+    maxSteps: 15
+    timeoutSeconds: 120
+    description: >
+      Reads the spec and produces a depth-first task list.
+      Each task touches ≤ 2 files. Stops and asks on first ambiguity.
+    promptSource:
+      type: inline
+      content: |
+        You are the Planner. Read the spec from .harness/spec.md:
+        1. Produce a depth-first task list. Each task must touch ≤ 2 files.
+        2. Write the task list to .harness/tasks.md.
+        3. If anything is ambiguous, stop and output: {"status": "needs_clarification", "question": "..."}.
+        4. Otherwise output: {"status": "ready", "task_count": N}.
+    tools:
+      - read_file
+      - todo_write
+      - fs.write
+    memoryRead:
+      - spec-path
+    memoryWrite:
+      - task-list-path
+    tokens:
+      used: 0
+      budget: 24000
+    status: idle
+
+  # agent-2 ── Implementer (worker)
+  - name: Implementer
+    role: worker
+    model: claude-sonnet-4.6
+    temperature: 0.3
+    maxTokens: 16384
+    maxSteps: 40
+    timeoutSeconds: 600
+    description: >
+      Executes tasks one at a time. Runs tests after each change.
+      Never marks a task complete without a green test run.
+    promptSource:
+      type: inline
+      content: |
+        You are the Implementer. Work through .harness/tasks.md one task at a time:
+        1. Read the next PENDING task.
+        2. Implement the change (edit files using fs.write).
+        3. Run tests: bash("npm test" or "cargo test").
+        4. Only mark the task DONE if tests are green.
+        5. If a test is red after 2 attempts, mark the task BLOCKED and stop.
+    tools:
+      - read_file
+      - fs.write
+      - fs.read
+      - list_files
+      - bash
+      - test
+    preHook:
+      path: .harness/hooks/destructive_guard.sh
+      requireConsent: false
+    postHook:
+      path: .harness/hooks/test_gate.sh
+      requireConsent: false
+    memoryRead:
+      - task-list-path
+    memoryWrite:
+      - impl-status
+    tokens:
+      used: 0
+      budget: 60000
+    status: idle
+
+  # agent-3 ── Verifier (critic)
+  - name: Verifier
+    role: critic
+    model: claude-opus-4.6
+    temperature: 0.2
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 300
+    description: >
+      Runs the full test suite, linter, and type-checker.
+      Also runs end-to-end tests via Puppeteer. Blocks on any red.
+    promptSource:
+      type: inline
+      content: |
+        You are the Verifier. Run the full quality gate:
+        1. bash("npm run lint") — must exit 0.
+        2. bash("npm run typecheck") — must exit 0.
+        3. bash("npm test") — all tests must be green.
+        4. puppeteer("run e2e suite") — all e2e tests must pass.
+        If all pass: {"verdict": "PASS"}.
+        If any fail: {"verdict": "REVISE", "failures": [...log lines...]}.
+    tools:
+      - bash
+      - puppeteer
+      - read_file
+    memoryRead:
+      - impl-status
+    memoryWrite:
+      - verify-verdict
+    tokens:
+      used: 0
+      budget: 32000
+    status: idle
+
+  # agent-4 ── Reporter (aggregator)
+  - name: Reporter
+    role: aggregator
+    model: claude-haiku-4.5
+    temperature: 0.7
+    maxTokens: 4096
+    maxSteps: 5
+    timeoutSeconds: 60
+    description: >
+      Summarizes the diff, test results, and any caveats.
+      Produces a PR description in the team template format.
+    promptSource:
+      type: inline
+      content: |
+        You are the Reporter. Produce a pull-request description:
+        1. Read the git diff: git("diff main..HEAD").
+        2. Read the test results from memory.
+        3. Write a PR description to .harness/pr-description.md matching this template:
+           ## Summary
+           ## Changes
+           ## Test results
+           ## Caveats
+        4. Output the path to the PR description file.
+    tools:
+      - git
+      - fs.read
+      - fs.write
+    memoryRead:
+      - verify-verdict
+      - impl-status
+    memoryWrite:
+      - pr-path
+    tokens:
+      used: 0
+      budget: 8000
+    status: idle
+
+connections:
+  - { id: c-00, sourceAgentId: agent-0, targetAgentId: agent-1 }
+  - { id: c-01, sourceAgentId: agent-1, targetAgentId: agent-2 }
+  - { id: c-02, sourceAgentId: agent-2, targetAgentId: agent-3 }
+  - { id: c-03, sourceAgentId: agent-3, targetAgentId: agent-2, label: revise, edgeKind: feedback }
+  - { id: c-04, sourceAgentId: agent-3, targetAgentId: agent-4 }
+
+executionSettings:
+  maxParallel: 1
+  timeoutSeconds: 1800
+  retryOnFailure: false
+  maxRetries: 0
+
+nodePositions:
+  agent-0: { x: 60,   y: 220 }   # Spec Writer
+  agent-1: { x: 360,  y: 220 }   # Planner
+  agent-2: { x: 660,  y: 220 }   # Implementer
+  agent-3: { x: 960,  y: 220 }   # Verifier
+  agent-4: { x: 1260, y: 220 }   # Reporter

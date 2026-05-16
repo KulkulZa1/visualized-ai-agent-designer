@@ -1,0 +1,233 @@
+import { create } from "zustand";
+import { immer } from "zustand/middleware/immer";
+import { temporal } from "zundo";
+import { addEdge, applyNodeChanges, applyEdgeChanges } from "@xyflow/react";
+import type { NodeChange, EdgeChange, Connection } from "@xyflow/react";
+import type { AgentNode, WorkflowDef, WorkflowMeta, ExecutionSettings } from "@/types/workflow";
+import type { Edge } from "@xyflow/react";
+import { AgentRole, ToolPermission } from "@/types/agent";
+
+const DEFAULT_META: WorkflowMeta = {
+  name: "Untitled Workflow",
+  version: "1.0.0",
+  description: "",
+  projectRoot: "",
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+};
+
+const DEFAULT_SETTINGS: ExecutionSettings = {
+  maxParallel: 4,
+  timeoutSeconds: 300,
+  retryOnFailure: false,
+  maxRetries: 0,
+};
+
+interface WorkflowStoreState {
+  nodes: AgentNode[];
+  edges: Edge[];
+  meta: WorkflowMeta;
+  executionSettings: ExecutionSettings;
+  isDirty: boolean;
+  filePath: string | null;
+}
+
+interface WorkflowStoreActions {
+  onNodesChange: (changes: NodeChange<AgentNode>[]) => void;
+  onEdgesChange: (changes: EdgeChange[]) => void;
+  onConnect: (connection: Connection) => void;
+  addNode: (node: AgentNode) => void;
+  removeNode: (nodeId: string) => void;
+  updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
+  updateMeta: (meta: Partial<WorkflowMeta>) => void;
+  updateExecutionSettings: (settings: Partial<ExecutionSettings>) => void;
+  loadWorkflow: (def: WorkflowDef) => void;
+  markClean: (filePath: string) => void;
+  reset: () => void;
+  toWorkflowDef: () => WorkflowDef;
+}
+
+const initialState: WorkflowStoreState = {
+  nodes: [],
+  edges: [],
+  meta: DEFAULT_META,
+  executionSettings: DEFAULT_SETTINGS,
+  isDirty: false,
+  filePath: null,
+};
+
+export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions>()(
+  temporal(
+    immer((set, get) => ({
+      ...initialState,
+
+      onNodesChange: (changes) =>
+        set((state) => {
+          state.nodes = applyNodeChanges(changes, state.nodes) as AgentNode[];
+          state.isDirty = true;
+        }),
+
+      onEdgesChange: (changes) =>
+        set((state) => {
+          state.edges = applyEdgeChanges(changes, state.edges);
+          state.isDirty = true;
+        }),
+
+      onConnect: (connection) =>
+        set((state) => {
+          state.edges = addEdge({ ...connection, type: "dataflow" }, state.edges);
+          state.isDirty = true;
+        }),
+
+      addNode: (node) =>
+        set((state) => {
+          state.nodes.push(node);
+          state.isDirty = true;
+        }),
+
+      removeNode: (nodeId) =>
+        set((state) => {
+          state.nodes = state.nodes.filter((n) => n.id !== nodeId);
+          state.edges = state.edges.filter(
+            (e) => e.source !== nodeId && e.target !== nodeId
+          );
+          state.isDirty = true;
+        }),
+
+      updateNodeData: (nodeId, data) =>
+        set((state) => {
+          const node = state.nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          Object.assign(node.data, data);
+          state.isDirty = true;
+        }),
+
+      updateMeta: (meta) =>
+        set((state) => {
+          Object.assign(state.meta, meta);
+          state.isDirty = true;
+        }),
+
+      updateExecutionSettings: (settings) =>
+        set((state) => {
+          Object.assign(state.executionSettings, settings);
+          state.isDirty = true;
+        }),
+
+      loadWorkflow: (def) =>
+        set((state) => {
+          state.meta = def.meta;
+          state.executionSettings = def.executionSettings;
+          state.edges = def.connections.map((c) => ({
+            id: c.id,
+            source: c.sourceAgentId,
+            target: c.targetAgentId,
+            label: c.label,
+            type: c.edgeKind ?? "dataflow",
+          }));
+          state.nodes = def.agents.map((agent, i) => {
+            const pos = def.nodePositions[`agent-${i}`] ?? { x: i * 240, y: 120 };
+            return { id: `agent-${i}`, type: "agent", position: pos, data: agent } satisfies AgentNode;
+          });
+          state.isDirty = false;
+          state.filePath = null;
+        }),
+
+      markClean: (filePath) =>
+        set((state) => {
+          state.isDirty = false;
+          state.filePath = filePath;
+          state.meta.updatedAt = new Date().toISOString();
+        }),
+
+      reset: () =>
+        set(() => ({
+          ...initialState,
+          meta: { ...DEFAULT_META, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+        })),
+
+      toWorkflowDef: () => {
+        const { nodes, edges, meta, executionSettings } = get();
+        return {
+          meta,
+          agents: nodes.map((n) => n.data),
+          connections: edges.map((e) => ({
+            id: e.id,
+            sourceAgentId: e.source,
+            targetAgentId: e.target,
+            label: typeof e.label === "string" ? e.label : undefined,
+            edgeKind: e.type !== "dataflow" ? (e.type as "memory" | "feedback" | "control") : undefined,
+          })),
+          executionSettings,
+          nodePositions: Object.fromEntries(nodes.map((n) => [n.id, n.position])),
+        };
+      },
+    })),
+    {
+      limit: 50,
+      partialize: (state) => ({ nodes: state.nodes, edges: state.edges }),
+    }
+  )
+);
+
+let _nodeCounter = 0;
+
+export function makeDefaultAgentNode(
+  id: string,
+  role: AgentRole,
+  position: { x: number; y: number }
+): AgentNode {
+  const defaultTools: Partial<Record<AgentRole, ToolPermission[]>> = {
+    [AgentRole.Worker]:     [ToolPermission.ReadFile, ToolPermission.FsRead],
+    [AgentRole.ToolCaller]: [ToolPermission.ReadFile, ToolPermission.Bash, ToolPermission.WebSearch],
+    [AgentRole.Hook]:       [ToolPermission.FsRead, ToolPermission.WriteFile],
+    [AgentRole.Memory]:     [ToolPermission.FsAppend, ToolPermission.FsRead],
+  };
+
+  const defaultBudgets: Partial<Record<AgentRole, number>> = {
+    [AgentRole.Orchestrator]: 32000,
+    [AgentRole.Worker]:       40000,
+    [AgentRole.Critic]:       24000,
+    [AgentRole.Aggregator]:   48000,
+    [AgentRole.Memory]:       16000,
+    [AgentRole.Gateway]:       8000,
+    [AgentRole.Hook]:             0,
+    [AgentRole.ToolCaller]:   20000,
+  };
+
+  const labelMap: Record<AgentRole, string> = {
+    [AgentRole.Orchestrator]: "Orchestrator",
+    [AgentRole.Gateway]:      "Router",
+    [AgentRole.Worker]:       "Worker",
+    [AgentRole.Critic]:       "Critic",
+    [AgentRole.Memory]:       "Memory",
+    [AgentRole.Hook]:         "Hook",
+    [AgentRole.Aggregator]:   "Aggregator",
+    [AgentRole.ToolCaller]:   "Tool Caller",
+  };
+
+  return {
+    id,
+    type: "agent",
+    position,
+    data: {
+      name: labelMap[role],
+      role,
+      model: role === AgentRole.Hook || role === AgentRole.Memory ? "" : "claude-sonnet-4.6",
+      temperature: 0.7,
+      maxTokens: 4096,
+      maxSteps: 20,
+      timeoutSeconds: 300,
+      promptSource: { type: "inline", content: "" },
+      tools: defaultTools[role] ?? [],
+      memoryRead: [],
+      memoryWrite: [],
+      tokens: { used: 0, budget: defaultBudgets[role] ?? 16000 },
+      status: "idle",
+    },
+  };
+}
+
+export function nextNodeId(): string {
+  return `node-${Date.now()}-${++_nodeCounter}`;
+}
