@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { getSmoothStepPath, EdgeLabelRenderer, BaseEdge } from "@xyflow/react";
 import type { EdgeProps } from "@xyflow/react";
+import { useWorkflowStore } from "@/store/workflowStore";
 
 const EDGE_STYLES = {
   dataflow: { stroke: "rgba(255,255,255,0.28)", strokeWidth: 1.25, dash: "" },
@@ -22,8 +24,17 @@ export function DataFlowEdge({
     borderRadius: 12,
   });
 
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState((label as string) ?? "");
+  const updateEdgeLabel = useWorkflowStore((s) => s.updateEdgeLabel);
+
   const strokeColor = selected ? "#e5a142" : s.stroke;
   const markerId = `arr-${edgeType}${selected ? "-sel" : ""}`;
+
+  function commitEdit() {
+    updateEdgeLabel(id, draft);
+    setEditing(false);
+  }
 
   return (
     <>
@@ -37,27 +48,48 @@ export function DataFlowEdge({
           markerEnd: `url(#${markerId})`,
         }}
       />
-      {label && (
-        <EdgeLabelRenderer>
-          <div
-            style={{
-              transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
-              position: "absolute",
-              pointerEvents: "all",
-              fontSize: 10,
-              background: "#0e0f13",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 3,
-              padding: "2px 6px",
-              color: "#9097a3",
-              fontFamily: '"JetBrains Mono", ui-monospace, monospace',
-              whiteSpace: "nowrap",
-            }}
-          >
-            {label as string}
-          </div>
-        </EdgeLabelRenderer>
-      )}
+      <EdgeLabelRenderer>
+        <div
+          style={{
+            transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
+            position: "absolute",
+            pointerEvents: "all",
+          }}
+        >
+          {editing ? (
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commitEdit}
+              onKeyDown={(e) => { if (e.key === "Enter") commitEdit(); if (e.key === "Escape") setEditing(false); }}
+              style={{
+                width: 100, fontSize: 10,
+                border: "1px solid var(--accent)", borderRadius: 3,
+                padding: "2px 4px", background: "var(--surface-2)",
+                color: "var(--text)", fontFamily: "inherit",
+              }}
+            />
+          ) : (label || selected) ? (
+            <div
+              onDoubleClick={() => { setDraft((label as string) ?? ""); setEditing(true); }}
+              style={{
+                fontSize: 10,
+                background: "#0e0f13",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 3,
+                padding: "2px 6px",
+                color: "#9097a3",
+                fontFamily: '"JetBrains Mono", ui-monospace, monospace',
+                whiteSpace: "nowrap",
+                cursor: "text",
+              }}
+            >
+              {(label as string) || "(no label)"}
+            </div>
+          ) : null}
+        </div>
+      </EdgeLabelRenderer>
     </>
   );
 }

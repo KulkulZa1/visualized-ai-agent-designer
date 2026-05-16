@@ -40,6 +40,7 @@ interface WorkflowStoreActions {
   removeNode: (nodeId: string) => void;
   duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
+  updateEdgeLabel: (edgeId: string, label: string) => void;
   updateMeta: (meta: Partial<WorkflowMeta>) => void;
   updateExecutionSettings: (settings: Partial<ExecutionSettings>) => void;
   loadWorkflow: (def: WorkflowDef) => void;
@@ -122,6 +123,12 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           if (!node) return;
           Object.assign(node.data, data);
           state.isDirty = true;
+        }),
+
+      updateEdgeLabel: (edgeId, label) =>
+        set((state) => {
+          const edge = state.edges.find((e) => e.id === edgeId);
+          if (edge) { edge.label = label; state.isDirty = true; }
         }),
 
       updateMeta: (meta) =>

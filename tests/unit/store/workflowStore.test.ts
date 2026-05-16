@@ -78,6 +78,29 @@ describe("workflowStore", () => {
     expect(def.nodePositions["n1"]).toEqual({ x: 10, y: 20 });
   });
 
+  describe("updateEdgeLabel", () => {
+    it("updates label of an existing edge and sets isDirty", () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("n1", AgentRole.Orchestrator, { x: 0, y: 0 }));
+      store.addNode(makeDefaultAgentNode("n2", AgentRole.Worker, { x: 200, y: 0 }));
+      store.onConnect({ source: "n1", target: "n2", sourceHandle: null, targetHandle: null });
+      store.markClean("/test/workflow.yaml");
+
+      const edgeId = useWorkflowStore.getState().edges[0].id;
+      useWorkflowStore.getState().updateEdgeLabel(edgeId, "my-label");
+
+      const { edges, isDirty } = useWorkflowStore.getState();
+      expect(edges[0].label).toBe("my-label");
+      expect(isDirty).toBe(true);
+    });
+
+    it("is a no-op when edge id does not exist", () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
+      expect(() => store.updateEdgeLabel("nonexistent", "label")).not.toThrow();
+    });
+  });
+
   describe("duplicateNode", () => {
     it("creates a new node with offset position and (copy) name", () => {
       const store = useWorkflowStore.getState();

@@ -15,6 +15,7 @@ interface TopBarProps {
   onRun: () => void;
   onOpenSettings: () => void;
   onOpenHelp?: () => void;
+  onOpenMetaEditor?: () => void;
 }
 
 const Sep = () => (
@@ -47,7 +48,7 @@ const Btn = ({ children, primary, small, onClick, title, style: s = {} }: {
   }}>{children}</button>
 );
 
-export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPermissions, onRun, onOpenSettings, onOpenHelp }: TopBarProps) {
+export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPermissions, onRun, onOpenSettings, onOpenHelp, onOpenMetaEditor }: TopBarProps) {
   const meta      = useWorkflowStore((s) => s.meta);
   const isDirty   = useWorkflowStore((s) => s.isDirty);
   const filePath  = useWorkflowStore((s) => s.filePath);
@@ -110,8 +111,15 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
       <span style={{ color: "var(--hint)", fontSize: 12 }}>/</span>
       <span style={{ fontSize: 12 }}>{workspaceName}</span>
       <span style={{ color: "var(--hint)", fontSize: 12 }}>/</span>
-      <span style={{ fontSize: 12, fontWeight: 500, maxWidth: 200,
-        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <span
+        onClick={onOpenMetaEditor}
+        title="Edit workflow metadata"
+        style={{
+          fontSize: 12, fontWeight: 500, maxWidth: 200,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          cursor: onOpenMetaEditor ? "pointer" : "default",
+        }}
+      >
         {relPath ?? meta.name}
       </span>
       {isDirty && <span style={{ fontSize: 10, color: "var(--accent)" }}>● unsaved</span>}

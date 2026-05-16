@@ -2,6 +2,7 @@ import { useExecutionStore } from "@/store/executionStore";
 import { useUIStore } from "@/store/uiStore";
 import type { AgentStatus } from "@/types/execution";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
+import { ExecutionTimeline } from "./ExecutionTimeline";
 
 interface RunPanelProps {
   onClose: () => void;
@@ -211,6 +212,11 @@ export function RunPanel({ onClose }: RunPanelProps) {
             {runningAgent.output.split("\n").slice(-10).join("\n")}
           </pre>
         </div>
+      )}
+
+      {/* Execution timeline */}
+      {(currentRun?.status === "done" || agents.some((a) => a.finishedAt)) && (
+        <ExecutionTimeline />
       )}
 
       {/* Cancel button */}

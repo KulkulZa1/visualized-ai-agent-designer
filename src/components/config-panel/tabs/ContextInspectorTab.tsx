@@ -114,6 +114,40 @@ function SnapshotHistoryRow({
   );
 }
 
+function LiveRunRow({ nodeId }: { nodeId: string }) {
+  const agentRun = useNodeExecutionData(nodeId);
+  if (!agentRun || agentRun.status === "idle" || agentRun.status === "waiting") return null;
+
+  const elapsedMs = agentRun.startedAt
+    ? (agentRun.finishedAt ?? Date.now()) - agentRun.startedAt
+    : null;
+  const elapsed = elapsedMs == null ? null
+    : elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: 6,
+      padding: "5px 8px", borderRadius: 4, marginBottom: 6,
+      background: "var(--surface-3)", border: "1px solid var(--border)",
+    }}>
+      <span style={{ fontSize: 9, color: "var(--accent)" }}>●</span>
+      <span style={{ fontSize: 10, color: "var(--hint)" }}>Current run</span>
+      <Badge tone={agentRun.status === "done" ? "green" : "accent"}>
+        {agentRun.status}
+      </Badge>
+      <span style={{ fontSize: 10, color: "var(--muted)", fontFamily: mono }}>
+        {agentRun.modelUsed ?? "—"}
+      </span>
+      <span style={{ fontSize: 10, color: "var(--hint)" }}>
+        {agentRun.tokenEstimate ?? 0} tokens
+      </span>
+      {elapsed && (
+        <span style={{ fontSize: 10, color: "var(--hint)", marginLeft: "auto" }}>{elapsed}</span>
+      )}
+    </div>
+  );
+}
+
 function SnapshotHistory({
   nodeId, workspacePath,
 }: { nodeId: string; workspacePath: string | null }) {
@@ -161,6 +195,7 @@ function SnapshotHistory({
 
   return (
     <Sec title="Snapshot History">
+      <LiveRunRow nodeId={nodeId} />
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
         <SmallBtn onClick={loadHistory}>↻</SmallBtn>
         <SmallBtn onClick={handleExportJson}>Export JSON</SmallBtn>

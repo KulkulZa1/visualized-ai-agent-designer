@@ -16,6 +16,7 @@ import { RunPanel }       from "@/components/execution/RunPanel";
 import { SettingsPanel }  from "@/components/layout/SettingsPanel";
 import { KeyboardHelp }   from "@/components/layout/KeyboardHelp";
 import { SnapshotSearchPanel } from "@/components/palette/SnapshotSearchPanel";
+import { WorkflowMetaEditor } from "@/components/palette/WorkflowMetaEditor";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useUIStore } from "@/store/uiStore";
@@ -37,6 +38,7 @@ function AppInner() {
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
   const [showSnapshotSearch, setShowSnapshotSearch] = useState(false);
+  const [showMetaEditor, setShowMetaEditor] = useState(false);
 
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode = useUIStore((s) => s.selectNode);
@@ -152,6 +154,7 @@ function AppInner() {
         onRun={handleRun}
         onOpenSettings={() => setShowSettings(true)}
         onOpenHelp={() => setShowHelp(true)}
+        onOpenMetaEditor={() => setShowMetaEditor(true)}
       />
       <Sidebar />
 
@@ -185,6 +188,9 @@ function AppInner() {
 
       {/* Snapshot search */}
       {showSnapshotSearch && <SnapshotSearchPanel onClose={() => setShowSnapshotSearch(false)}/>}
+
+      {/* Workflow metadata editor */}
+      {showMetaEditor && <WorkflowMetaEditor onClose={() => setShowMetaEditor(false)}/>}
 
       {/* Modals */}
       {modal === "generate" && <GeneratePanel  onClose={() => setModal(null)}/>}

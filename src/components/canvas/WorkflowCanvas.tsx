@@ -105,8 +105,11 @@ export function WorkflowCanvas() {
         <Controls showInteractive={false} />
         <MiniMap
           nodeColor={(node) => {
-            const role = (node.data as { role: AgentRole })?.role;
-            return MINIMAP_COLORS[role] ?? "#5d6473";
+            const data = node.data as { role: AgentRole; status?: string };
+            if (data.status === "running") return "rgba(229,161,66,0.8)";
+            if (data.status === "done")    return "rgba(95,191,127,0.7)";
+            if (data.status === "error")   return "rgba(224,117,117,0.7)";
+            return MINIMAP_COLORS[data.role] ?? "#5d6473";
           }}
           nodeStrokeWidth={0}
           zoomable
