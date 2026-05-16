@@ -14,13 +14,13 @@
 
 ### Near-Term Deferred
 
-- [ ] Resizable panels (drag handle between config panel and canvas)
+- [x] Resizable panels (CSS resize on ConfigPanel)
+- [x] Session restore: auto-load last harness on startup from localStorage
+- [x] Snapshot deletion UI (soft-delete via remove button in ContextInspectorTab)
+- [x] Artifact list panel in sidebar (ArtifactSidebar component)
 - [ ] Expanded artifact viewer (full-screen / dockable artifact preview)
 - [ ] Log level filter for AuditStrip (debug / info / warn / error severity)
 - [ ] Copy-to-search: clicking a path/node-id in audit log pre-fills a search filter
-- [ ] Session restore: auto-load last harness on startup (requires careful error handling to avoid startup regressions)
-- [ ] Snapshot deletion UI (remove individual persisted snapshots from the history panel)
-- [ ] Artifact list panel in sidebar (browse all .harness/artifacts/ files)
 - [ ] Full-text search across snapshots
 - [ ] Snapshot export to ZIP
 
@@ -92,7 +92,7 @@ These can be delegated to Codex independently (see `AGENT.md` for full context):
 ## Blocked Tasks
 
 - **Phase 2 implementation** — blocked on Phase 1 human review sign-off
-- **Git initialization** — blocked until first review of folder structure
+- ~~**Git initialization**~~ — [x] Done: `git init` + initial commit 66c841d on 2026-05-17
 
 ---
 

@@ -5,6 +5,7 @@ import { useWorkflowStore, makeDefaultAgentNode, nextNodeId } from "@/store/work
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { applyDagreLayout } from "@/utils/autoLayout";
 import { validateWorkflow } from "@/utils/validateWorkflow";
+import type { ValidationResult } from "@/types/workflow";
 import { useState } from "react";
 
 const TOOLBAR_ROLES: AgentRole[] = [
@@ -23,7 +24,7 @@ export function CanvasToolbar() {
   const nodes     = useWorkflowStore((s) => s.nodes);
   const edges     = useWorkflowStore((s) => s.edges);
   const { setNodes, fitView } = useReactFlow();
-  const [validation, setValidation] = useState<{ valid: boolean; count: number } | null>(null);
+  const [validation, setValidation] = useState<ValidationResult | null>(null);
 
   function handleAdd(role: AgentRole) {
     const col = nodes.length % 4;
@@ -39,13 +40,28 @@ export function CanvasToolbar() {
 
   function handleValidate() {
     const result = validateWorkflow(nodes, edges);
-    setValidation({ valid: result.valid, count: result.errors.length + result.warnings.length });
-    setTimeout(() => setValidation(null), 4000);
+    setValidation(result);
+    setTimeout(() => setValidation(null), 8000);
   }
 
-  const stateColor = validation
-    ? validation.valid ? "var(--green)" : "var(--red)"
+  const errorCount   = validation ? validation.errors.length : 0;
+  const warningCount = validation ? validation.warnings.length : 0;
+  const issueCount   = errorCount + warningCount;
+  const stateColor   = validation
+    ? (errorCount > 0 ? "var(--red)" : warningCount > 0 ? "var(--amber, #e5a142)" : "var(--green)")
     : "var(--muted)";
+  const badgeLabel   = validation
+    ? (errorCount > 0
+        ? `✕ ${errorCount} error${errorCount !== 1 ? "s" : ""}`
+        : warningCount > 0
+          ? `⚠ ${warningCount} issue${warningCount !== 1 ? "s" : ""}`
+          : "✓ valid")
+    : null;
+  const tooltipIssues = validation
+    ? [...validation.errors.map((e) => e.message), ...validation.warnings.map((w) => w.message)]
+        .slice(0, 3)
+        .join("\n")
+    : undefined;
 
   return (
     <div style={{
@@ -84,14 +100,12 @@ export function CanvasToolbar() {
 
       <div style={{ flex: 1 }}/>
 
-      {/* Validation indicator */}
-      {validation && (
-        <span style={{ fontSize: 11, color: stateColor, marginRight: 6,
-          display: "flex", alignItems: "center", gap: 5 }}>
+      {/* Validation badge */}
+      {badgeLabel && (
+        <span title={tooltipIssues} style={{ fontSize: 11, color: stateColor, marginRight: 6,
+          display: "flex", alignItems: "center", gap: 5, cursor: issueCount > 0 ? "help" : "default" }}>
           <span style={{ width: 6, height: 6, borderRadius: "50%", background: stateColor }}/>
-          {validation.valid
-            ? "valid"
-            : `${validation.count} issue${validation.count !== 1 ? "s" : ""}`}
+          {badgeLabel}
         </span>
       )}
 

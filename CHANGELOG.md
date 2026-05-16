@@ -1,0 +1,35 @@
+# Changelog
+
+All notable changes to Harness Studio are documented here.
+Format: [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
+Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Planned
+- Live streaming execution traces
+- Artifact viewer in sidebar
+- Git diff viewer for workflow changes
+- Secure credential storage via Tauri Stronghold
+- VS Code extension reuse of core boundaries
+
+## [0.1.0] - 2026-05-17
+
+### Added
+- **Phase 5 — Execution Engine**: Run button executes workflow agents in topological order via OpenAI, Anthropic, or Ollama APIs. Supports per-node model configuration with GPT-5.5 tier aliases, `reasoning_effort` for o-series, and Visual Inspector locked to Claude.
+- **Multi-provider support**: OpenAI (with retry backoff), Anthropic, Ollama local, and Ollama fallback on billing errors. Provider health checks before each run. Settings panel with API key management.
+- **Snapshot persistence**: In-memory and file-backed (`FileSnapshotRepository`) execution context snapshots stored at `.harness/snapshots/`. Snapshot history panel in Context Inspector tab with expand, delete, reload, and JSON export.
+- **Provider catalog**: 8 providers catalogued (OpenAI, Anthropic, OpenAI-compatible, Ollama local, Ollama remote, Google Gemini, Cloud placeholder, Kilo). Gemini and Ollama remote added as disabled scaffolding.
+- **Token tracking**: Per-agent token estimation after each run; updates node `tokens.used` field; shown in RunPanel.
+- **UX improvements**: AuditStrip newest/oldest-first toggle with auto-scroll; animated execution progress bar; RunPanel output 80→200px; resizable config panel (CSS resize); keyboard help overlay (Ctrl+/).
+- **Bundle optimisation**: Vite `manualChunks` splits vendor-flow (188 KB), vendor-yaml (97 KB), vendor-editor (14 KB) into separate chunks; main bundle 809 KB → 513 KB.
+- **Session restore**: Last opened harness auto-loaded on startup from localStorage.
+- **Artifact service**: `artifactService.ts` writes node artifacts to `.harness/artifacts/`. ArtifactSidebar component in Sidebar.
+- **Tests**: 124 Vitest tests (was 57 at Phase 3 entry).
+
+### Phase 0-4 (prior)
+- Research & Planning, HTML prototype, Visual Workflow Editor (8 node types, 4 edge types, Dagre auto-layout)
+- Example YAML files, AGENT_WORKFLOW_SPEC, ExamplePicker
+- Agent configuration generators (CLAUDE.md, AGENTS.md, LangGraph, CrewAI, hook templates)
+- Hook & Permission Management (permission matrix, hook execution with consent, audit log)
+- API error handling with provider fallback

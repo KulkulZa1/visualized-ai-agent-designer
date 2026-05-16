@@ -27,9 +27,22 @@ export function ConfigPanel() {
     }}>
 
       {!node && (
-        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-          color: "var(--hint)", fontSize: 12 }}>
-          Select a node to inspect
+        <div style={{ flex: 1, display: "flex", flexDirection: "column",
+          alignItems: "center", justifyContent: "center",
+          color: "var(--hint)", fontSize: 12, gap: 12, padding: 24 }}>
+          <span style={{ fontSize: 32 }}>◆</span>
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontWeight: 600, color: "var(--muted)", marginBottom: 4 }}>
+              No node selected
+            </div>
+            <div style={{ fontSize: 11, color: "var(--hint)", lineHeight: 1.5 }}>
+              Click any node on the canvas to inspect<br/>
+              its role, prompt, tools, hooks, and context.
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: "var(--hint)", fontFamily: "var(--font-mono)" }}>
+            Ctrl+Shift+E to load a harness
+          </div>
         </div>
       )}
 

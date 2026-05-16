@@ -2,8 +2,8 @@
 
 **Updated:** 2026-05-17
 **Project:** Harness Studio — Visual AI Harness Engineering Tool
-**Current Phase:** Phase 4 — Hook & Permission Management
-**Status:** First hook/permission slice implemented and verified in the visible Tauri app
+**Current Phase:** Phase 5 — Execution Engine + Context Persistence
+**Status:** Execution engine, multi-provider support, file-backed snapshots, and UX polish complete
 
 ---
 

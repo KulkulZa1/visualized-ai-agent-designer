@@ -15,6 +15,7 @@ import { snapshotRepo } from "./snapshotRepository";
 
 const SNAPSHOTS_DIR = ".harness/snapshots";
 const INDEX_PATH = `${SNAPSHOTS_DIR}/index.json`;
+const MAX_SNAPSHOTS_PER_NODE = 20;
 
 /** Maps nodeId → array of snapshotIds (insertion order preserved). */
 type SnapshotIndex = Record<string, string[]>;
@@ -65,6 +66,10 @@ export class FileSnapshotRepository {
     await this.writeOne(snap);
     const index = await this.readIndex();
     index[snap.nodeId] = [...(index[snap.nodeId] ?? []), snap.id];
+    if (index[snap.nodeId].length > MAX_SNAPSHOTS_PER_NODE) {
+      // Keep the newest MAX_SNAPSHOTS_PER_NODE entries (last N of sorted array)
+      index[snap.nodeId] = index[snap.nodeId].slice(-MAX_SNAPSHOTS_PER_NODE);
+    }
     await this.writeIndex(index);
     return snap;
   }

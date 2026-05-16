@@ -61,6 +61,10 @@ function generateId(): string {
   );
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+const MAX_SNAPSHOTS_PER_NODE = 20;
+
 // ── Repository ───────────────────────────────────────────────────────────────
 
 class SnapshotRepository {
@@ -79,6 +83,11 @@ class SnapshotRepository {
       updatedAt: now,
     };
     this.store.set(snapshot.id, snapshot);
+    const forNode = this.listByNodeId(snapshot.nodeId); // newest-first
+    if (forNode.length > MAX_SNAPSHOTS_PER_NODE) {
+      const oldest = forNode[forNode.length - 1]; // last = oldest (newest-first order)
+      this.store.delete(oldest.id);
+    }
     return { ...snapshot };
   }
 

@@ -43,6 +43,16 @@ The running Tauri app manages the **Harness Studio — Active Project** harness 
 - **Provider/model info in RunPanel** — `AgentRun` extended with `providerUsed`, `modelUsed`, `tokenEstimate`. RunPanel shows `model via provider` and `~N est. tokens` when done.
 - **Tests** — 118 → 124 Vitest tests (6 new token estimate + type tests).
 
+Session 4 additions (2026-05-17):
+
+- **Git repository initialized** — `git init` + initial commit `66c841d` ("Initial commit: Harness Studio v0.1.0 — Phases 0-5 complete") with 253 files, 37 333 insertions. `.gitignore` correctly excludes secrets, build artifacts, snapshots, and node_modules.
+- **Snapshot retention policy** — `MAX_SNAPSHOTS_PER_NODE = 20` enforced in both `fileSnapshotRepository.ts` (index trimmed after write, files kept for audit) and `snapshotRepository.ts` (oldest in-memory entry deleted after create).
+- **Validation badge in CanvasToolbar** — `handleValidate` now stores full `ValidationResult` state; badge shows `✓ valid` (green), `⚠ N issues` (amber), or `✕ N errors` (red); tooltip lists first 3 issue messages; auto-clears after 8 seconds.
+- **ConfigPanel empty state** — replaced single-line hint with a structured empty state: ◆ glyph, "No node selected" heading, descriptive sub-text, and `Ctrl+Shift+E` keyboard hint.
+- **Root CHANGELOG.md** — Keep a Changelog format with `[Unreleased]` and `[0.1.0] - 2026-05-17` sections.
+- **PROJECT_STATUS.md** — Current Phase updated to Phase 5; Updated date to 2026-05-17.
+- **Cargo tests** — 11/11 Rust tests pass.
+
 Current slice adds (prior, still active):
 
 - **Execution engine** — Run button calls Claude/OpenAI/Ollama API per node in topological order. Node status visualised in real time (running/done/error) with glow effects. RunPanel shows per-agent output, elapsed time, and a Cancel button.
