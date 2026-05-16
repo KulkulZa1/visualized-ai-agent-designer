@@ -12,6 +12,7 @@ interface UIState {
   activeEditorPath: string | null;
   configPanelCollapsed: boolean;
   sidebarCollapsed: boolean;
+  uiMode: "atelier" | "observatory";
 }
 
 interface UIActions {
@@ -23,6 +24,7 @@ interface UIActions {
   setActiveEditorPath: (path: string | null) => void;
   toggleConfigPanel: () => void;
   toggleSidebar: () => void;
+  setUiMode: (mode: "atelier" | "observatory") => void;
 }
 
 export const useUIStore = create<UIState & UIActions>()((set) => ({
@@ -32,6 +34,7 @@ export const useUIStore = create<UIState & UIActions>()((set) => ({
   activeEditorPath: null,
   configPanelCollapsed: false,
   sidebarCollapsed: false,
+  uiMode: "atelier",
 
   selectNode: (nodeId) => set({ selectedNodeId: nodeId }),
 
@@ -71,4 +74,6 @@ export const useUIStore = create<UIState & UIActions>()((set) => ({
 
   toggleSidebar: () =>
     set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+
+  setUiMode: (mode) => set({ uiMode: mode }),
 }));

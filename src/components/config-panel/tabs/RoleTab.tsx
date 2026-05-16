@@ -228,6 +228,17 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
               borderRadius: 4, padding: "6px 8px", color: "var(--text)",
               fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none" }}/>
         </Fld>
+        <Fld label="Comment (annotation)">
+          <textarea
+            value={d.comment ?? ""}
+            rows={2}
+            placeholder="Optional note or annotation for this node…"
+            onChange={(e) => upd(nodeId, { comment: e.target.value })}
+            style={{ width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
+              borderRadius: 4, padding: "6px 8px", color: "var(--text)",
+              fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none" }}
+          />
+        </Fld>
       </Sec>
 
       <Sec title="Model">

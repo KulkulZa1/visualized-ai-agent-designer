@@ -188,6 +188,7 @@ export function useWorkflowExecution() {
     currentRun, apiKey, openaiApiKey,
     llmProvider, ollamaBaseUrl, ollamaModel,
     startRun, updateAgent, finishRun, cancelRun, isRunning,
+    continueOnError,
   } = useExecutionStore();
 
   const addEntry = useAuditStore((s) => s.addEntry);
@@ -490,6 +491,11 @@ export function useWorkflowExecution() {
           snapshotStatus: "failed",
           metadata: { error: String(e) },
         }).catch(console.error);
+
+        if (!continueOnError) {
+          finishRun("error");
+          return;
+        }
       }
     }
 

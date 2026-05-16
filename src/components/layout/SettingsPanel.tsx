@@ -176,6 +176,7 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
     llmProvider, setLlmProvider,
     ollamaBaseUrl, setOllamaBaseUrl,
     ollamaModel, setOllamaModel,
+    continueOnError, setContinueOnError,
   } = useExecutionStore();
 
   const [anthropicDraft, setAnthropicDraft] = useState(apiKey);
@@ -462,6 +463,26 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
                 )}
               </div>
             )}
+          </div>
+
+          {/* ── Execution behavior ────────────────────────────────────────── */}
+          <div style={{ height: 1, background: "var(--border)", margin: "12px 0 20px" }}/>
+          <div style={{ marginBottom: 8 }}>
+            <label style={{ display: "block", marginBottom: 8, fontSize: 12, fontWeight: 600, color: "var(--text)" }}>
+              Execution
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={continueOnError}
+                onChange={(e) => setContinueOnError(e.target.checked)}
+                style={{ accentColor: "var(--accent)", width: 14, height: 14 }}
+              />
+              <span style={{ fontSize: 12 }}>Continue workflow on agent error</span>
+            </label>
+            <div style={{ fontSize: 11, color: "var(--hint)", marginTop: 4, marginLeft: 24 }}>
+              When unchecked, the workflow stops immediately on any agent error.
+            </div>
           </div>
         </div>
 

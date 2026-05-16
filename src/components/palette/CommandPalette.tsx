@@ -5,8 +5,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore, makeDefaultAgentNode, nextNodeId } from "@/store/workflowStore";
+import { useAuditStore } from "@/store/auditStore";
 import { AgentRole } from "@/types/agent";
 import { ROLE_META } from "@/utils/nodeColors";
+import { deserializeWorkflow } from "@/utils/yamlSerializer";
+import { workflowDefSchema } from "@/schemas/workflowSchema";
 
 interface PaletteAction {
   id: string;
@@ -32,9 +35,49 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const addNode   = useWorkflowStore((s) => s.addNode);
-  const nodeCount = useWorkflowStore((s) => s.nodes.length);
-  const meta      = useWorkflowStore((s) => s.meta);
+  const addNode        = useWorkflowStore((s) => s.addNode);
+  const loadWorkflow   = useWorkflowStore((s) => s.loadWorkflow);
+  const nodeCount      = useWorkflowStore((s) => s.nodes.length);
+  const meta           = useWorkflowStore((s) => s.meta);
+  const addAuditEntry  = useAuditStore((s) => s.addEntry);
+
+  async function pasteWorkflowYaml() {
+    onClose();
+    try {
+      const text = await navigator.clipboard.readText();
+      const raw = deserializeWorkflow(text);
+      const result = workflowDefSchema.safeParse(raw);
+      if (!result.success) {
+        addAuditEntry({
+          id: `paste-yaml-${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          action: "workflow_loaded",
+          agentId: "system",
+          details: `Paste workflow YAML failed: ${result.error.issues[0]?.message ?? "invalid schema"}`,
+          success: false,
+        });
+        return;
+      }
+      loadWorkflow(result.data);
+      addAuditEntry({
+        id: `paste-yaml-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        action: "workflow_loaded",
+        agentId: "system",
+        details: `Workflow loaded from clipboard: "${result.data.meta.name}"`,
+        success: true,
+      });
+    } catch (e) {
+      addAuditEntry({
+        id: `paste-yaml-${Date.now()}`,
+        timestamp: new Date().toISOString(),
+        action: "workflow_loaded",
+        agentId: "system",
+        details: `Paste workflow YAML failed: ${String(e)}`,
+        success: false,
+      });
+    }
+  }
 
   const actions: PaletteAction[] = [
     // Workflow actions
@@ -67,6 +110,10 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
     { id:"docs",     label:"Open AGENTS.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); } },
     { id:"claude",   label:"Open CLAUDE.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); } },
     { id:"audit",    label:"View audit log",    icon:"history",group:"Navigate",  run: () => { onClose(); } },
+
+    // Import/Export
+    { id:"paste_yaml", label:"Paste workflow YAML from clipboard", icon:"save", group:"Workflow",
+      run: () => { pasteWorkflowYaml(); } },
   ];
 
   const filtered = query.trim()

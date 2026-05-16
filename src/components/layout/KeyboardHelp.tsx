@@ -30,6 +30,7 @@ const SECTIONS: { title: string; rows: ShortcutRow[] }[] = [
     title: "Panels",
     rows: [
       { keys: "Ctrl+Shift+P", desc: "Permission matrix" },
+      { keys: "Ctrl+Shift+F", desc: "Search execution snapshots" },
       { keys: "Ctrl+S",       desc: "Save workflow" },
       { keys: "Ctrl+?",       desc: "This help" },
     ],

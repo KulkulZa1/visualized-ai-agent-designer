@@ -43,6 +43,7 @@ export const agentNodeDataSchema = z.object({
   condition:      z.string().optional(),
   description:    z.string().optional(),
   thinkDepth:     z.enum(["none", "low", "medium", "high"]).optional(),
+  comment:        z.string().optional(),
 });
 
 export type AgentNodeDataInput  = z.input<typeof agentNodeDataSchema>;

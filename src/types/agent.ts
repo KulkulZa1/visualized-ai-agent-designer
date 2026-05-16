@@ -97,4 +97,5 @@ export interface AgentNodeData extends Record<string, unknown> {
   condition?: string;    // gateway only
   description?: string;
   thinkDepth?: "none" | "low" | "medium" | "high";
+  comment?: string;
 }

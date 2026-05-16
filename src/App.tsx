@@ -15,6 +15,7 @@ import { PermissionMatrix } from "@/components/permissions/PermissionMatrix";
 import { RunPanel }       from "@/components/execution/RunPanel";
 import { SettingsPanel }  from "@/components/layout/SettingsPanel";
 import { KeyboardHelp }   from "@/components/layout/KeyboardHelp";
+import { SnapshotSearchPanel } from "@/components/palette/SnapshotSearchPanel";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useUIStore } from "@/store/uiStore";
@@ -35,9 +36,11 @@ function AppInner() {
   const [showRunPanel, setShowRunPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [showSnapshotSearch, setShowSnapshotSearch] = useState(false);
 
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode = useUIStore((s) => s.selectNode);
+  const uiMode = useUIStore((s) => s.uiMode);
   const { undo, redo } = useStore(useWorkflowStore.temporal, (s) => ({ undo: s.undo, redo: s.redo }));
 
   const { executeWorkflow } = useWorkflowExecution();
@@ -116,7 +119,11 @@ function AppInner() {
       useWorkflowStore.getState().removeNode(selectedNodeId);
       selectNode(null);
     }
-    if (e.key === "Escape") { setModal(null); setShowSettings(false); setShowHelp(false); }
+    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      setShowSnapshotSearch((v) => !v);
+    }
+    if (e.key === "Escape") { setModal(null); setShowSettings(false); setShowHelp(false); setShowSnapshotSearch(false); }
   }, [loadExample, undo, redo, selectedNodeId, selectNode]);
 
   useEffect(() => {
@@ -125,7 +132,7 @@ function AppInner() {
   }, [handleGlobalKey]);
 
   return (
-    <div style={{
+    <div className={uiMode === "observatory" ? "observatory" : ""} style={{
       display: "grid",
       gridTemplateRows: "40px 1fr auto 26px",
       gridTemplateColumns: "224px 1fr 320px",
@@ -175,6 +182,9 @@ function AppInner() {
 
       {/* Keyboard help modal */}
       {showHelp && <KeyboardHelp onClose={() => setShowHelp(false)}/>}
+
+      {/* Snapshot search */}
+      {showSnapshotSearch && <SnapshotSearchPanel onClose={() => setShowSnapshotSearch(false)}/>}
 
       {/* Modals */}
       {modal === "generate" && <GeneratePanel  onClose={() => setModal(null)}/>}

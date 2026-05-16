@@ -169,6 +169,19 @@ export const BaseAgentNode = memo(function BaseAgentNode({ data, selected }: Nod
         </div>
       )}
 
+      {/* Comment/annotation */}
+      {d.comment && (
+        <div style={{
+          padding: "4px 12px 6px",
+          fontSize: 10, fontStyle: "italic",
+          color: "var(--accent)", lineHeight: 1.4,
+          borderTop: `1px solid rgba(229,161,66,0.15)`,
+          background: "rgba(229,161,66,0.04)",
+        }}>
+          {d.comment.slice(0, 100)}{d.comment.length > 100 ? "…" : ""}
+        </div>
+      )}
+
       {/* Gateway condition badge */}
       {d.condition && (
         <div style={{ padding: "0 10px 10px" }}>

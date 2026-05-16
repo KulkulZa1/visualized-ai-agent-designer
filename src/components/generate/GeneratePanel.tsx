@@ -7,6 +7,8 @@ import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useGenerator, type GenerateTarget } from "@/hooks/useGenerator";
 import { HOOK_TEMPLATES } from "@/utils/generators";
 import type { HookTemplate } from "@/utils/generators";
+import { useWorkflowStore } from "@/store/workflowStore";
+import { serializeWorkflow } from "@/utils/yamlSerializer";
 
 interface GeneratePanelProps {
   onClose: () => void;
@@ -61,10 +63,21 @@ const MONO = '"JetBrains Mono", ui-monospace, monospace';
 
 export function GeneratePanel({ onClose }: GeneratePanelProps) {
   const { generate, hasWorkspace } = useGenerator();
+  const toWorkflowDef = useWorkflowStore((s) => s.toWorkflowDef);
   const [preview, setPreview] = useState<{ content: string; path: string; label: string } | null>(null);
   const [loading, setLoading] = useState<string | null>(null);
   const [written, setWritten] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<"generators" | "hooks">("generators");
+  const [yamlCopied, setYamlCopied] = useState(false);
+
+  function handleCopyYaml() {
+    const def = toWorkflowDef();
+    const yaml = serializeWorkflow(def);
+    navigator.clipboard?.writeText(yaml).then(() => {
+      setYamlCopied(true);
+      setTimeout(() => setYamlCopied(false), 2000);
+    });
+  }
 
   async function handleGenerate(item: GenItem, hookTemplate?: HookTemplate) {
     setLoading(item.id);
@@ -134,6 +147,30 @@ export function GeneratePanel({ onClose }: GeneratePanelProps) {
                   display: "flex", gap: 7, alignItems: "center" }}>
                   <NodeIcon name="alert" size={13}/>
                   No workspace open — preview only, files won't be saved.
+                </div>
+              )}
+
+              {activeTab === "generators" && (
+                <div style={{
+                  display: "flex", alignItems: "center", gap: 10,
+                  padding: "8px 12px", borderRadius: 7, marginBottom: 8,
+                  border: "1px solid var(--border)", background: "var(--surface-3)",
+                  cursor: "pointer", transition: "border-color 120ms",
+                }}
+                onMouseEnter={(e) => (e.currentTarget as HTMLDivElement).style.borderColor = "var(--muted)"}
+                onMouseLeave={(e) => (e.currentTarget as HTMLDivElement).style.borderColor = "var(--border)"}
+                onClick={handleCopyYaml}>
+                  <NodeIcon name="save" size={15} color="var(--muted)" style={{ flexShrink: 0 }}/>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 2 }}>
+                      workflow.harness.yaml
+                      <span style={{ fontSize: 10, color: "var(--hint)", fontFamily: MONO, marginLeft: 6 }}>.yaml</span>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--muted)" }}>Copy current workflow as YAML to clipboard</div>
+                  </div>
+                  <span style={{ fontSize: 11, color: yamlCopied ? "var(--green)" : "var(--hint)", fontFamily: MONO, flexShrink: 0 }}>
+                    {yamlCopied ? "✓ Copied" : "Copy"}
+                  </span>
                 </div>
               )}
 

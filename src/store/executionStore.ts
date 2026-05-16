@@ -14,6 +14,7 @@ interface ExecutionState {
   llmProvider: LlmProvider;
   ollamaBaseUrl: string;
   ollamaModel: string;
+  continueOnError: boolean;
 }
 
 interface ExecutionActions {
@@ -26,6 +27,7 @@ interface ExecutionActions {
   setLlmProvider: (p: LlmProvider) => void;
   setOllamaBaseUrl: (url: string) => void;
   setOllamaModel: (model: string) => void;
+  setContinueOnError: (v: boolean) => void;
 }
 
 function loadKey(name: string): string {
@@ -40,6 +42,7 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   llmProvider: (loadKey("harness_llm_provider") || "auto") as LlmProvider,
   ollamaBaseUrl: loadKey("harness_ollama_url") || DEFAULT_OLLAMA_BASE_URL,
   ollamaModel: loadKey("harness_ollama_model") || DEFAULT_OLLAMA_MODEL,
+  continueOnError: true,
 
   startRun: (workflowName) => {
     const id = `run-${Date.now()}`;
@@ -114,4 +117,6 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
     try { localStorage.setItem("harness_ollama_model", model); } catch {}
     set({ ollamaModel: model });
   },
+
+  setContinueOnError: (v) => set({ continueOnError: v }),
 }));

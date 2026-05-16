@@ -57,6 +57,13 @@ html, body, #root {
 .react-flow__node             { cursor: default; }
 .react-flow__pane             { cursor: default; }
 
+/* ── Observatory mode — cyan accent ───────────────────────────────────── */
+.observatory {
+  --accent:      #4dd4ff;
+  --accent-soft: rgba(77,212,255,0.1);
+  --accent-dim:  rgba(77,212,255,0.06);
+}
+
 /* ── Animations ────────────────────────────────────────────────────────── */
 @keyframes pulse-running { 0%,100%{opacity:1} 50%{opacity:0.35} }
 @keyframes slide-up      { from{opacity:0;transform:translateY(8px)} to{opacity:1;transform:none} }

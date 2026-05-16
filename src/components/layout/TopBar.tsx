@@ -4,6 +4,7 @@ import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useWorkflow } from "@/hooks/useWorkflow";
 import { useExecutionStore } from "@/store/executionStore";
+import { useUIStore } from "@/store/uiStore";
 import type { AgentRun } from "@/types/execution";
 
 interface TopBarProps {
@@ -56,6 +57,8 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
   const { save }  = useWorkflow();
   const isRunning   = useExecutionStore((s) => s.isRunning);
   const currentRun  = useExecutionStore((s) => s.currentRun);
+  const uiMode    = useUIStore((s) => s.uiMode);
+  const setUiMode = useUIStore((s) => s.setUiMode);
 
   const { undo, redo, pastStates, futureStates } = useStore(
     useWorkflowStore.temporal,
@@ -87,6 +90,20 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
       <div style={{ width: 18, height: 18, borderRadius: 4, background: "var(--accent)",
         display: "grid", placeItems: "center", color: "#1a1207",
         fontSize: 10, fontWeight: 800, flexShrink: 0 }}>H</div>
+
+      {/* UI Mode toggle */}
+      <button
+        onClick={() => setUiMode(uiMode === "atelier" ? "observatory" : "atelier")}
+        title={`Switch to ${uiMode === "atelier" ? "Observatory" : "Atelier"} mode`}
+        style={{
+          width: 20, height: 20, borderRadius: "50%", border: "none",
+          background: "var(--accent-soft)", color: "var(--accent)",
+          fontSize: 10, fontWeight: 700, cursor: "pointer",
+          display: "grid", placeItems: "center", flexShrink: 0,
+        }}>
+        {uiMode === "atelier" ? "A" : "O"}
+      </button>
+      <span style={{ fontSize: 9, color: "var(--hint)", marginLeft: -4 }}>[beta]</span>
 
       {/* Breadcrumb */}
       <span style={{ fontSize: 12, color: "var(--muted)" }}>harness-studio</span>
