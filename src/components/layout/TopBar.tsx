@@ -1,3 +1,4 @@
+import { useStore } from "zustand";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
@@ -56,6 +57,13 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
   const isRunning   = useExecutionStore((s) => s.isRunning);
   const currentRun  = useExecutionStore((s) => s.currentRun);
 
+  const { undo, redo, pastStates, futureStates } = useStore(
+    useWorkflowStore.temporal,
+    (s) => ({ undo: s.undo, redo: s.redo, pastStates: s.pastStates, futureStates: s.futureStates }),
+  );
+  const canUndo = pastStates.length > 0;
+  const canRedo = futureStates.length > 0;
+
   const workspaceName = workspace?.split(/[\\/]/).at(-1) ?? "no workspace";
   const relPath = filePath
     ? filePath.replace(workspace ?? "", "").replace(/^[\\/]/, "")
@@ -102,8 +110,14 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
 
       {/* Stats */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted)" }}>
-        <NodeIcon name="undo" size={13} style={{ cursor: "pointer" }}/>
-        <NodeIcon name="redo" size={13} style={{ cursor: "pointer" }}/>
+        <span onClick={canUndo ? () => undo() : undefined} title="Undo (Ctrl+Z)"
+          style={{ cursor: canUndo ? "pointer" : "not-allowed", opacity: canUndo ? 1 : 0.35, display: "flex" }}>
+          <NodeIcon name="undo" size={13}/>
+        </span>
+        <span onClick={canRedo ? () => redo() : undefined} title="Redo (Ctrl+Y)"
+          style={{ cursor: canRedo ? "pointer" : "not-allowed", opacity: canRedo ? 1 : 0.35, display: "flex" }}>
+          <NodeIcon name="redo" size={13}/>
+        </span>
         <Sep/>
         {isRunning && currentRun ? (
           <RunProgress agents={currentRun.agents} total={nodeCount} />

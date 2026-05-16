@@ -77,4 +77,37 @@ describe("workflowStore", () => {
     expect(def.agents).toHaveLength(1);
     expect(def.nodePositions["n1"]).toEqual({ x: 10, y: 20 });
   });
+
+  describe("duplicateNode", () => {
+    it("creates a new node with offset position and (copy) name", () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 100, y: 200 }));
+      store.duplicateNode("n1");
+      const { nodes } = useWorkflowStore.getState();
+      expect(nodes).toHaveLength(2);
+      const copy = nodes[1];
+      expect(copy.data.name).toBe("Worker (copy)");
+      expect(copy.position.x).toBe(140);
+      expect(copy.position.y).toBe(240);
+    });
+
+    it("resets tokens.used to 0 on duplicate", () => {
+      const store = useWorkflowStore.getState();
+      const node = makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 });
+      node.data.tokens = { used: 500, budget: 40000 };
+      store.addNode(node);
+      store.duplicateNode("n1");
+      const { nodes } = useWorkflowStore.getState();
+      const copy = nodes[1];
+      expect(copy.data.tokens.used).toBe(0);
+      expect(copy.data.tokens.budget).toBe(40000);
+    });
+
+    it("is a no-op when nodeId does not exist", () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
+      expect(() => store.duplicateNode("nonexistent")).not.toThrow();
+      expect(useWorkflowStore.getState().nodes).toHaveLength(1);
+    });
+  });
 });

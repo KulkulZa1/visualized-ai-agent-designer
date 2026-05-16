@@ -20,6 +20,7 @@ import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useUIStore } from "@/store/uiStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useWorkflowStore } from "@/store/workflowStore";
+import { useStore } from "zustand";
 import { loadWorkflow } from "@/ipc/tauriCommands";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import { EXAMPLES, useExamples } from "@/hooks/useExamples";
@@ -34,6 +35,10 @@ function AppInner() {
   const [showRunPanel, setShowRunPanel] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+
+  const selectedNodeId = useUIStore((s) => s.selectedNodeId);
+  const selectNode = useUIStore((s) => s.selectNode);
+  const { undo, redo } = useStore(useWorkflowStore.temporal, (s) => ({ undo: s.undo, redo: s.redo }));
 
   const { executeWorkflow } = useWorkflowExecution();
   const { loadExample } = useExamples();
@@ -63,6 +68,10 @@ function AppInner() {
 
   // Global keyboard: ⌘K / Ctrl+K → command palette
   const handleGlobalKey = useCallback((e: KeyboardEvent) => {
+    const isTyping = ["INPUT", "TEXTAREA", "SELECT"].includes(
+      (document.activeElement?.tagName ?? "")
+    );
+
     if ((e.ctrlKey || e.metaKey) && e.key === "k") {
       e.preventDefault();
       setModal((m) => m === "palette" ? null : "palette");
@@ -88,8 +97,27 @@ function AppInner() {
       e.preventDefault();
       setShowHelp((v) => !v);
     }
+    // Undo / Redo
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z") {
+      e.preventDefault();
+      undo();
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+      e.preventDefault();
+      redo();
+    }
+    // Duplicate selected node
+    if ((e.ctrlKey || e.metaKey) && e.key === "d" && selectedNodeId) {
+      e.preventDefault();
+      useWorkflowStore.getState().duplicateNode(selectedNodeId);
+    }
+    // Delete selected node
+    if (e.key === "Delete" && selectedNodeId && !isTyping) {
+      useWorkflowStore.getState().removeNode(selectedNodeId);
+      selectNode(null);
+    }
     if (e.key === "Escape") { setModal(null); setShowSettings(false); setShowHelp(false); }
-  }, [loadExample]);
+  }, [loadExample, undo, redo, selectedNodeId, selectNode]);
 
   useEffect(() => {
     window.addEventListener("keydown", handleGlobalKey);

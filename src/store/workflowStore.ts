@@ -38,6 +38,7 @@ interface WorkflowStoreActions {
   onConnect: (connection: Connection) => void;
   addNode: (node: AgentNode) => void;
   removeNode: (nodeId: string) => void;
+  duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
   updateMeta: (meta: Partial<WorkflowMeta>) => void;
   updateExecutionSettings: (settings: Partial<ExecutionSettings>) => void;
@@ -91,6 +92,27 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           state.edges = state.edges.filter(
             (e) => e.source !== nodeId && e.target !== nodeId
           );
+          state.isDirty = true;
+        }),
+
+      duplicateNode: (nodeId) =>
+        set((state) => {
+          const source = state.nodes.find((n) => n.id === nodeId);
+          if (!source) return;
+          const newId = nextNodeId();
+          const newNode: AgentNode = {
+            ...source,
+            id: newId,
+            position: { x: source.position.x + 40, y: source.position.y + 40 },
+            data: {
+              ...source.data,
+              name: `${source.data.name} (copy)`,
+              status: "idle",
+              tokens: { used: 0, budget: source.data.tokens.budget },
+            },
+            selected: false,
+          };
+          state.nodes.push(newNode);
           state.isDirty = true;
         }),
 

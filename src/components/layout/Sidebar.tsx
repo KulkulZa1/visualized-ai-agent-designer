@@ -81,6 +81,11 @@ export function Sidebar() {
   const nodes          = useWorkflowStore((s) => s.nodes);
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode     = useUIStore((s) => s.selectNode);
+  const [nodeSearch, setNodeSearch] = useState("");
+
+  const filteredNodes = nodeSearch.trim()
+    ? nodes.filter((n) => n.data.name.toLowerCase().includes(nodeSearch.toLowerCase()))
+    : nodes;
 
   const workspaceName  = workspacePath?.split(/[\\/]/).at(-1) ?? "no workspace";
 
@@ -149,16 +154,35 @@ export function Sidebar() {
 
       {/* Workflow nodes */}
       <div style={{ borderTop: "1px solid var(--border)", padding: "8px 0", maxHeight: 280, overflow: "auto" }}>
-        <div style={{ padding: "0 12px 5px" }}>
+        <div style={{ padding: "0 12px 5px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <span style={{ fontSize: 9, fontWeight: 600, color: "var(--hint)",
             textTransform: "uppercase", letterSpacing: "0.06em" }}>
             Workflow nodes
           </span>
+          {nodeSearch.trim() && (
+            <span style={{ fontSize: 9, color: "var(--hint)" }}>
+              {filteredNodes.length}/{nodes.length}
+            </span>
+          )}
+        </div>
+        <div style={{ padding: "0 8px 4px" }}>
+          <input
+            value={nodeSearch}
+            onChange={(e) => setNodeSearch(e.target.value)}
+            placeholder="Filter nodes…"
+            style={{
+              width: "100%", boxSizing: "border-box",
+              padding: "4px 8px", borderRadius: 4, border: "1px solid var(--border)",
+              background: "var(--surface-3)", color: "var(--text)",
+              fontSize: 11, fontFamily: "inherit", outline: "none",
+              marginBottom: 4,
+            }}
+          />
         </div>
         {nodes.length === 0 && (
           <div style={{ padding: "4px 12px", fontSize: 11, color: "var(--hint)" }}>No nodes yet</div>
         )}
-        {nodes.map((n) => {
+        {filteredNodes.map((n) => {
           const meta   = ROLE_META[n.data.role];
           const status = STATUS_COLORS[n.data.status ?? "idle"];
           const isSel  = selectedNodeId === n.id;

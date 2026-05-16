@@ -17,7 +17,10 @@ export function ConfigPanel() {
   const selectedId     = useUIStore((s) => s.selectedNodeId);
   const activePanelTab = useUIStore((s) => s.activePanelTab) as Tab;
   const setTab         = useUIStore((s) => s.setActivePanelTab);
+  const setSelectedNode = useUIStore((s) => s.selectNode);
   const node           = useWorkflowStore((s) => s.nodes.find((n) => n.id === selectedId));
+  const removeNode     = useWorkflowStore((s) => s.removeNode);
+  const duplicateNode  = useWorkflowStore((s) => s.duplicateNode);
 
   return (
     <div style={{
@@ -69,6 +72,22 @@ export function ConfigPanel() {
                   background: "transparent", color: "var(--hint)", cursor: "pointer",
                   display: "grid", placeItems: "center" }}>
                   <NodeIcon name="history" size={13}/>
+                </button>
+                <button
+                  title="Duplicate node (Ctrl+D)"
+                  onClick={() => duplicateNode(node.id)}
+                  style={{ width: 22, height: 22, border: "none", borderRadius: 4,
+                    background: "transparent", color: "var(--hint)", cursor: "pointer",
+                    display: "grid", placeItems: "center" }}>
+                  <NodeIcon name="plus" size={13}/>
+                </button>
+                <button
+                  title="Remove node (Delete)"
+                  onClick={() => { removeNode(node.id); setSelectedNode(null); }}
+                  style={{ width: 22, height: 22, border: "none", borderRadius: 4,
+                    background: "rgba(224,117,117,0.12)", color: "var(--red)",
+                    cursor: "pointer", display: "grid", placeItems: "center" }}>
+                  <NodeIcon name="x" size={11} color="var(--red)"/>
                 </button>
               </div>
 

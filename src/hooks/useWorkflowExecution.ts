@@ -412,6 +412,22 @@ export function useWorkflowExecution() {
         }
 
         const tokenEstimate = Math.ceil((systemMsg.length + userMsg.length + result.length) / 4);
+
+        // Simulated streaming: chunk result with setTimeout delays
+        const chunkSize = result.length > 2000 ? 100 : 50;
+        const delay = result.length > 2000 ? 20 : 30;
+        const chunks: string[] = [];
+        for (let i = 0; i < result.length; i += chunkSize) {
+          chunks.push(result.slice(i, i + chunkSize));
+        }
+        let accumulated = "";
+        for (const chunk of chunks) {
+          if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          accumulated += chunk;
+          updateAgent(nodeId, { output: accumulated });
+        }
+
         updateAgent(nodeId, {
           status: "done",
           output: result,
