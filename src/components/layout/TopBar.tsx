@@ -61,12 +61,11 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
   const uiMode    = useUIStore((s) => s.uiMode);
   const setUiMode = useUIStore((s) => s.setUiMode);
 
-  const { undo, redo, pastStates, futureStates } = useStore(
-    useWorkflowStore.temporal,
-    (s) => ({ undo: s.undo, redo: s.redo, pastStates: s.pastStates, futureStates: s.futureStates }),
-  );
-  const canUndo = pastStates.length > 0;
-  const canRedo = futureStates.length > 0;
+  // Each selector must return a stable primitive/function to avoid useSyncExternalStore loops.
+  const undo    = useStore(useWorkflowStore.temporal, (s) => s.undo);
+  const redo    = useStore(useWorkflowStore.temporal, (s) => s.redo);
+  const canUndo = useStore(useWorkflowStore.temporal, (s) => s.pastStates.length > 0);
+  const canRedo = useStore(useWorkflowStore.temporal, (s) => s.futureStates.length > 0);
 
   const workspaceName = workspace?.split(/[\\/]/).at(-1) ?? "no workspace";
   const relPath = filePath

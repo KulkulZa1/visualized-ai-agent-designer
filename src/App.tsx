@@ -43,7 +43,8 @@ function AppInner() {
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode = useUIStore((s) => s.selectNode);
   const uiMode = useUIStore((s) => s.uiMode);
-  const { undo, redo } = useStore(useWorkflowStore.temporal, (s) => ({ undo: s.undo, redo: s.redo }));
+  const undo = useStore(useWorkflowStore.temporal, (s) => s.undo);
+  const redo = useStore(useWorkflowStore.temporal, (s) => s.redo);
 
   const { executeWorkflow } = useWorkflowExecution();
   const { loadExample } = useExamples();
