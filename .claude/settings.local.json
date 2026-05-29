@@ -2,8 +2,23 @@
   "permissions": {
     "allow": [
       "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(cargo fmt *)",
+      "Bash(cargo check *)",
+      "Bash(npx tsc *)",
       "Bash(npx vitest *)",
-      "Bash(npx tsc *)"
+      "Bash(npm run build*)",
+      "Bash(npm run check*)",
+      "Bash(npm run test*)",
+      "Bash(npm run harness *)",
+      "Bash(node cli/harness.mjs *)",
+      "Bash(node mcp/server.mjs*)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git status*)",
+      "Bash(git show *)",
+      "Bash(git branch *)",
+      "Bash(git tag *)"
     ]
   }
 }

@@ -1,5 +1,8 @@
 ﻿# AGENT.md - Harness Studio
 
+**Repository:** https://github.com/KulkulZa1/visualized-ai-agent-designer
+**Working directory:** clone of the above — use this, not any older local copy.
+
 Read this before touching files. Keep it aligned with
 `docs/DEPLOYMENT_READINESS.md`.
 
@@ -60,8 +63,8 @@ Last execution pass: 2026-05-18.
 
 ## Honest Limitations
 
-- Execution is sequential. `useWorkflowExecution.ts` runs a topological order with a `for` loop. `maxParallel` is schema/reserved only.
-- Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate processes or concurrent workers.
+- Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations. Gateway routing prunes skipped branches.
+- Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is simulated in the UI after a full provider response is received.
 - Context snapshots are partial and not a complete durable provider request trace.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop.
@@ -86,7 +89,7 @@ Last execution pass: 2026-05-18.
 
 | File | Purpose |
 |---|---|
-| `src/hooks/useWorkflowExecution.ts` | Sequential workflow runner |
+| `src/hooks/useWorkflowExecution.ts` | Workflow runner (uses `runParallel`) |
 | `src/services/model-providers/providerAdapter.ts` | Provider call adapter |
 | `src/utils/providerConfig.ts` | Provider selection and Ollama URL/key helpers |
 | `src/services/wizard/goalTemplates.ts` | Rule-based goal templates |
@@ -99,9 +102,9 @@ Last execution pass: 2026-05-18.
 
 ## Next Best Work
 
-1. Implement true parallel scheduling honoring `executionSettings.maxParallel`.
-2. Replace simulated streaming with real provider streaming.
-3. Persist real per-run artifacts and context traces.
-4. Move API keys from localStorage to an OS keychain.
-5. Add installer smoke tests on a clean Windows user profile.
+1. Replace simulated streaming with real provider streaming (SSE from Tauri).
+2. Persist real per-run artifacts and context traces into `.harness/artifacts/`.
+3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
+4. Add installer smoke tests on a clean Windows user profile.
+5. Wire real GitHub Actions CI (tsc + vitest + cargo test on every push).
 
