@@ -1,5 +1,5 @@
-use crate::error::{AppError, AppResult};
 use crate::commands::fs_commands::resolve_safe_path;
+use crate::error::{AppError, AppResult};
 use crate::models::workflow::WorkflowDef;
 use std::fs;
 
@@ -24,15 +24,14 @@ pub fn save_workflow(
 pub fn load_workflow(workspace_path: String, relative_path: String) -> AppResult<WorkflowDef> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
     let content = fs::read_to_string(safe)?;
-    let def: WorkflowDef = serde_yaml::from_str(&content)
-        .map_err(|e| AppError::Yaml(e))?;
+    let def: WorkflowDef = serde_yaml::from_str(&content).map_err(|e| AppError::Yaml(e))?;
     Ok(def)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::workflow::{WorkflowMeta, ExecutionSettings};
+    use crate::models::workflow::{ExecutionSettings, WorkflowMeta};
     use std::collections::HashMap;
     use tempfile::TempDir;
 

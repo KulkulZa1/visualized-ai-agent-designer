@@ -23,7 +23,8 @@ const SECTIONS: { title: string; rows: ShortcutRow[] }[] = [
     title: "Execution",
     rows: [
       { keys: "Run button",   desc: "Start workflow" },
-      { keys: "Escape",       desc: "Close any modal" },
+      { keys: "Ctrl+I",       desc: "Agent activity panel (selected node)" },
+      { keys: "Escape",       desc: "Close any modal / panel" },
     ],
   },
   {

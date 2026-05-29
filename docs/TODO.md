@@ -1,5 +1,60 @@
 # TODO
 
+## Current Priority - 2026-05-18
+
+- [ ] Implement true parallel scheduling or keep all UI/docs explicit that execution is sequential.
+- [ ] Persist real run artifacts from workflow execution instead of showing mock placeholders.
+- [ ] Capture actual request/response/tool traces in durable context snapshots.
+- [ ] Move API keys from localStorage to OS keychain/Stronghold before broad release.
+- [ ] Add E2E UI smoke tests for first launch, Create from Goal, Settings, Run failure, AuditStrip, and Context Inspector.
+- [ ] Run generated NSIS installer on a clean Windows profile and document the result.
+- [ ] Add code signing/release strategy.
+
+Completed in the 2026-05-18 verification pass:
+
+- [x] Full TypeScript, Vitest, Rust, frontend build, Tauri dev launch, and Tauri package verification.
+- [x] MCP path traversal rejection and unsafe test filter validation.
+- [x] MCP subprocess tests for initialize, tools/list, validation, traversal rejection, filter rejection, and unknown tool.
+- [x] Rust hook command now requires explicit consent flag.
+- [x] Workflow hook-node failures are no longer marked done.
+- [x] Broad Tauri shell execute/kill permissions removed from default capabilities.
+- [x] Package scripts added: `check:ts`, `test`, `test:rust`, `check`.
+
+---
+
+## Strategic Assessment Backlog — 2026-05-17
+
+New documents (see `docs/`):
+
+- [x] `docs/UX_REVIEW.md` — UX pain points P0–P3, beginner-vs-expert matrix.
+- [x] `docs/CLI_MCP_PLAN.md` — CLI v0 surface + MCP design + safety constraints.
+- [x] `docs/VS_CODE_EXTENSION_PLAN.md` — readiness + blockers + target architecture.
+- [x] `docs/MATLAB_INTEGRATION_PLAN.md` — five options A–E + env probe spec.
+- [x] `docs/E2E_DEMO_PLAN.md` — Purchasing Decision Assistant demo + rubric.
+- [x] `examples/purchasing-decision.harness.yaml` — 5-agent demo scaffold.
+- [x] `tests/unit/examples/purchasingDemo.test.ts` — schema + structure tests.
+
+Next safe slices (one per session, ordered):
+
+- [x] UX P0: first-launch empty-state hero on canvas (`EmptyCanvasHero.tsx`).
+- [x] UX P0: amber dot on Run button + tooltip when no API key configured.
+- [x] Active-agent name pill in StatusBar during run.
+- [x] UX P1: per-agent filter chips on AuditStrip (dynamic, stacked with kind filter).
+      Hardened with `src/utils/auditFilters.ts`: All chip, stable ordering, empty states,
+      and error visibility under kind filters.
+- [x] UX P1: Output Stream expand toggle in ContextInspectorTab.
+- [x] CLI v0: `harness project status`, `workflow validate`, `provider list`
+      (`cli/harness.mjs` + `npm run harness` + 7 Vitest tests). No new deps.
+      Hardened to print app/docs/AGENT.md/example workflow metadata and provider
+      capability/classification/credential-ref metadata only.
+- [x] ProviderAdapter extraction (`src/services/model-providers/providerAdapter.ts`):
+      `callProvider()`, `buildSystemMessage()`, `resolveModel()`, `estimateTokens()`,
+      `MODEL_ALIASES`, `REASONING_EFFORT`. 19 new Vitest tests. Hook now calls service.
+- [x] Register `purchasing-decision.harness.yaml` in `useExamples` (EXAMPLES[5]).
+      `npm run harness workflow validate` confirmed. ExamplePicker now shows 6 examples.
+- [ ] Rust `check_matlab_environment` command (read-only probe). Surface
+      detected state in Settings. No execution. See `MATLAB_INTEGRATION_PLAN.md` §4.
+
 ---
 
 ## UX Issue Tracker
@@ -64,7 +119,7 @@
 These unlock after Phase 1 human review is confirmed:
 
 - [ ] Align Tauri scaffold naming with design system:
-  - Rename `.agent-audit/` → `.harness/` (or keep separate — decide)
+  - [x] Rename `.agent-audit/` to `.harness/`; current audit path is `.harness/audit.log.jsonl`
   - Update `CLAUDE.md`/`AGENTS.md` references to `.harness/` convention
   - Update color tokens in `src/` to match Atelier design tokens
 - [ ] Add `hook` and `aggregator` node types to `AgentRole` enum
@@ -118,6 +173,7 @@ These can be delegated to Codex independently (see `AGENT.md` for full context):
 - [x] Normalize OpenAI quota/billing errors into a user-friendly message
 - [x] Normalize Anthropic insufficient-credit errors into a user-friendly message
 - [x] Add Ollama fallback provider config (`LLM_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `OLLAMA_MODEL`)
+- [x] Enable Ollama Cloud / authenticated remote Ollama runtime mode (`LLM_PROVIDER=ollama-cloud`, `OLLAMA_API_KEY`, `OLLAMA_REMOTE_API_KEY`)
 - [x] Add selected-provider health checks and Ollama missing-model guidance
 - [x] Verify local Ollama fallback model `qwen2.5-coder:7b` is installed and reachable
 - [x] Relaunch visible Tauri app after provider changes and load **Harness Studio - Active Project**

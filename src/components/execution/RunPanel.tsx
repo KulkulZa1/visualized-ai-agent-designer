@@ -103,9 +103,9 @@ export function RunPanel({ onClose }: RunPanelProps) {
           />
         </div>
       )}
-      {llmProvider === "ollama" && (
+      {(llmProvider === "ollama" || llmProvider === "ollama-cloud") && (
         <div style={{ padding: "10px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0, color: "var(--hint)", fontSize: 11 }}>
-          Running locally via Ollama: <span style={{ color: "var(--text)", fontFamily: "monospace" }}>{ollamaModel}</span>
+          Running via {llmProvider === "ollama-cloud" ? "Ollama Cloud" : "local Ollama"}: <span style={{ color: "var(--text)", fontFamily: "monospace" }}>{ollamaModel}</span>
           <br />
           <span style={{ fontFamily: "monospace" }}>{ollamaBaseUrl}</span>
         </div>

@@ -5,6 +5,7 @@ import { useWorkflowStore, makeDefaultAgentNode, nextNodeId } from "@/store/work
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { applyDagreLayout } from "@/utils/autoLayout";
 import { validateWorkflow } from "@/utils/validateWorkflow";
+import { ValidationPanel } from "./ValidationPanel";
 import type { ValidationResult } from "@/types/workflow";
 import { useState } from "react";
 
@@ -25,6 +26,7 @@ export function CanvasToolbar() {
   const edges     = useWorkflowStore((s) => s.edges);
   const { setNodes, fitView } = useReactFlow();
   const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [showPanel,  setShowPanel]  = useState(false);
 
   function handleAdd(role: AgentRole) {
     const col = nodes.length % 4;
@@ -41,14 +43,14 @@ export function CanvasToolbar() {
   function handleValidate() {
     const result = validateWorkflow(nodes, edges);
     setValidation(result);
-    setTimeout(() => setValidation(null), 8000);
+    // Always open the panel — valid shows success, errors/warnings show details
+    setShowPanel(true);
   }
 
   const errorCount   = validation ? validation.errors.length : 0;
   const warningCount = validation ? validation.warnings.length : 0;
-  const issueCount   = errorCount + warningCount;
   const stateColor   = validation
-    ? (errorCount > 0 ? "var(--red)" : warningCount > 0 ? "var(--amber, #e5a142)" : "var(--green)")
+    ? (errorCount > 0 ? "var(--red)" : warningCount > 0 ? "var(--accent)" : "var(--green)")
     : "var(--muted)";
   const badgeLabel   = validation
     ? (errorCount > 0
@@ -57,75 +59,89 @@ export function CanvasToolbar() {
           ? `⚠ ${warningCount} issue${warningCount !== 1 ? "s" : ""}`
           : "✓ valid")
     : null;
-  const tooltipIssues = validation
-    ? [...validation.errors.map((e) => e.message), ...validation.warnings.map((w) => w.message)]
-        .slice(0, 3)
-        .join("\n")
-    : undefined;
 
   return (
-    <div style={{
-      display: "flex", alignItems: "center", gap: 4,
-      padding: "5px 12px", background: "var(--surface)",
-      borderBottom: "1px solid var(--border)", flexShrink: 0,
-    }}>
-      <span style={{ fontSize: 10, color: "var(--hint)", marginRight: 4 }}>Add:</span>
+    <>
+      <div style={{
+        display: "flex", alignItems: "center", gap: 4,
+        padding: "5px 12px", background: "var(--surface)",
+        borderBottom: "1px solid var(--border)", flexShrink: 0,
+      }}>
+        <span style={{ fontSize: 10, color: "var(--hint)", marginRight: 4 }}>Add:</span>
 
-      {TOOLBAR_ROLES.map((role) => {
-        const meta = ROLE_META[role];
-        return (
-          <button key={role} onClick={() => handleAdd(role)} title={`Add ${meta.label}`} style={{
-            display: "flex", alignItems: "center", gap: 5,
-            padding: "3px 9px", borderRadius: 5, border: "1px dashed var(--border-md)",
-            background: "transparent", cursor: "pointer", fontFamily: "inherit",
-            fontSize: 11, color: "var(--muted)", transition: "all 120ms",
-          }}
-          onMouseEnter={(e) => {
-            const b = e.currentTarget as HTMLButtonElement;
-            b.style.borderColor = meta.tint;
-            b.style.color = meta.tint;
-            b.style.background = meta.bgAlpha;
-          }}
-          onMouseLeave={(e) => {
-            const b = e.currentTarget as HTMLButtonElement;
-            b.style.borderColor = "var(--border-md)";
-            b.style.color = "var(--muted)";
-            b.style.background = "transparent";
-          }}>
-            <span style={{ fontSize: 12 }}>{meta.glyph}</span>
-            {meta.label}
+        {TOOLBAR_ROLES.map((role) => {
+          const meta = ROLE_META[role];
+          return (
+            <button key={role} onClick={() => handleAdd(role)} title={`Add ${meta.label}`} style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "3px 9px", borderRadius: 5, border: "1px dashed var(--border-md)",
+              background: "transparent", cursor: "pointer", fontFamily: "inherit",
+              fontSize: 11, color: "var(--muted)", transition: "all 120ms",
+            }}
+            onMouseEnter={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.borderColor = meta.tint;
+              b.style.color = meta.tint;
+              b.style.background = meta.bgAlpha;
+            }}
+            onMouseLeave={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.borderColor = "var(--border-md)";
+              b.style.color = "var(--muted)";
+              b.style.background = "transparent";
+            }}>
+              <span style={{ fontSize: 12 }}>{meta.glyph}</span>
+              {meta.label}
+            </button>
+          );
+        })}
+
+        <div style={{ flex: 1 }}/>
+
+        {/* Validation result badge — clickable to reopen the panel */}
+        {badgeLabel && (
+          <button
+            onClick={() => setShowPanel(true)}
+            style={{
+              display: "flex", alignItems: "center", gap: 5,
+              padding: "2px 8px", borderRadius: 4, marginRight: 4,
+              border: `1px solid ${stateColor}22`,
+              background: `${stateColor}11`,
+              cursor: "pointer", fontSize: 11, color: stateColor,
+              fontFamily: "inherit",
+            }}
+          >
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: stateColor, flexShrink: 0 }}/>
+            {badgeLabel}
           </button>
-        );
-      })}
+        )}
 
-      <div style={{ flex: 1 }}/>
+        <button title="Validate graph (Ctrl+.)" onClick={handleValidate} style={{
+          padding: "3px 9px", borderRadius: 5, border: "1px solid var(--border)",
+          background: "transparent", cursor: "pointer", fontSize: 11,
+          color: "var(--muted)", fontFamily: "inherit",
+          display: "flex", alignItems: "center", gap: 5,
+        }}>
+          <NodeIcon name="check" size={12}/> Validate
+        </button>
 
-      {/* Validation badge */}
-      {badgeLabel && (
-        <span title={tooltipIssues} style={{ fontSize: 11, color: stateColor, marginRight: 6,
-          display: "flex", alignItems: "center", gap: 5, cursor: issueCount > 0 ? "help" : "default" }}>
-          <span style={{ width: 6, height: 6, borderRadius: "50%", background: stateColor }}/>
-          {badgeLabel}
-        </span>
+        <button title="Auto-layout (Ctrl+L)" onClick={handleLayout} style={{
+          padding: "3px 9px", borderRadius: 5, border: "1px solid var(--border)",
+          background: "transparent", cursor: "pointer", fontSize: 11,
+          color: "var(--muted)", fontFamily: "inherit",
+          display: "flex", alignItems: "center", gap: 5,
+        }}>
+          <NodeIcon name="grid" size={12}/> Auto-layout
+        </button>
+      </div>
+
+      {/* Validation details modal */}
+      {showPanel && validation && (
+        <ValidationPanel
+          result={validation}
+          onClose={() => setShowPanel(false)}
+        />
       )}
-
-      <button title="Validate graph (Ctrl+.)" onClick={handleValidate} style={{
-        padding: "3px 9px", borderRadius: 5, border: "1px solid var(--border)",
-        background: "transparent", cursor: "pointer", fontSize: 11,
-        color: "var(--muted)", fontFamily: "inherit",
-        display: "flex", alignItems: "center", gap: 5,
-      }}>
-        <NodeIcon name="check" size={12}/> Validate
-      </button>
-
-      <button title="Auto-layout (Ctrl+L)" onClick={handleLayout} style={{
-        padding: "3px 9px", borderRadius: 5, border: "1px solid var(--border)",
-        background: "transparent", cursor: "pointer", fontSize: 11,
-        color: "var(--muted)", fontFamily: "inherit",
-        display: "flex", alignItems: "center", gap: 5,
-      }}>
-        <NodeIcon name="grid" size={12}/> Auto-layout
-      </button>
-    </div>
+    </>
   );
 }

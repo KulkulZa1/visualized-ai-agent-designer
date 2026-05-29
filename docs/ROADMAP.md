@@ -1,4 +1,23 @@
-# Roadmap — Harness Studio
+# Roadmap - Harness Studio
+
+Updated: 2026-05-18
+
+Current truth:
+
+- Phase 5 execution exists but is sequential, not parallel.
+- `executionSettings.maxParallel` is reserved schema only.
+- CLI v0 and MCP v0 are implemented and verified.
+- Workflow Wizard and Guide Assistant are implemented as rule-based, non-live helpers.
+- Ollama Cloud is implemented for `https://ollama.com/api` and `gemma4:31b-cloud`.
+- Tauri packaging succeeds on Windows, but clean-machine installer smoke testing is still required.
+
+Near-term roadmap:
+
+1. True parallel scheduler.
+2. Real streaming.
+3. Durable run traces and artifact persistence.
+4. OS keychain storage.
+5. E2E UI automation and installer smoke tests.
 
 ---
 

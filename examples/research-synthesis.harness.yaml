@@ -1,0 +1,302 @@
+# research-synthesis.harness.yaml
+# Pattern: Orchestrator → parallel Workers → Critic → Memory → Final Check
+# All agents use Ollama — no cloud key needed.
+#
+# HOW THE CHAIN WORKS (with the real execution engine):
+#   Orchestrator output  →  both workers get it as "UPSTREAM OUTPUTS"
+#   Worker1 + Worker2   →  Critic gets both outputs combined
+#   Critic output        →  Memory stores it in "critic-verdict" key
+#   Memory              →  Final Check reads memory + full chain
+#
+# LOAD: press Ctrl+E → "Research & Synthesis" → Load
+# RUN:  click ▶ Run, enter your topic in the prompt dialog, click Start
+
+meta:
+  name: Research & Synthesis Pipeline
+  version: "1.0.0"
+  description: >
+    Full agent chain demo. Orchestrator decomposes a topic into parallel Pro/Con
+    analyses, a Critic reviews both and gives a verdict, Memory persists findings,
+    and a Final Check produces a complete Markdown report. All agents run on Ollama.
+  projectRoot: ""
+  createdAt: "2026-05-17T00:00:00Z"
+  updatedAt: "2026-05-17T00:00:00Z"
+
+agents:
+
+  # ── agent-0: Orchestrator ────────────────────────────────────────────────────
+  - name: Orchestrator
+    role: orchestrator
+    model: qwen2.5-coder:7b
+    temperature: 0.6
+    maxTokens: 1024
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Receives the user's topic and produces a structured analysis plan for the two workers.
+    promptSource:
+      type: inline
+      content: |
+        You are the Orchestrator. The user gave you a topic or question to analyze.
+
+        Your job:
+        1. Restate the topic clearly in ONE sentence.
+        2. Break it down into 3–4 specific sub-questions to answer.
+        3. Assign workers:
+           - Worker 1 (Pro Analyst): focus on BENEFITS, ADVANTAGES, OPPORTUNITIES
+           - Worker 2 (Con Analyst): focus on RISKS, CHALLENGES, LIMITATIONS
+
+        Output EXACTLY this JSON (no extra text):
+        {
+          "topic": "<one-sentence topic>",
+          "questions": ["<q1>", "<q2>", "<q3>"],
+          "worker1_task": "<what pro analyst should research>",
+          "worker2_task": "<what con analyst should research>"
+        }
+    tools: []
+    memoryRead: []
+    memoryWrite: [task-plan]
+    tokens: { used: 0, budget: 8000 }
+    status: idle
+
+  # ── agent-1: Pro Analyst (Worker 1) ─────────────────────────────────────────
+  - name: Pro Analyst
+    role: worker
+    model: qwen2.5-coder:7b
+    temperature: 0.5
+    maxTokens: 1500
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Analyzes benefits, advantages, and opportunities based on the Orchestrator's plan.
+    promptSource:
+      type: inline
+      content: |
+        You are the Pro Analyst. The Orchestrator's plan is in your UPSTREAM OUTPUTS.
+
+        Read the Orchestrator's JSON output. Focus on the "worker1_task" assignment.
+
+        Produce a structured benefits analysis:
+        ## Benefits & Advantages
+
+        For EACH benefit (aim for 3–5):
+        **Benefit N: <name>**
+        - Why it matters: <explanation>
+        - Concrete example: <specific example>
+        - Impact level: High / Medium / Low
+
+        ## Summary
+        <2–3 sentences overall assessment of the opportunities>
+    tools: [read_file, list_files]
+    memoryRead: [task-plan]
+    memoryWrite: [analysis-pros]
+    tokens: { used: 0, budget: 12000 }
+    status: idle
+
+  # ── agent-2: Con Analyst (Worker 2) ─────────────────────────────────────────
+  - name: Con Analyst
+    role: worker
+    model: qwen2.5-coder:7b
+    temperature: 0.5
+    maxTokens: 1500
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Analyzes risks, challenges, and limitations based on the Orchestrator's plan.
+    promptSource:
+      type: inline
+      content: |
+        You are the Con Analyst. The Orchestrator's plan is in your UPSTREAM OUTPUTS.
+
+        Read the Orchestrator's JSON output. Focus on the "worker2_task" assignment.
+
+        Produce a structured risks analysis:
+        ## Risks & Challenges
+
+        For EACH risk (aim for 3–5):
+        **Risk N: <name>**
+        - Why it matters: <explanation>
+        - Real-world impact: <specific scenario>
+        - Mitigation: <how to address it>
+        - Severity: High / Medium / Low
+
+        ## Summary
+        <2–3 sentences overall assessment of the risks>
+    tools: [read_file, list_files]
+    memoryRead: [task-plan]
+    memoryWrite: [analysis-cons]
+    tokens: { used: 0, budget: 12000 }
+    status: idle
+
+  # ── agent-3: Critic ──────────────────────────────────────────────────────────
+  - name: Critic
+    role: critic
+    model: qwen2.5-coder:7b
+    temperature: 0.3
+    maxTokens: 1200
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Reviews both worker analyses, identifies gaps, and issues a verdict.
+    promptSource:
+      type: inline
+      content: |
+        You are the Critic. In your UPSTREAM OUTPUTS you have:
+        - Pro Analyst's benefits analysis (from: Pro Analyst → pros)
+        - Con Analyst's risks analysis (from: Con Analyst → cons)
+
+        Your task:
+        1. Read both analyses carefully.
+        2. Check: Are any major benefits/risks missing? Any inconsistencies?
+        3. Assess the balance: are the risks overstated or understated vs benefits?
+        4. Issue a verdict.
+
+        Output EXACTLY this JSON:
+        {
+          "verdict": "PROCEED" | "PROCEED WITH CAUTION" | "DO NOT PROCEED",
+          "rationale": "<2–3 sentences explaining your verdict>",
+          "gaps_found": ["<gap1>", "<gap2>"],
+          "key_insight": "<the single most important finding>",
+          "recommendations": ["<rec1>", "<rec2>", "<rec3>"]
+        }
+    tools: []
+    memoryRead: [analysis-pros, analysis-cons]
+    memoryWrite: [critic-verdict]
+    tokens: { used: 0, budget: 10000 }
+    status: idle
+
+  # ── agent-4: Memory (Findings Log) ──────────────────────────────────────────
+  - name: Findings Log
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 30
+    description: >
+      Aggregates all upstream outputs (Pro analysis, Con analysis, Critic verdict)
+      and persists them for the Final Check agent.
+    promptSource:
+      type: inline
+      content: ""
+    tools: [fs.append, fs.read]
+    memoryRead: []
+    memoryWrite: [synthesis, analysis-pros, analysis-cons, critic-verdict]
+    tokens: { used: 0, budget: 0 }
+    status: idle
+
+  # ── agent-5: Final Check (Aggregator) ───────────────────────────────────────
+  - name: Final Check
+    role: aggregator
+    model: qwen2.5-coder:7b
+    temperature: 0.4
+    maxTokens: 2000
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Reads all findings from memory and upstream chain, produces the final Markdown report.
+    promptSource:
+      type: inline
+      content: |
+        You are the Final Check. Your MEMORY context contains all findings:
+        - analysis-pros: benefits analysis from Pro Analyst
+        - analysis-cons: risks analysis from Con Analyst
+        - critic-verdict: the Critic's JSON verdict
+        - synthesis: all findings combined
+
+        Also check your UPSTREAM OUTPUTS for the complete chain.
+
+        Write a polished executive report in Markdown:
+
+        # Analysis Report: [Topic]
+
+        ## Executive Summary
+        [3–5 sentences covering the topic, key finding, and recommendation]
+
+        ## Key Findings
+
+        | Category | Finding | Impact |
+        |----------|---------|--------|
+        [3–5 rows mixing pros and cons]
+
+        ## Critic's Verdict
+        **[VERDICT]** — [rationale from critic]
+
+        ## Recommendations
+        1. [rec1]
+        2. [rec2]
+        3. [rec3]
+
+        ## Confidence Level
+        **[High / Medium / Low]** — [1 sentence explaining confidence]
+
+        ---
+        *Generated by Research & Synthesis Pipeline · All agents: Ollama (qwen2.5-coder:7b)*
+    tools: [fs.read]
+    memoryRead: [synthesis, analysis-pros, analysis-cons, critic-verdict]
+    memoryWrite: [final-report]
+    tokens: { used: 0, budget: 16000 }
+    status: idle
+
+connections:
+  # Orchestrator → both workers (parallel fan-out)
+  - id: orch-to-pro
+    sourceAgentId: agent-0
+    targetAgentId: agent-1
+    label: task plan
+    edgeKind: dataflow
+
+  - id: orch-to-con
+    sourceAgentId: agent-0
+    targetAgentId: agent-2
+    label: task plan
+    edgeKind: dataflow
+
+  # Workers → Critic (fan-in with labels)
+  - id: pro-to-critic
+    sourceAgentId: agent-1
+    targetAgentId: agent-3
+    label: pros
+    edgeKind: dataflow
+
+  - id: con-to-critic
+    sourceAgentId: agent-2
+    targetAgentId: agent-3
+    label: cons
+    edgeKind: dataflow
+
+  # Workers → Memory (persist individual analyses)
+  - id: pro-to-memory
+    sourceAgentId: agent-1
+    targetAgentId: agent-4
+    label: pros log
+    edgeKind: memory
+
+  - id: con-to-memory
+    sourceAgentId: agent-2
+    targetAgentId: agent-4
+    label: cons log
+    edgeKind: memory
+
+  # Critic → Memory (persist verdict)
+  - id: critic-to-memory
+    sourceAgentId: agent-3
+    targetAgentId: agent-4
+    label: verdict
+    edgeKind: memory
+
+  # Memory → Final Check
+  - id: memory-to-final
+    sourceAgentId: agent-4
+    targetAgentId: agent-5
+    label: all findings
+    edgeKind: memory
+
+executionSettings:
+  maxParallel: 2
+  timeoutSeconds: 900
+  retryOnFailure: false
+  maxRetries: 0
+
+nodePositions:
+  agent-0: { x: 60,   y: 240 }
+  agent-1: { x: 320,  y: 100 }
+  agent-2: { x: 320,  y: 380 }
+  agent-3: { x: 580,  y: 240 }
+  agent-4: { x: 840,  y: 240 }
+  agent-5: { x: 1100, y: 240 }

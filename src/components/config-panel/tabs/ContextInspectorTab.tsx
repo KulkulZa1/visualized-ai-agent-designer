@@ -17,14 +17,14 @@ import { Sec, SmallBtn } from "../shared";
 const mono = "var(--font-mono)";
 const MAX_HISTORY = 5;
 
-function TextBlock({ children }: { children: React.ReactNode }) {
+function TextBlock({ children, expanded = false }: { children: React.ReactNode; expanded?: boolean }) {
   return (
     <pre style={{
       margin: 0, padding: "8px 10px", borderRadius: 4,
       background: "var(--bg)", border: "1px solid var(--border)",
       color: "var(--text)", fontFamily: mono, fontSize: 11,
       lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word",
-      maxHeight: 240, overflow: "auto",
+      maxHeight: expanded ? "none" : 240, overflow: "auto",
     }}>
       {children}
     </pre>
@@ -273,6 +273,7 @@ export function ContextInspectorTab({ nodeId }: { nodeId: string }) {
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
   const node = nodes.find((candidate) => candidate.id === nodeId);
   const agentRun = useNodeExecutionData(nodeId);
+  const [outputExpanded, setOutputExpanded] = useState(false);
 
   // Seed a snapshot when the tab is opened (non-blocking)
   useEffect(() => {
@@ -347,8 +348,15 @@ export function ContextInspectorTab({ nodeId }: { nodeId: string }) {
         </div>
       </Sec>
 
-      <Sec title="Output Stream">
-        <TextBlock>{snapshot.outputStream.content}</TextBlock>
+      <Sec
+        title="Output Stream"
+        action={
+          <SmallBtn onClick={() => setOutputExpanded((v) => !v)}>
+            {outputExpanded ? "↕ Collapse" : "↕ Expand"}
+          </SmallBtn>
+        }
+      >
+        <TextBlock expanded={outputExpanded}>{snapshot.outputStream.content}</TextBlock>
       </Sec>
 
       <Sec title="Artifacts">

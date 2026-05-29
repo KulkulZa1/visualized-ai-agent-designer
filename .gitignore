@@ -14,6 +14,7 @@ api-keys.*
 # =====================================================
 # Audit and operational data
 # =====================================================
+# Root workspace runtime data
 .harness/audit.log.jsonl
 .harness/trajectories/
 .harness/snapshots/
@@ -22,6 +23,11 @@ api-keys.*
 audit-log.db
 audit-log.db-shm
 audit-log.db-wal
+# Any nested workspace runtime data (e.g. Run_test/.harness/)
+**/.harness/audit.log.jsonl
+**/.harness/trajectories/
+**/.harness/snapshots/
+**/.harness/artifacts/
 
 # =====================================================
 # Node.js
@@ -39,7 +45,9 @@ dist/
 dist-ssr/
 build/
 src-tauri/target/
+src-tauri/target-codex-*/
 src-tauri/gen/
+target-codex-verify-root/
 
 # =====================================================
 # TypeScript
@@ -75,6 +83,7 @@ $RECYCLE.BIN/
 *.tmp
 *.bak
 .workflow-cache/
+Run_test/
 
 # =====================================================
 # Logs

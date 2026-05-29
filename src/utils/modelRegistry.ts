@@ -14,6 +14,7 @@ export type ProviderId =
   | "anthropic"
   | "openai"
   | "ollama"
+  | "ollama-cloud"
   | "openrouter"
   | "kilo"
   | "custom";
@@ -109,6 +110,23 @@ export const PROVIDERS: ProviderDef[] = [
     ],
   },
   {
+    id: "ollama-cloud",
+    label: "Ollama Cloud",
+    logoColor: "#0ea5e9",
+    requiresKey: true,
+    defaultModels: [
+      { id: "gemma4:31b-cloud",  label: "Gemma 4 31B Cloud",  contextK: 128, tags: ["chat", "cloud"] },
+      { id: "gemma3:1b",         label: "Gemma 3 1B (free)",  contextK: 128, tags: ["chat", "free"] },
+      { id: "gemma3:4b",         label: "Gemma 3 4B (free)",  contextK: 128, tags: ["chat", "free"] },
+      { id: "llama3.2:1b",       label: "Llama 3.2 1B (free)", contextK: 128, tags: ["chat", "free"] },
+      { id: "llama3.2:3b",       label: "Llama 3.2 3B (free)", contextK: 128, tags: ["chat", "free"] },
+      { id: "qwen3:0.6b",        label: "Qwen 3 0.6B (free)", contextK: 32,  tags: ["chat", "free"] },
+      { id: "qwen3:1.7b",        label: "Qwen 3 1.7B (free)", contextK: 64,  tags: ["chat", "free"] },
+      { id: "qwen3:4b",          label: "Qwen 3 4B (free)",   contextK: 64,  tags: ["chat", "free"] },
+      { id: "gemma2:2b",         label: "Gemma 2 2B (free)",  contextK: 128, tags: ["chat", "free"] },
+    ],
+  },
+  {
     id: "openrouter",
     label: "OpenRouter",
     logoColor: "#8b5cf6",
@@ -145,6 +163,7 @@ export const PROVIDER_MAP = Object.fromEntries(
 /** Infer provider from model ID string. */
 export function inferProvider(modelId: string): ProviderId {
   if (!modelId) return "anthropic";
+  if (modelId.includes(":cloud"))      return "ollama-cloud";
   if (modelId.startsWith("claude-"))   return "anthropic";
   if (modelId.startsWith("gpt-") || /^o\d/.test(modelId)) return "openai";
   if (modelId.includes("/"))           return "openrouter";

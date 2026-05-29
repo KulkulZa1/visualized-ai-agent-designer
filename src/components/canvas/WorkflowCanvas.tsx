@@ -8,6 +8,7 @@ import {
   type NodeTypes,
   type EdgeTypes,
 } from "@xyflow/react";
+import { EmptyCanvasHero } from "./EmptyCanvasHero";
 import "@xyflow/react/dist/style.css";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useUIStore } from "@/store/uiStore";
@@ -70,8 +71,11 @@ export function WorkflowCanvas() {
     [selectNode]
   );
 
+  const isEmpty = nodes.length === 0;
+
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      {isEmpty && <EmptyCanvasHero />}
       <EdgeDefs />
       <ReactFlow
         nodes={nodes.map((n) => ({

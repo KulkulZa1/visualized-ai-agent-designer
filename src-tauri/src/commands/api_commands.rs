@@ -9,7 +9,9 @@ const OPENAI_RATE_LIMIT_MESSAGE: &str =
 const ANTHROPIC_CREDIT_MESSAGE: &str =
     "Anthropic API is configured, but the account has insufficient API credits. Please recharge credits in Anthropic Console Plans & Billing.";
 const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
+const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/api";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5-coder:7b";
+const DEFAULT_OLLAMA_CLOUD_MODEL: &str = "gemma4:31b-cloud";
 
 // ── Error classification ──────────────────────────────────────────────────────
 
@@ -42,6 +44,16 @@ struct OpenAIMessageOut {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OllamaChatResponse {
+    message: OllamaChatMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaChatMessage {
+    content: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProviderHealth {
     pub ok: bool,
@@ -59,6 +71,7 @@ pub struct ProviderDefaults {
     pub ollama_model: String,
     pub openai_api_key_configured: bool,
     pub anthropic_api_key_configured: bool,
+    pub ollama_api_key_configured: bool,
     pub suggested_ollama_models: Vec<String>,
 }
 
@@ -195,6 +208,13 @@ fn anthropic_message_from_body(body: &str) -> String {
 
 // ── OpenAI ────────────────────────────────────────────────────────────────────
 
+fn redact_secret(text: &str, secret: Option<&str>) -> String {
+    let Some(secret) = secret.map(str::trim).filter(|secret| !secret.is_empty()) else {
+        return text.to_string();
+    };
+    text.replace(secret, "[redacted]")
+}
+
 #[tauri::command]
 pub async fn call_openai_api(
     model: String,
@@ -203,9 +223,31 @@ pub async fn call_openai_api(
     api_key: String,
     max_tokens: u32,
     reasoning_effort: Option<String>,
+    // Optional base URL for custom OpenAI-compatible endpoints.
+    // When None or empty, defaults to https://api.openai.com/v1
+    base_url: Option<String>,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
-    let api_key = resolve_api_key(&api_key, "OPENAI_API_KEY")?;
+
+    // Build the endpoint URL — use custom base URL if provided, otherwise OpenAI default
+    let endpoint = base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .map(|u| format!("{}/chat/completions", u.trim_end_matches('/')))
+        .unwrap_or_else(|| "https://api.openai.com/v1/chat/completions".to_string());
+
+    // Resolve API key — for custom endpoints, key may be optional
+    let is_custom = base_url
+        .as_deref()
+        .map(|u| !u.trim().is_empty())
+        .unwrap_or(false);
+    let api_key = if is_custom && api_key.trim().is_empty() {
+        // Custom endpoint with no key — skip auth header
+        String::new()
+    } else {
+        resolve_api_key(&api_key, "OPENAI_API_KEY")?
+    };
 
     let mut body = serde_json::json!({
         "model": model,
@@ -228,14 +270,17 @@ pub async fn call_openai_api(
             tokio::time::sleep(Duration::from_secs(delays[attempt - 1])).await;
         }
 
-        let response = client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
+        let mut req = client
+            .post(&endpoint)
+            .header("Content-Type", "application/json");
+        if !api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", api_key));
+        }
+        let response = req
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("OpenAI network error: {e}"))?;
+            .map_err(|e| format!("Network error: {e}"))?;
 
         let status = response.status().as_u16();
 
@@ -428,10 +473,22 @@ pub async fn call_ollama_api(
     system: String,
     user_message: String,
     base_url: String,
+    api_key: Option<String>,
     max_tokens: u32,
 ) -> Result<String, String> {
     let client = reqwest::Client::new();
-    let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+    let base_url = if base_url.trim().is_empty() {
+        DEFAULT_OLLAMA_BASE_URL.to_string()
+    } else {
+        base_url.trim().to_string()
+    };
+    let api_key = resolve_ollama_api_key_for_endpoint(
+        api_key.as_deref().unwrap_or(""),
+        &base_url,
+        ollama_requires_api_key(&base_url),
+    )?;
+    let url = ollama_api_endpoint(&base_url, "chat");
+    let model = normalize_ollama_model(&model);
 
     let body = serde_json::json!({
         "model": model,
@@ -439,13 +496,22 @@ pub async fn call_ollama_api(
             {"role": "system", "content": system},
             {"role": "user", "content": user_message}
         ],
-        "max_tokens": max_tokens,
+        "stream": false,
+        "options": {
+            "num_predict": max_tokens
+        },
     });
 
-    let response = client
+    let mut request = client
         .post(&url)
         .header("Content-Type", "application/json")
-        .json(&body)
+        .json(&body);
+
+    if let Some(ref api_key) = api_key {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|_| ollama_unavailable_message(&base_url))?;
@@ -453,25 +519,30 @@ pub async fn call_ollama_api(
     if !response.status().is_success() {
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(format!(
+                "Ollama endpoint returned {status}. If this is Ollama Cloud or an authenticated remote endpoint, set OLLAMA_API_KEY or OLLAMA_REMOTE_API_KEY."
+            ));
+        }
         if text.to_lowercase().contains("model") {
             return Err(format!(
                 "Ollama model {model} is not installed. Run: ollama pull {model}"
             ));
         }
-        return Err(format!("Ollama {status}: {text}"));
+        let safe_text = redact_secret(&text, api_key.as_deref());
+        return Err(format!("Ollama {status}: {safe_text}"));
     }
 
-    let parsed: OpenAIResponse = response
+    let parsed: OllamaChatResponse = response
         .json()
         .await
         .map_err(|e| format!("Failed to parse Ollama response: {e}"))?;
 
-    parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| "No content in Ollama response".to_string())
+    if parsed.message.content.trim().is_empty() {
+        Err("No content in Ollama response".to_string())
+    } else {
+        Ok(parsed.message.content)
+    }
 }
 
 // ── Provider health check ─────────────────────────────────────────────────────
@@ -487,24 +558,345 @@ struct OllamaModel {
 }
 
 fn ollama_unavailable_message(base_url: &str) -> String {
+    if ollama_requires_api_key(base_url) {
+        return format!(
+            "Ollama Cloud is selected, but the endpoint is not reachable at {base_url}. Please check network access and try again."
+        );
+    }
     format!(
         "Ollama is selected, but the local Ollama server is not reachable at {base_url}. Please start Ollama and try again."
     )
 }
 
+fn ollama_missing_api_key_message() -> String {
+    "Ollama Cloud is selected, but no API key is configured. Set OLLAMA_API_KEY for ollama.com, or OLLAMA_REMOTE_API_KEY for an authenticated remote endpoint.".to_string()
+}
+
+fn ollama_requires_api_key(base_url: &str) -> bool {
+    let host = ollama_host(base_url);
+    host == "ollama.com" || host.ends_with(".ollama.com")
+}
+
+fn ollama_host(base_url: &str) -> String {
+    let lower = base_url.trim().to_lowercase();
+    let without_protocol = lower
+        .strip_prefix("https://")
+        .or_else(|| lower.strip_prefix("http://"))
+        .unwrap_or(&lower);
+    if let Some(rest) = without_protocol.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_string();
+    }
+    without_protocol
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn ollama_is_remote_url(base_url: &str) -> bool {
+    let lower = base_url.trim().to_lowercase();
+    if !lower.starts_with("http://") && !lower.starts_with("https://") {
+        return false;
+    }
+    let host = ollama_host(base_url);
+    !host.is_empty() && !matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
+fn ollama_env_key_names(base_url: &str) -> &'static [&'static str] {
+    if ollama_requires_api_key(base_url) {
+        &["OLLAMA_API_KEY"]
+    } else if ollama_is_remote_url(base_url) {
+        &["OLLAMA_REMOTE_API_KEY"]
+    } else {
+        &[]
+    }
+}
+
+fn ollama_api_endpoint(base_url: &str, path: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let path = path.trim().trim_start_matches('/');
+    if base.ends_with("/api") {
+        format!("{base}/{path}")
+    } else {
+        format!("{base}/api/{path}")
+    }
+}
+
+fn normalize_ollama_model(model: &str) -> String {
+    match model.trim() {
+        "gemma4-31b:cloud" => "gemma4:31b-cloud".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn resolve_ollama_api_key_for_endpoint(
+    provided: &str,
+    base_url: &str,
+    required: bool,
+) -> Result<Option<String>, String> {
+    let trimmed = provided.trim();
+    if !trimmed.is_empty() {
+        return Ok(Some(trimmed.to_string()));
+    }
+
+    for env_name in ollama_env_key_names(base_url) {
+        if let Some(value) = env::var(env_name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(value));
+        }
+    }
+
+    if required {
+        Err(ollama_missing_api_key_message())
+    } else {
+        Ok(None)
+    }
+}
+
 fn ollama_has_model(tags: &OllamaTagsResponse, model: &str) -> bool {
-    tags.models
-        .iter()
-        .any(|m| m.name == model || m.name.starts_with(&format!("{model}:")))
+    // Bare name (no tag): "deepseek-coder-v2" matches "deepseek-coder-v2:latest"
+    let model_bare = model.split(':').next().unwrap_or(model);
+    tags.models.iter().any(|m| {
+        let installed_bare = m.name.split(':').next().unwrap_or(&m.name);
+        m.name == model                                   // exact
+            || m.name.starts_with(&format!("{model}:"))  // model matches with any tag
+            || installed_bare == model_bare // bare name match
+    })
+}
+
+// ── Model listing ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelsResponse {
+    data: Vec<OpenAIModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIModelEntry {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelsResponse {
+    data: Vec<AnthropicModelEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicModelEntry {
+    id: String,
+}
+
+/// Returns true for OpenAI model IDs that support chat completions.
+fn is_chat_model(id: &str) -> bool {
+    let id = id.to_lowercase();
+    // Exclude embeddings, audio, image, fine-tune bases, and deprecated models.
+    let exclude = [
+        "embedding",
+        "tts",
+        "whisper",
+        "dall-e",
+        "davinci-002",
+        "babbage",
+        "ada",
+        "curie",
+        "moderation",
+        "realtime",
+        "instruct",
+        "preview-2023",
+        "preview-2024",
+    ];
+    if exclude.iter().any(|e| id.contains(e)) {
+        return false;
+    }
+    // Include known chat families.
+    id.starts_with("gpt-")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+        || id.starts_with("chatgpt-")
+        || id.starts_with("gpt4")
+}
+
+/// List models available for the given provider and credentials.
+/// Returns a sorted Vec<String> of model IDs on success.
+#[tauri::command]
+pub async fn list_provider_models(
+    provider: String,
+    api_key: String,
+    base_url: String,
+) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    match provider.as_str() {
+        "ollama" | "ollama-cloud" => {
+            let url_base = if base_url.trim().is_empty() {
+                if provider == "ollama-cloud" {
+                    DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()
+                } else {
+                    DEFAULT_OLLAMA_BASE_URL.to_string()
+                }
+            } else {
+                base_url.trim().to_string()
+            };
+            // For BOTH local and remote Ollama, pass auth key when present.
+            // Remote servers behind a reverse proxy need it even if they're
+            // not ollama.com (e.g. https://myserver.com:11434).
+            let auth_key = resolve_ollama_api_key_for_endpoint(
+                &api_key,
+                &url_base,
+                provider == "ollama-cloud" && ollama_requires_api_key(&url_base),
+            )?;
+            let tags_url = ollama_api_endpoint(&url_base, "tags");
+            let mut req = client.get(&tags_url);
+            if let Some(key) = &auth_key {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            }
+            let resp = req.send().await
+                .map_err(|_| format!("Cannot reach Ollama at {url_base}. Check the URL and that the server is running."))?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return Err(
+                        "Authentication required. Add an auth token for this endpoint.".to_string(),
+                    );
+                }
+                return Err(format!("Ollama endpoint returned HTTP {status}"));
+            }
+            let tags: OllamaTagsResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse model list: {e}"))?;
+            let mut models: Vec<String> = tags.models.into_iter().map(|m| m.name).collect();
+            models.sort();
+            Ok(models)
+        }
+
+        "openai" => {
+            let key = resolve_api_key(&api_key, "OPENAI_API_KEY")?;
+            let resp = client
+                .get("https://api.openai.com/v1/models")
+                .header("Authorization", format!("Bearer {key}"))
+                .send()
+                .await
+                .map_err(|e| format!("OpenAI network error: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp.text().await.unwrap_or_default();
+                return Err(normalize_provider_error("openai", status, &body).message);
+            }
+            let data: OpenAIModelsResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse models: {e}"))?;
+            let mut models: Vec<String> = data
+                .data
+                .into_iter()
+                .map(|m| m.id)
+                .filter(|id| is_chat_model(id))
+                .collect();
+            models.sort();
+            Ok(models)
+        }
+
+        "anthropic" => {
+            let key = resolve_api_key(&api_key, "ANTHROPIC_API_KEY")?;
+            let resp = client
+                .get("https://api.anthropic.com/v1/models")
+                .header("x-api-key", &key)
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+                .map_err(|e| format!("Anthropic network error: {e}"))?;
+            if resp.status().is_success() {
+                let data: AnthropicModelsResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse models: {e}"))?;
+                let mut models: Vec<String> = data.data.into_iter().map(|m| m.id).collect();
+                models.sort_by(|a, b| b.cmp(a)); // newest first
+                Ok(models)
+            } else {
+                // Anthropic may not expose models to all keys; return known list
+                Ok(vec![
+                    "claude-opus-4-5".to_string(),
+                    "claude-sonnet-4-5".to_string(),
+                    "claude-haiku-4-5".to_string(),
+                    "claude-opus-4".to_string(),
+                    "claude-sonnet-4".to_string(),
+                    "claude-3-5-sonnet-20241022".to_string(),
+                    "claude-3-5-haiku-20241022".to_string(),
+                    "claude-3-opus-20240229".to_string(),
+                ])
+            }
+        }
+
+        // OpenAI-compatible custom endpoint: use provided base_url
+        "openai-compatible" => {
+            let effective_base = if base_url.trim().is_empty() {
+                return Err("Base URL is required for OpenAI-compatible endpoints.".to_string());
+            } else {
+                base_url.trim().to_string()
+            };
+            let models_url = format!("{}/models", effective_base.trim_end_matches('/'));
+            let mut req = client.get(&models_url);
+            if !api_key.trim().is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key.trim()));
+            }
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| format!("Cannot reach {effective_base}: {e}"))?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return Err("Authentication required. Check your API key.".to_string());
+                }
+                return Err(format!("Endpoint returned HTTP {status}"));
+            }
+            let data: OpenAIModelsResponse = resp
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse model list: {e}"))?;
+            let mut models: Vec<String> = data.data.into_iter().map(|m| m.id).collect();
+            models.sort();
+            Ok(models)
+        }
+
+        other => Err(format!("Model listing not supported for provider: {other}")),
+    }
 }
 
 #[tauri::command]
 pub fn get_provider_defaults() -> ProviderDefaults {
     let llm_provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "auto".to_string());
-    let ollama_base_url =
-        env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| DEFAULT_OLLAMA_BASE_URL.to_string());
-    let ollama_model =
-        env::var("OLLAMA_MODEL").unwrap_or_else(|_| DEFAULT_OLLAMA_MODEL.to_string());
+    let ollama_base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| {
+        if llm_provider.trim().eq_ignore_ascii_case("ollama-cloud") {
+            DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()
+        } else {
+            DEFAULT_OLLAMA_BASE_URL.to_string()
+        }
+    });
+    let ollama_model = env::var("OLLAMA_MODEL").unwrap_or_else(|_| {
+        if llm_provider.trim().eq_ignore_ascii_case("ollama-cloud") {
+            DEFAULT_OLLAMA_CLOUD_MODEL.to_string()
+        } else {
+            DEFAULT_OLLAMA_MODEL.to_string()
+        }
+    });
+    let ollama_model = normalize_ollama_model(&ollama_model);
+    let ollama_api_key_configured =
+        resolve_ollama_api_key_for_endpoint("", &ollama_base_url, false)
+            .map(|key| key.is_some())
+            .unwrap_or(false);
 
     ProviderDefaults {
         llm_provider,
@@ -512,7 +904,9 @@ pub fn get_provider_defaults() -> ProviderDefaults {
         ollama_model,
         openai_api_key_configured: resolve_api_key("", "OPENAI_API_KEY").is_ok(),
         anthropic_api_key_configured: resolve_api_key("", "ANTHROPIC_API_KEY").is_ok(),
+        ollama_api_key_configured,
         suggested_ollama_models: vec![
+            "gemma4:31b-cloud".to_string(),
             "qwen2.5-coder:7b".to_string(),
             "qwen2.5-coder:14b".to_string(),
             "llama3.1:8b".to_string(),
@@ -667,9 +1061,9 @@ pub async fn check_provider_health(
             let model = if model.trim().is_empty() {
                 DEFAULT_OLLAMA_MODEL.to_string()
             } else {
-                model.trim().to_string()
+                normalize_ollama_model(&model)
             };
-            let tags_url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+            let tags_url = ollama_api_endpoint(&base_url, "tags");
             let resp = client.get(&tags_url).send().await;
             let latency_ms = start.elapsed().as_millis() as u64;
 
@@ -718,6 +1112,161 @@ pub async fn check_provider_health(
             }
         }
 
+        // Ollama Cloud — same /api/tags probe but with optional Bearer auth
+        "ollama-cloud" => {
+            let base_url = if base_url.trim().is_empty() {
+                DEFAULT_OLLAMA_CLOUD_BASE_URL.to_string()
+            } else {
+                base_url.trim().to_string()
+            };
+            let model = if model.trim().is_empty() {
+                DEFAULT_OLLAMA_CLOUD_MODEL.to_string()
+            } else {
+                normalize_ollama_model(&model)
+            };
+            let auth_key = resolve_ollama_api_key_for_endpoint(
+                &api_key,
+                &base_url,
+                ollama_requires_api_key(&base_url),
+            )?;
+            let tags_url = ollama_api_endpoint(&base_url, "tags");
+            let mut req = client.get(&tags_url);
+            if let Some(key) = &auth_key {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            }
+            let resp = req.send().await;
+            let latency_ms = start.elapsed().as_millis() as u64;
+
+            match resp {
+                Err(_) => Ok(ProviderHealth {
+                    ok: false,
+                    provider: "ollama-cloud".into(),
+                    latency_ms,
+                    message: ollama_unavailable_message(&base_url),
+                    model_available: false,
+                    pull_command: None,
+                }),
+                Ok(r) if r.status().as_u16() == 401 || r.status().as_u16() == 403 => {
+                    Ok(ProviderHealth {
+                        ok: false,
+                        provider: "ollama-cloud".into(),
+                        latency_ms,
+                        message: ollama_missing_api_key_message(),
+                        model_available: false,
+                        pull_command: None,
+                    })
+                }
+                Ok(r) if !r.status().is_success() => Ok(ProviderHealth {
+                    ok: false,
+                    provider: "ollama-cloud".into(),
+                    latency_ms,
+                    message: format!("Ollama Cloud returned status {}", r.status()),
+                    model_available: false,
+                    pull_command: None,
+                }),
+                Ok(r) => {
+                    let tags: OllamaTagsResponse = r
+                        .json()
+                        .await
+                        .unwrap_or(OllamaTagsResponse { models: vec![] });
+                    let in_tags = ollama_has_model(&tags, &model);
+
+                    // Cloud models with ":cloud" suffix (e.g. gemma4:31b-cloud) stream on-demand
+                    // from Ollama Cloud — they don't need to be "installed" in /api/tags.
+                    // If the endpoint is reachable, the model is considered available.
+                    let is_cloud_model = model.ends_with("-cloud")
+                        || model.contains(":cloud")
+                        || ollama_requires_api_key(&base_url); // ollama.com direct API
+
+                    let model_available = in_tags || is_cloud_model;
+                    let message = if in_tags {
+                        format!("Ollama Cloud OK ({}ms) — {model} ready", latency_ms)
+                    } else if is_cloud_model {
+                        format!(
+                            "Ollama Cloud connected ({}ms) — {model} will stream on-demand",
+                            latency_ms
+                        )
+                    } else {
+                        format!(
+                            "Ollama Cloud connected ({}ms) — {model} not listed (may still work)",
+                            latency_ms
+                        )
+                    };
+                    Ok(ProviderHealth {
+                        ok: model_available,
+                        provider: "ollama-cloud".into(),
+                        latency_ms,
+                        message,
+                        model_available,
+                        pull_command: None,
+                    })
+                }
+            }
+        }
+
+        // OpenAI-compatible custom endpoint health check
+        "openai-compatible" => {
+            if base_url.trim().is_empty() {
+                return Ok(ProviderHealth {
+                    ok: false,
+                    provider: "openai-compatible".into(),
+                    latency_ms: 0,
+                    message: "Custom endpoint URL is not configured.".into(),
+                    model_available: false,
+                    pull_command: None,
+                });
+            }
+            let endpoint = format!(
+                "{}/chat/completions",
+                base_url.trim().trim_end_matches('/')
+            );
+            let probe_model = if model.trim().is_empty() { "gpt-4o-mini" } else { model.trim() };
+            let body = serde_json::json!({
+                "model": probe_model,
+                "messages": [{"role": "user", "content": "ok"}],
+                "max_tokens": 1,
+            });
+            let mut req = client
+                .post(&endpoint)
+                .header("Content-Type", "application/json")
+                .json(&body);
+            if !api_key.trim().is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key.trim()));
+            }
+            let resp = req.send().await;
+            let latency_ms = start.elapsed().as_millis() as u64;
+            match resp {
+                Err(e) => Ok(ProviderHealth {
+                    ok: false,
+                    provider: "openai-compatible".into(),
+                    latency_ms,
+                    message: format!("Cannot reach {}: {e}", base_url.trim()),
+                    model_available: false,
+                    pull_command: None,
+                }),
+                Ok(r) => {
+                    let status = r.status().as_u16();
+                    let ok = r.status().is_success();
+                    let text = r.text().await.unwrap_or_default();
+                    let message = if ok {
+                        format!("Custom endpoint OK ({}ms)", latency_ms)
+                    } else if status == 401 || status == 403 {
+                        "Authentication failed — check your API key.".into()
+                    } else {
+                        format!("HTTP {status}: {text}")
+                    };
+                    Ok(ProviderHealth {
+                        ok,
+                        provider: "openai-compatible".into(),
+                        latency_ms,
+                        message,
+                        model_available: ok,
+                        pull_command: None,
+                    })
+                }
+            }
+        }
+
         other => Err(format!("Unknown provider: {other}")),
     }
 }
@@ -731,6 +1280,62 @@ fn _use_mask_key(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc::{self, Receiver};
+    use std::thread;
+
+    fn request_complete(bytes: &[u8]) -> bool {
+        let request = String::from_utf8_lossy(bytes);
+        let Some(header_end) = request.find("\r\n\r\n") else {
+            return false;
+        };
+        let content_length = request[..header_end]
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
+    }
+
+    fn spawn_mock_ollama_server(status: u16, body: &'static str) -> (String, Receiver<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            while !request_complete(&bytes) {
+                let read = stream.read(&mut buffer).unwrap();
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8_lossy(&bytes).to_string();
+            tx.send(request).unwrap();
+            let status_text = if status == 200 {
+                "OK"
+            } else {
+                "Internal Server Error"
+            };
+            let response = format!(
+                "HTTP/1.1 {status} {status_text}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        (format!("http://{addr}"), rx)
+    }
 
     #[test]
     fn openai_quota_error_is_billing_and_not_retryable() {
@@ -772,5 +1377,213 @@ mod tests {
 
         assert!(ollama_has_model(&tags, "llama3.1:8b"));
         assert!(!ollama_has_model(&tags, "qwen2.5-coder:7b"));
+    }
+
+    #[test]
+    fn ollama_cloud_base_url_requires_api_key() {
+        assert!(ollama_requires_api_key("https://ollama.com"));
+        assert!(ollama_requires_api_key("https://ollama.com/api"));
+        assert!(ollama_is_remote_url("https://ollama.com/api"));
+        assert!(ollama_is_remote_url("https://my-ollama.example.com"));
+        assert!(!ollama_requires_api_key("http://localhost:11434"));
+        assert!(!ollama_is_remote_url("http://localhost:11434"));
+    }
+
+    #[test]
+    fn ollama_env_keys_are_scoped_to_endpoint_type() {
+        assert_eq!(
+            ollama_env_key_names("https://ollama.com/api"),
+            &["OLLAMA_API_KEY"]
+        );
+        assert_eq!(
+            ollama_env_key_names("https://my-ollama.example.com"),
+            &["OLLAMA_REMOTE_API_KEY"]
+        );
+        assert!(ollama_env_key_names("http://localhost:11434").is_empty());
+    }
+
+    #[test]
+    fn ollama_api_endpoint_accepts_host_or_api_base_url() {
+        assert_eq!(
+            ollama_api_endpoint("https://ollama.com", "chat"),
+            "https://ollama.com/api/chat"
+        );
+        assert_eq!(
+            ollama_api_endpoint("https://ollama.com/api", "chat"),
+            "https://ollama.com/api/chat"
+        );
+        assert_eq!(
+            ollama_api_endpoint("http://localhost:11434/", "/tags"),
+            "http://localhost:11434/api/tags"
+        );
+    }
+
+    #[test]
+    fn ollama_model_alias_is_normalized() {
+        assert_eq!(
+            normalize_ollama_model("gemma4-31b:cloud"),
+            "gemma4:31b-cloud"
+        );
+        assert_eq!(
+            normalize_ollama_model("gemma4:31b-cloud"),
+            "gemma4:31b-cloud"
+        );
+    }
+
+    #[test]
+    fn ollama_cloud_missing_key_message_mentions_env_not_secret_value() {
+        let message = ollama_missing_api_key_message();
+
+        assert!(message.contains("OLLAMA_API_KEY"));
+        assert!(message.contains("OLLAMA_REMOTE_API_KEY"));
+        assert!(!message.contains("sk-"));
+    }
+
+    #[test]
+    fn resolve_ollama_api_key_returns_provided_value_when_non_empty() {
+        let key =
+            resolve_ollama_api_key_for_endpoint("my-test-key", "https://ollama.com/api", false)
+                .unwrap();
+        assert_eq!(key, Some("my-test-key".to_string()));
+    }
+
+    #[test]
+    fn resolve_ollama_api_key_returns_none_when_empty_and_not_required() {
+        let key = resolve_ollama_api_key_for_endpoint("", "http://localhost:11434", false);
+        assert!(key.is_ok(), "should not error when key not required");
+        assert_eq!(key.unwrap(), None);
+    }
+
+    #[test]
+    fn ollama_unavailable_message_differs_for_cloud_vs_local() {
+        let cloud_msg = ollama_unavailable_message("https://ollama.com");
+        let local_msg = ollama_unavailable_message("http://localhost:11434");
+
+        assert!(cloud_msg.contains("Ollama Cloud"));
+        assert!(local_msg.contains("local Ollama server"));
+        assert!(!cloud_msg.contains("local"));
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_sends_auth_to_remote_endpoint_and_parses_response() {
+        let (base_url, request_rx) =
+            spawn_mock_ollama_server(200, r#"{"message":{"content":"remote ok"}}"#);
+
+        let text = call_ollama_api(
+            "gemma4-31b:cloud".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            Some("test-remote-token".to_string()),
+            128,
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let request_lower = request.to_lowercase();
+        assert_eq!(text, "remote ok");
+        assert!(request.starts_with("POST /api/chat "));
+        assert!(request_lower.contains("authorization: bearer test-remote-token"));
+        assert!(request.contains(r#""model":"gemma4:31b-cloud""#));
+        assert!(!request.contains("gemma4-31b:cloud"));
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_does_not_send_auth_to_local_endpoint_without_token() {
+        let (base_url, request_rx) =
+            spawn_mock_ollama_server(200, r#"{"message":{"content":"local ok"}}"#);
+
+        let text = call_ollama_api(
+            "qwen2.5-coder:7b".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            None,
+            128,
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(text, "local ok");
+        assert!(!request.to_lowercase().contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_redacts_token_from_error_body() {
+        let (base_url, _request_rx) = spawn_mock_ollama_server(
+            500,
+            r#"{"error":"upstream echoed test-remote-token by mistake"}"#,
+        );
+
+        let error = call_ollama_api(
+            "gemma4:31b-cloud".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            Some("test-remote-token".to_string()),
+            128,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("[redacted]"));
+        assert!(!error.contains("test-remote-token"));
+    }
+
+    #[tokio::test]
+    async fn ollama_cloud_health_sends_auth_and_accepts_model_alias() {
+        let (base_url, request_rx) = spawn_mock_ollama_server(200, r#"{"models":[]}"#);
+
+        let health = check_provider_health(
+            "ollama-cloud".to_string(),
+            "health-token".to_string(),
+            base_url,
+            "gemma4-31b:cloud".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(request.starts_with("GET /api/tags "));
+        assert!(request
+            .to_lowercase()
+            .contains("authorization: bearer health-token"));
+        assert!(health.ok);
+        assert!(health.model_available);
+        assert_eq!(health.provider, "ollama-cloud");
+        assert!(health.message.contains("gemma4:31b-cloud"));
+        assert!(!health.message.contains("gemma4-31b:cloud"));
+        assert!(health.pull_command.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_provider_models_sends_auth_to_remote_ollama_endpoint() {
+        let (base_url, request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"models":[{"name":"gemma4:31b-cloud"},{"name":"qwen2.5-coder:7b"}]}"#,
+        );
+
+        let models = list_provider_models(
+            "ollama-cloud".to_string(),
+            "models-token".to_string(),
+            base_url,
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(request.starts_with("GET /api/tags "));
+        assert!(request
+            .to_lowercase()
+            .contains("authorization: bearer models-token"));
+        assert_eq!(
+            models,
+            vec![
+                "gemma4:31b-cloud".to_string(),
+                "qwen2.5-coder:7b".to_string()
+            ]
+        );
     }
 }

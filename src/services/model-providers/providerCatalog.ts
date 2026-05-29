@@ -128,16 +128,22 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderConfig[] = [
     notes: "Reserved for Azure, Bedrock, Vertex, or managed gateways after adapter boundaries are stable.",
   },
   {
-    id: "ollama-remote",
-    name: "Ollama remote endpoint",
+    id: "ollama-cloud",
+    name: "Ollama Cloud",
     type: "ollama-remote",
-    baseUrl: "https://your-ollama-host:11434", // placeholder — user must configure
-    apiKeyRef: "env:OLLAMA_REMOTE_API_KEY",    // optional — only needed behind authenticated reverse proxies
-    defaultModel: "qwen2.5-coder:7b",
+    baseUrl: "https://ollama.com/api",
+    apiKeyRef: "env:OLLAMA_API_KEY",
+    defaultModel: "gemma4:31b-cloud",
     availableModels: [
       {
-        id: "qwen2.5-coder:7b",
-        label: "Qwen 2.5 Coder 7B (remote)",
+        id: "gemma4:31b-cloud",
+        label: "Gemma 4 31B Cloud",
+        supportsStreaming: true,
+        supportsToolCalling: false,
+      },
+      {
+        id: "gpt-oss:120b",
+        label: "GPT-OSS 120B (Ollama Cloud)",
         supportsStreaming: true,
         supportsToolCalling: false,
       },
@@ -149,10 +155,10 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderConfig[] = [
       tokenCostEstimate: false,
     },
     isLocal: false,
-    enabled: false,
+    enabled: true,
     securityLevel: "hosted",
-    healthStatus: "not_configured",
-    notes: "Remote Ollama endpoint. Does NOT have local-only privacy. Treat like a cloud provider for data governance. Auth may require a reverse proxy.",
+    healthStatus: "unknown",
+    notes: "Direct Ollama Cloud endpoint. Requires OLLAMA_API_KEY for ollama.com; authenticated private remote Ollama gateways use OLLAMA_REMOTE_API_KEY. Treat both as hosted/cloud data.",
   },
   {
     id: "gemini",

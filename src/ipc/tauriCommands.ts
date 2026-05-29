@@ -1,7 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { isVsCode, vsCodeInvoke } from "@/ipc/vscodeInvoke";
 import type { FileTreeEntry, HookResult } from "@/types/filesystem";
 import type { WorkflowDef } from "@/types/workflow";
 import type { AuditEntry } from "@/types/audit";
+
+/** Unified invoke — uses VS Code bridge when running in a WebviewPanel, Tauri otherwise. */
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return isVsCode() ? vsCodeInvoke<T>(command, args) : tauriInvoke<T>(command, args);
+}
 
 export async function openWorkspaceDialog(): Promise<string | null> {
   return invoke<string | null>("open_workspace_dialog");
@@ -31,9 +37,18 @@ export async function executeHook(
   workspacePath: string,
   hookPath: string,
   agentId: string,
-  env: Record<string, string> = {}
+  env: Record<string, string>,
+  consentGranted: boolean
 ): Promise<HookResult> {
-  return invoke<HookResult>("execute_hook", { workspacePath, hookPath, agentId, env });
+  return invoke<HookResult>("execute_hook", { workspacePath, hookPath, agentId, env, consentGranted });
+}
+
+export async function executeInlineCommand(
+  workspacePath: string,
+  command: string,
+  consentGranted: boolean,
+): Promise<HookResult> {
+  return invoke<HookResult>("execute_inline_command", { workspacePath, command, consentGranted });
 }
 
 export async function writeAuditEntry(workspacePath: string, entry: AuditEntry): Promise<void> {

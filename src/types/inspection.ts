@@ -13,7 +13,7 @@ export type ArtifactType =
   | "report";
 
 export type ArtifactPreviewMode = "rendered" | "code" | "raw" | "image" | "log";
-export type ArtifactStatus = "mock" | "draft" | "persisted" | "error";
+export type ArtifactStatus = "mock" | "draft" | "persisted" | "live" | "error";
 
 export interface Artifact {
   id: string;

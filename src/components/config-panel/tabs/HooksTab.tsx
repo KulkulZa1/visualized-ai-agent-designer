@@ -172,7 +172,7 @@ export function HooksTab({ nodeId }: { nodeId: string }) {
 
     setRunning(key);
     try {
-      const result = await executeHook(workspacePath, hook.path, nodeId, hook.env ?? {});
+      const result = await executeHook(workspacePath, hook.path, nodeId, hook.env ?? {}, true);
       setResults((current) => ({ ...current, [key]: result }));
       await recordAudit(
         result.exitCode === 0,

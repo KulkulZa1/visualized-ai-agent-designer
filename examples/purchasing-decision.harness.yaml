@@ -1,0 +1,244 @@
+# purchasing-decision.harness.yaml
+# Pattern: deterministic 5-agent purchasing assistant.
+# Beginner-friendly end-to-end demo. Verifiable against a fixed scoring rubric.
+# See docs/E2E_DEMO_PLAN.md for inputs, expected ranking, and failure cases.
+#
+# Load this file: click it in the Harness Studio file tree sidebar.
+
+meta:
+  name: Purchasing Decision Assistant
+  version: "1.0.0"
+  description: >
+    Five-agent demo workflow that ranks suppliers against a requirements file.
+    Deterministic verification rubric in docs/E2E_DEMO_PLAN.md.
+  projectRoot: ""
+  createdAt: "2026-05-17T00:00:00Z"
+  updatedAt: "2026-05-17T00:00:00Z"
+
+agents:
+  # agent-0 ── Requirement Parser (orchestrator)
+  - name: Requirement Parser
+    role: orchestrator
+    model: claude-haiku-4.5
+    temperature: 0.2
+    maxTokens: 4096
+    maxSteps: 5
+    timeoutSeconds: 60
+    description: >
+      Reads .harness/inputs/requirements.yaml and emits a parsed
+      requirements object: { budgetUsd, deliveryDays, mustHaveCertifications,
+      preferredRegion, suppliers[] }.
+    promptSource:
+      type: inline
+      content: |
+        You are the Requirement Parser. Read .harness/inputs/requirements.yaml.
+        1. Parse the YAML into a strict JSON object.
+        2. Validate that suppliers[] has 2..10 entries.
+        3. Output JSON with keys:
+           budgetUsd, deliveryDays, mustHaveCertifications, preferredRegion, suppliers.
+        4. Do not invent suppliers. If the file is missing, output
+           {"error":"requirements_missing"} and stop.
+    tools:
+      - read_file
+      - todo_write
+    memoryRead: []
+    memoryWrite:
+      - parsed-requirements
+    tokens:
+      used: 0
+      budget: 6000
+    status: idle
+
+  # agent-1 ── Supplier Evaluator (worker)
+  - name: Supplier Evaluator
+    role: worker
+    model: claude-haiku-4.5
+    temperature: 0.0
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 90
+    description: >
+      Scores each supplier using the deterministic rubric in
+      docs/E2E_DEMO_PLAN.md section 4. Outputs ranked list.
+    promptSource:
+      type: inline
+      content: |
+        You are the Supplier Evaluator. Apply the rubric:
+          score = 100
+                - max(0, unitPriceUsd - 460) * 0.05
+                - max(0, leadDays - deliveryDays) * 1.5
+                - 30 * (missing_required_certifications)
+                - 1000 * historicalDefectRate
+                + (region == preferredRegion ? 5 : 0)
+        For every supplier, return { id, name, score, breakdown:{priceP, lateP, certP, qualityP, regionBonus} }.
+        Sort by score descending. Round score to 1 decimal place.
+        Do NOT include suppliers you did not receive.
+    tools:
+      - read_file
+    memoryRead:
+      - parsed-requirements
+    memoryWrite:
+      - scored-suppliers
+    tokens:
+      used: 0
+      budget: 8000
+    status: idle
+
+  # agent-2 ── Risk Reviewer (critic)
+  - name: Risk Reviewer
+    role: critic
+    model: claude-sonnet-4.6
+    temperature: 0.1
+    maxTokens: 3072
+    maxSteps: 5
+    timeoutSeconds: 90
+    description: >
+      Validates the top-ranked supplier against hard constraints (certs,
+      lead time vs SLA, region preference). Outputs PASS or REVISE.
+    promptSource:
+      type: inline
+      content: |
+        You are the Risk Reviewer. Given the scored supplier list:
+        1. Inspect the top-ranked supplier ONLY.
+        2. Check: certifications include every mustHaveCertifications entry.
+        3. Check: leadDays <= deliveryDays.
+        4. Check: historicalDefectRate <= 0.02.
+        If all three pass output {"verdict":"PASS","topId":"..."} .
+        Otherwise output {"verdict":"REVISE","topId":"...","reasons":[...]}.
+    tools:
+      - read_file
+    memoryRead:
+      - scored-suppliers
+    memoryWrite:
+      - risk-verdict
+    tokens:
+      used: 0
+      budget: 4000
+    status: idle
+
+  # agent-3 ── Report Writer (aggregator)
+  - name: Report Writer
+    role: aggregator
+    model: claude-haiku-4.5
+    temperature: 0.3
+    maxTokens: 4096
+    maxSteps: 5
+    timeoutSeconds: 90
+    description: >
+      Writes the final ranking report to
+      .harness/artifacts/ranking.md with: chosen supplier, full ranking
+      table, reviewer verdict, and citations of the rubric.
+    promptSource:
+      type: inline
+      content: |
+        You are the Report Writer. Combine:
+          - scored-suppliers (from memory)
+          - risk-verdict (from memory)
+        Write a Markdown report to .harness/artifacts/ranking.md with:
+          ## Recommended Supplier
+          ## Ranking Table (id | name | score | reason)
+          ## Risk Reviewer Verdict
+          ## Rubric Citation
+        Do NOT include API keys, prompts, or internal reasoning notes.
+        Output the path to the file.
+    tools:
+      - fs.read
+      - fs.write
+    memoryRead:
+      - scored-suppliers
+      - risk-verdict
+    memoryWrite:
+      - report-path
+    tokens:
+      used: 0
+      budget: 6000
+    status: idle
+
+  # agent-4 ── Decision Memory (memory)
+  - name: Decision Memory
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 30
+    description: >
+      Appends one JSONL line to .harness/decision-log.jsonl per workflow run:
+      { runId, timestamp, topSupplierId, verdict, reportPath }.
+    promptSource:
+      type: inline
+      content: |
+        Memory node — no model call. The runtime appends a JSONL line per run.
+    tools:
+      - fs.append
+      - fs.read
+    memoryRead:
+      - scored-suppliers
+      - risk-verdict
+      - report-path
+    memoryWrite:
+      - decision-log
+    tokens:
+      used: 0
+      budget: 0
+    status: idle
+
+connections:
+  - id: edge-parse-evaluate
+    sourceAgentId: agent-0
+    targetAgentId: agent-1
+    label: parsed requirements
+    edgeKind: dataflow
+  - id: edge-evaluate-review
+    sourceAgentId: agent-1
+    targetAgentId: agent-2
+    label: scored suppliers
+    edgeKind: dataflow
+  - id: edge-review-report
+    sourceAgentId: agent-2
+    targetAgentId: agent-3
+    label: ranking + risks
+    edgeKind: dataflow
+  - id: edge-review-revise
+    sourceAgentId: agent-2
+    targetAgentId: agent-1
+    label: revise
+    edgeKind: feedback
+  - id: edge-report-memory
+    sourceAgentId: agent-3
+    targetAgentId: agent-4
+    label: decision log
+    edgeKind: memory
+  - id: edge-evaluate-memory
+    sourceAgentId: agent-1
+    targetAgentId: agent-4
+    label: scoring rationale
+    edgeKind: memory
+  - id: edge-review-memory
+    sourceAgentId: agent-2
+    targetAgentId: agent-4
+    label: reviewer approval
+    edgeKind: control
+
+executionSettings:
+  maxParallel: 1
+  timeoutSeconds: 600
+  retryOnFailure: false
+  maxRetries: 0
+
+nodePositions:
+  agent-0:
+    x: 80
+    y: 220
+  agent-1:
+    x: 320
+    y: 220
+  agent-2:
+    x: 560
+    y: 220
+  agent-3:
+    x: 800
+    y: 220
+  agent-4:
+    x: 560
+    y: 440

@@ -1,0 +1,87 @@
+{
+  "name": "harness-studio",
+  "displayName": "Harness Studio",
+  "description": "Visual multi-agent AI workflow builder. Build, inspect, and run agent harnesses directly in VS Code.",
+  "version": "0.1.0",
+  "publisher": "harness-studio",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "ai",
+    "agents",
+    "workflow",
+    "llm",
+    "ollama",
+    "anthropic",
+    "openai"
+  ],
+  "activationEvents": [
+    "onLanguage:yaml",
+    "workspaceContains:**/*.harness.yaml"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "harness.openWorkflow",
+        "title": "Harness: Open Workflow in Canvas"
+      },
+      {
+        "command": "harness.newWorkflow",
+        "title": "Harness: New Workflow from Goal"
+      },
+      {
+        "command": "harness.runWorkflow",
+        "title": "Harness: Run Current Workflow"
+      },
+      {
+        "command": "harness.validateWorkflow",
+        "title": "Harness: Validate Current Workflow"
+      }
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "harnessWorkflows",
+          "name": "Harness Workflows",
+          "when": "workspaceHasHarnessYaml"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "harness.openWorkflow",
+          "when": "resourceExtname == .yaml && resourceFilename =~ /\\.harness\\.yaml$/",
+          "group": "harness"
+        },
+        {
+          "command": "harness.validateWorkflow",
+          "when": "resourceExtname == .yaml && resourceFilename =~ /\\.harness\\.yaml$/",
+          "group": "harness"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./tsconfig.json",
+    "watch": "tsc -watch -p ./tsconfig.json",
+    "package": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^20.19.41",
+    "@types/vscode": "^1.85.0",
+    "typescript": "~5.8.3"
+  }
+}

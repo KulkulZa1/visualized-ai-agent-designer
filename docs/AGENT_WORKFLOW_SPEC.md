@@ -1,4 +1,4 @@
-# Harness Workflow Specification
+﻿# Harness Workflow Specification
 
 > **Version:** 2.0 (Phase 3)  
 > **Format:** YAML 1.2  
@@ -10,9 +10,9 @@
 
 ## Overview
 
-A `.harness.yaml` file defines a complete AI agent workflow — every agent, every connection, every permission, and every hook. It is the source of truth. The visual canvas is a view of this file.
+A `.harness.yaml` file defines a complete AI agent workflow ??every agent, every connection, every permission, and every hook. It is the source of truth. The visual canvas is a view of this file.
 
-Every node on the canvas maps 1-to-1 to an entry in `agents[]`. Node IDs are assigned by index: `agents[0]` → `agent-0`, `agents[1]` → `agent-1`, and so on.
+Every node on the canvas maps 1-to-1 to an entry in `agents[]`. Node IDs are assigned by index: `agents[0]` ??`agent-0`, `agents[1]` ??`agent-1`, and so on.
 
 ---
 
@@ -27,7 +27,7 @@ meta:          # workflow metadata
   createdAt: string
   updatedAt: string
 
-agents:        # ordered array — index determines node ID
+agents:        # ordered array ??index determines node ID
   - <AgentNode>
 
 connections:   # edges between agents
@@ -52,16 +52,16 @@ All top-level fields are **required**. `agents` and `connections` may be empty a
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `name` | string | ✓ | 1–128 chars |
-| `version` | string | ✓ | Semver: `"1.0.0"` |
-| `description` | string | ✓ | Can be `""` |
-| `projectRoot` | string | ✓ | Can be `""` — filled at runtime |
-| `createdAt` | string | ✓ | ISO 8601: `"2026-05-16T00:00:00Z"` |
-| `updatedAt` | string | ✓ | ISO 8601, updated on save |
+| `name` | string | ??| 1??28 chars |
+| `version` | string | ??| Semver: `"1.0.0"` |
+| `description` | string | ??| Can be `""` |
+| `projectRoot` | string | ??| Can be `""` ??filled at runtime |
+| `createdAt` | string | ??| ISO 8601: `"2026-05-16T00:00:00Z"` |
+| `updatedAt` | string | ??| ISO 8601, updated on save |
 
 ---
 
-## `agents[]` — Agent Node
+## `agents[]` ??Agent Node
 
 Each entry in `agents[]` becomes a node on the canvas.  
 **Key fact:** All field names use **camelCase** in YAML.
@@ -69,28 +69,27 @@ Each entry in `agents[]` becomes a node on the canvas.
 ```yaml
 agents:
   - name: My Agent           # required
-    role: worker             # required — see Role enum
+    role: worker             # required ??see Role enum
     model: claude-sonnet-4.6 # required (empty string "" for hook/memory)
-    temperature: 0.7         # required, 0.0 – 2.0
-    maxTokens: 4096          # required, 0 – 200000
-    maxSteps: 20             # required, 1 – 1000
-    timeoutSeconds: 300      # required, 1 – 86400
+    temperature: 0.7         # required, 0.0 ??2.0
+    maxTokens: 4096          # required, 0 ??200000
+    maxSteps: 20             # required, 1 ??1000
+    timeoutSeconds: 300      # required, 1 ??86400
     promptSource:            # required
-      type: inline           #   "inline" → content field
-      content: |             #   "file"   → path field
-        You are a …
-    tools:                   # required array (may be [])
+      type: inline           #   "inline" ??content field
+      content: |             #   "file"   ??path field
+        You are a ??    tools:                   # required array (may be [])
       - read_file
       - web_search
-    memoryRead: []           # required array — memory keys this agent reads
-    memoryWrite: []          # required array — memory keys this agent writes
+    memoryRead: []           # required array ??memory keys this agent reads
+    memoryWrite: []          # required array ??memory keys this agent writes
     tokens:                  # required
       used: 0                #   always 0 in a fresh workflow file
       budget: 32000          #   token budget for this node
-    status: idle             # required — starting state
-    # ── Optional fields ────────────────────────────────
+    status: idle             # required ??starting state
+    # ?? Optional fields ????????????????????????????????
     description: "..."       # human-readable purpose
-    condition: "..."         # gateway nodes only — routing condition text
+    condition: "..."         # gateway nodes only ??routing condition text
     preHook:                 # runs before the node executes
       path: .harness/hooks/my-hook.sh
       requireConsent: true
@@ -103,20 +102,20 @@ agents:
 
 | Value | Glyph | Color | Typical use |
 |---|---|---|---|
-| `orchestrator` | ◆ | amber `#e5a142` | Plans, delegates, aggregates |
-| `gateway` | ◇ | blue `#7c9eff` | Routes conditionally |
-| `worker` | ● | green `#5fbf7f` | Executes specific tasks |
-| `critic` | ◐ | red `#e07575` | Reviews, validates |
-| `memory` | ▣ | purple `#b88bd9` | Persists shared state |
-| `hook` | ✕ | orange `#d97757` | Pre/post execution gates |
-| `aggregator` | ⊕ | teal `#5fbfb5` | Merges parallel outputs |
-| `tool_caller` | ⬡ | gray `#9aa4b2` | Specialized tool execution |
+| `orchestrator` | ??| amber `#e5a142` | Plans, delegates, aggregates |
+| `gateway` | ??| blue `#7c9eff` | Routes conditionally |
+| `worker` | ??| green `#5fbf7f` | Executes specific tasks |
+| `critic` | ??| red `#e07575` | Reviews, validates |
+| `memory` | ??| purple `#b88bd9` | Persists shared state |
+| `hook` | ??| orange `#d97757` | Pre/post execution gates |
+| `aggregator` | ??| teal `#5fbfb5` | Merges parallel outputs |
+| `tool_caller` | 燧?| gray `#9aa4b2` | Specialized tool execution |
 
 ### Status enum
 
 | Value | Meaning |
 |---|---|
-| `idle` | Not yet started — use this in new workflow files |
+| `idle` | Not yet started ??use this in new workflow files |
 | `running` | Currently executing (set by runtime) |
 | `waiting` | Waiting for an upstream agent |
 | `done` | Completed successfully |
@@ -140,9 +139,9 @@ promptSource:
   path: .harness/prompts/my-agent.md
 ```
 
-File-reference mode is preferred for long prompts — enables version-controlled prompt history.
+File-reference mode is preferred for long prompts ??enables version-controlled prompt history.
 
-### tools — Permission values
+### tools ??Permission values
 
 Grant only the tools each agent actually needs.
 
@@ -170,7 +169,7 @@ Grant only the tools each agent actually needs.
 
 ```yaml
 tokens:
-  used: 0       # tokens consumed so far — set to 0 in new files
+  used: 0       # tokens consumed so far ??set to 0 in new files
   budget: 32000 # maximum tokens for this node
 ```
 
@@ -179,25 +178,25 @@ Recommended budgets by role:
 | Role | Suggested budget |
 |---|---|
 | orchestrator | 32 000 |
-| worker | 20 000 – 60 000 |
+| worker | 20 000 ??60 000 |
 | critic | 24 000 |
 | aggregator | 48 000 |
-| gateway | 4 000 – 8 000 |
-| memory | 8 000 – 16 000 |
+| gateway | 4 000 ??8 000 |
+| memory | 8 000 ??16 000 |
 | hook | 0 |
 | tool_caller | 20 000 |
 
 ---
 
-## `connections[]` — Edges
+## `connections[]` ??Edges
 
 ```yaml
 connections:
   - id: c-01                       # required, unique string
     sourceAgentId: agent-0         # required, "agent-" + source index
     targetAgentId: agent-1         # required, "agent-" + target index
-    label: "query"                 # optional — shown on the edge in canvas
-    edgeKind: dataflow             # optional — default: dataflow
+    label: "query"                 # optional ??shown on the edge in canvas
+    edgeKind: dataflow             # optional ??default: dataflow
 ```
 
 ### edgeKind enum
@@ -217,11 +216,15 @@ If `edgeKind` is omitted, it defaults to `dataflow`.
 
 ```yaml
 executionSettings:
-  maxParallel: 4      # 1–32  — how many agents may run simultaneously
-  timeoutSeconds: 300 # 1–3600 — hard timeout for the whole workflow
+  maxParallel: 4      # 1-32, schema/reserved today (runtime is sequential)
+  timeoutSeconds: 300 # 1??600 ??hard timeout for the whole workflow
   retryOnFailure: false
-  maxRetries: 0       # 0–10
+  maxRetries: 0       # 0??0
 ```
+
+---
+
+Runtime note, verified 2026-05-18: Harness Studio currently ignores `maxParallel` during execution. The React runner executes nodes one at a time in topological order. This field is kept for future parallel scheduling and workflow portability.
 
 ---
 
@@ -307,7 +310,7 @@ Three ready-to-load examples are in the `examples/` directory:
 3. Passed as JSON over Tauri IPC to the frontend.
 4. Validated by the `workflowDefSchema` Zod schema.
 5. Loaded into the Zustand `workflowStore` via `loadWorkflow()`.
-6. Node IDs assigned: `agents[i]` → node id `"agent-i"`.
+6. Node IDs assigned: `agents[i]` ??node id `"agent-i"`.
 
 If validation fails, the canvas is not modified and an error is logged to the audit strip.
 
@@ -318,8 +321,9 @@ If validation fails, the canvas is not modified and an error is logged to the au
 | Mistake | Fix |
 |---|---|
 | Using `snake_case` keys (e.g. `max_tokens`) | Use `camelCase` (`maxTokens`) |
-| Missing `tokens:` or `status:` | Both are required — add with `used: 0` and `status: idle` |
+| Missing `tokens:` or `status:` | Both are required ??add with `used: 0` and `status: idle` |
 | Agent ID in connections doesn't match index | `agent-0` = first agent in array, not by name |
 | `promptSource` missing `content` or `path` | `inline` requires `content:`, `file` requires `path:` |
 | `temperature` > 2.0 | Maximum is `2.0` |
 | `maxParallel` = 0 | Minimum is `1` |
+

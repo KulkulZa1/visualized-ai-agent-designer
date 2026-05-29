@@ -16,6 +16,7 @@ interface TopBarProps {
   onOpenSettings: () => void;
   onOpenHelp?: () => void;
   onOpenMetaEditor?: () => void;
+  onOpenWizard?: () => void;
 }
 
 const Sep = () => (
@@ -48,7 +49,7 @@ const Btn = ({ children, primary, small, onClick, title, style: s = {} }: {
   }}>{children}</button>
 );
 
-export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPermissions, onRun, onOpenSettings, onOpenHelp, onOpenMetaEditor }: TopBarProps) {
+export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPermissions, onRun, onOpenSettings, onOpenHelp, onOpenMetaEditor, onOpenWizard }: TopBarProps) {
   const meta      = useWorkflowStore((s) => s.meta);
   const isDirty   = useWorkflowStore((s) => s.isDirty);
   const filePath  = useWorkflowStore((s) => s.filePath);
@@ -58,8 +59,21 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
   const { save }  = useWorkflow();
   const isRunning   = useExecutionStore((s) => s.isRunning);
   const currentRun  = useExecutionStore((s) => s.currentRun);
+  const apiKey      = useExecutionStore((s) => s.apiKey);
+  const openaiApiKey = useExecutionStore((s) => s.openaiApiKey);
+  const llmProvider = useExecutionStore((s) => s.llmProvider);
   const uiMode    = useUIStore((s) => s.uiMode);
   const setUiMode = useUIStore((s) => s.setUiMode);
+
+  // Warn (but don't disable) if the active provider has no key configured.
+  const noKeyWarning: string | null = (() => {
+    if (llmProvider === "ollama") return null;
+    if (llmProvider === "ollama-cloud") return "Ollama Cloud uses OLLAMA_API_KEY from the environment; test it in Settings.";
+    if (llmProvider === "openai" && !openaiApiKey) return "No OpenAI key set — open Settings to add one.";
+    if (llmProvider === "anthropic" && !apiKey) return "No Anthropic key set — open Settings to add one.";
+    if (llmProvider === "auto" && !openaiApiKey && !apiKey) return "No API keys set — open Settings to add one (or switch to Ollama).";
+    return null;
+  })();
 
   // Each selector must return a stable primitive/function to avoid useSyncExternalStore loops.
   const undo    = useStore(useWorkflowStore.temporal, (s) => s.undo);
@@ -161,11 +175,19 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
         ⌘K
       </Btn>
 
-      {/* Help */}
-      <Btn small onClick={onOpenHelp} title="Keyboard shortcuts (Ctrl+?)"
+      {/* Help / Quick Start */}
+      <Btn small onClick={onOpenHelp} title="Help & Quick Start (Ctrl+/)"
         style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--hint)", minWidth: 26 }}>
         ?
       </Btn>
+
+      {/* Wizard — Create from Goal */}
+      {onOpenWizard && (
+        <Btn small onClick={onOpenWizard} title="Create from Goal — recommend workflow + provider (Ctrl+Shift+W)"
+          style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
+          ★ Create from Goal
+        </Btn>
+      )}
 
       {/* Examples */}
       <Btn small onClick={onOpenExamples} title="Load an example workflow (Ctrl+E)">
@@ -195,7 +217,19 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
       <Btn onClick={handleSave} title="Save (Ctrl+S)">
         <NodeIcon name="save" size={12}/> Save
       </Btn>
-      <Btn primary onClick={onRun} title="Run workflow" style={{ opacity: isRunning ? 0.7 : 1 }}>
+      <Btn
+        primary
+        onClick={onRun}
+        title={noKeyWarning ?? "Run workflow"}
+        style={{ opacity: isRunning ? 0.7 : 1, position: "relative" }}
+      >
+        {noKeyWarning && !isRunning && (
+          <span style={{
+            position: "absolute", top: -3, right: -3,
+            width: 8, height: 8, borderRadius: "50%",
+            background: "#f59e0b", border: "1.5px solid var(--surface)",
+          }} />
+        )}
         <NodeIcon name={isRunning ? "history" : "play"} size={12}/> {isRunning ? "Running…" : "Run"}
       </Btn>
     </header>

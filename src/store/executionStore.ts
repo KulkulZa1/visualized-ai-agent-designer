@@ -8,8 +8,12 @@ import {
 
 interface ExecutionState {
   currentRun: WorkflowRun | null;
-  apiKey: string;          // Anthropic  sk-ant-...
-  openaiApiKey: string;    // OpenAI     sk-...
+  apiKey: string;           // Anthropic  sk-ant-...
+  openaiApiKey: string;     // OpenAI     sk-...
+  ollamaApiKey: string;     // Ollama Cloud / authenticated remote (empty = no auth)
+  customApiUrl: string;     // Custom OpenAI-compatible endpoint base URL
+  customApiKey: string;     // Custom endpoint API key (optional)
+  customApiModel: string;   // Model name to use with the custom endpoint
   isRunning: boolean;
   llmProvider: LlmProvider;
   ollamaBaseUrl: string;
@@ -23,6 +27,10 @@ interface ExecutionActions {
   finishRun: (status: "done" | "error" | "cancelled") => void;
   setApiKey: (key: string) => void;
   setOpenaiApiKey: (key: string) => void;
+  setOllamaApiKey: (key: string) => void;
+  setCustomApiUrl: (url: string) => void;
+  setCustomApiKey: (key: string) => void;
+  setCustomApiModel: (model: string) => void;
   cancelRun: () => void;
   setLlmProvider: (p: LlmProvider) => void;
   setOllamaBaseUrl: (url: string) => void;
@@ -38,6 +46,10 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   currentRun: null,
   apiKey: loadKey("harness_api_key"),
   openaiApiKey: loadKey("harness_openai_key"),
+  ollamaApiKey: loadKey("harness_ollama_key"),
+  customApiUrl: loadKey("harness_custom_url"),
+  customApiKey: loadKey("harness_custom_key"),
+  customApiModel: loadKey("harness_custom_model") || "gpt-4o-mini",
   isRunning: false,
   llmProvider: (loadKey("harness_llm_provider") || "auto") as LlmProvider,
   ollamaBaseUrl: loadKey("harness_ollama_url") || DEFAULT_OLLAMA_BASE_URL,
@@ -92,6 +104,26 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   setOpenaiApiKey: (key) => {
     try { localStorage.setItem("harness_openai_key", key); } catch {}
     set({ openaiApiKey: key });
+  },
+
+  setOllamaApiKey: (key) => {
+    try { localStorage.setItem("harness_ollama_key", key); } catch {}
+    set({ ollamaApiKey: key });
+  },
+
+  setCustomApiUrl: (url) => {
+    try { localStorage.setItem("harness_custom_url", url); } catch {}
+    set({ customApiUrl: url });
+  },
+
+  setCustomApiKey: (key) => {
+    try { localStorage.setItem("harness_custom_key", key); } catch {}
+    set({ customApiKey: key });
+  },
+
+  setCustomApiModel: (model) => {
+    try { localStorage.setItem("harness_custom_model", model); } catch {}
+    set({ customApiModel: model });
   },
 
   cancelRun: () => {

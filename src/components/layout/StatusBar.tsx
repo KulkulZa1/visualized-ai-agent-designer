@@ -1,5 +1,6 @@
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useExecutionStore } from "@/store/executionStore";
 import { AgentRole } from "@/types/agent";
 
 export function StatusBar() {
@@ -9,6 +10,13 @@ export function StatusBar() {
   const nodeCount     = nodes.length;
   const edgeCount     = useWorkflowStore((s) => s.edges.length);
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
+  const isRunning     = useExecutionStore((s) => s.isRunning);
+  const currentRun    = useExecutionStore((s) => s.currentRun);
+
+  // Find the currently-running agent (if any)
+  const activeAgentName = isRunning && currentRun
+    ? Object.values(currentRun.agents).find((a) => a.status === "running")?.agentName ?? null
+    : null;
 
   const roleCounts: Partial<Record<AgentRole, number>> = {};
   for (const n of nodes) {
@@ -50,6 +58,19 @@ export function StatusBar() {
       <span>{meta.name}</span>
       <span>{nodeCount} node{nodeCount !== 1 ? "s" : ""} · {edgeCount} connection{edgeCount !== 1 ? "s" : ""}</span>
       {roleStats && <span style={{ color: "var(--muted)" }}>{roleStats}</span>}
+
+      {/* Active agent pill — visible only while running */}
+      {activeAgentName && (
+        <span style={{
+          display: "flex", alignItems: "center", gap: 5,
+          padding: "1px 8px", borderRadius: 99,
+          background: "rgba(229,161,66,0.12)", border: "1px solid rgba(229,161,66,0.35)",
+          color: "var(--accent)", fontSize: 10, fontWeight: 600, whiteSpace: "nowrap",
+        }}>
+          <span style={{ animation: "pulse 1.2s ease-in-out infinite" }}>●</span>
+          Running: {activeAgentName}
+        </span>
+      )}
 
       {workspacePath && (
         <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, opacity: 0.6,

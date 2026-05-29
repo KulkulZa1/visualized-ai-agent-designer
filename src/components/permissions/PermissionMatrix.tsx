@@ -11,6 +11,16 @@ interface PermissionMatrixProps {
 
 const ALL_TOOLS = Object.values(ToolPermission);
 const RISK_COLOR = { low: "var(--green)", medium: "var(--accent)", high: "var(--red)" };
+
+const TOOL_DESCRIPTIONS: Partial<Record<ToolPermission, string>> = {
+  [ToolPermission.WriteFile]: "Overwrite files in the workspace. Agents with this tool can modify any file.",
+  [ToolPermission.FsAppend]: "Append to files in the workspace.",
+  [ToolPermission.Bash]: "Run arbitrary shell commands. Use only for trusted workflows with a hook gate.",
+  [ToolPermission.SubagentDispatch]: "Spawn subagents — high blast radius. Requires audit trail.",
+  [ToolPermission.Git]: "Run git commands in the workspace.",
+  [ToolPermission.Test]: "Run test suites and report results.",
+  [ToolPermission.WebFetch]: "Fetch content from URLs.",
+};
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
 
 export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
@@ -76,6 +86,22 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
           </button>
         </div>
 
+        {(() => {
+          const bashNodes = nodes.filter((n) => n.data.tools.includes(ToolPermission.Bash) && !n.data.preHook?.path);
+          if (bashNodes.length === 0) return null;
+          return (
+            <div style={{ margin: "8px 12px 0", padding: "7px 10px", borderRadius: 6,
+              background: "rgba(224,117,117,0.12)", border: "1px solid rgba(224,117,117,0.35)",
+              fontSize: 11, color: "var(--red)", display: "flex", gap: 6, alignItems: "flex-start" }}>
+              <NodeIcon name="alert-triangle" size={13} color="var(--red)" />
+              <span>
+                <strong>{bashNodes.length} node{bashNodes.length > 1 ? "s have" : " has"} bash enabled without a hook gate:</strong>{" "}
+                {bashNodes.map((n) => n.data.name).join(", ")}.
+                Bash lets agents run arbitrary shell commands — add a destructive_guard hook or remove the permission.
+              </span>
+            </div>
+          );
+        })()}
         {nodes.length === 0 ? (
           <div style={{ padding: 24, color: "var(--hint)", fontSize: 12 }}>
             Load or create a workflow to inspect permissions.
@@ -88,7 +114,7 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
                   <th style={headCell({ left: 0, minWidth: 230 })}>Node</th>
                   <th style={headCell({ left: 230, minWidth: 126 })}>Gate</th>
                   {ALL_TOOLS.map((tool) => (
-                    <th key={tool} title={`${tool} (${TOOL_RISK[tool]})`} style={{
+                    <th key={tool} title={TOOL_DESCRIPTIONS[tool] ? `${tool} — ${TOOL_DESCRIPTIONS[tool]}` : `${tool} (${TOOL_RISK[tool]})`} style={{
                       ...cellBase,
                       width: 38, minWidth: 38, maxWidth: 38, textAlign: "center",
                       color: RISK_COLOR[TOOL_RISK[tool]], fontSize: 9,

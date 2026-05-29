@@ -69,6 +69,8 @@ OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5-coder:7b
+OLLAMA_API_KEY=
+OLLAMA_REMOTE_API_KEY=
 ```
 
 For local fallback, install Ollama and pull a model:
@@ -117,6 +119,12 @@ If the selected model is missing, run:
 ```powershell
 ollama pull qwen2.5-coder:7b
 ```
+
+**Use Ollama Cloud or authenticated remote Ollama**
+
+Set `LLM_PROVIDER=ollama-cloud`, `OLLAMA_BASE_URL=https://ollama.com/api`, `OLLAMA_MODEL=gemma4:31b-cloud`, and `OLLAMA_API_KEY` in the environment, or use Settings to select **Ollama Cloud**. The dash-form alias `gemma4-31b:cloud` is accepted and normalized to `gemma4:31b-cloud`. For a private remote Ollama gateway, set `OLLAMA_BASE_URL` to the remote endpoint and use `OLLAMA_REMOTE_API_KEY` if the gateway requires authentication.
+
+Ollama Cloud and remote Ollama are hosted execution paths. Treat prompts, files, and context sent there as cloud data, not local-only processing. `OLLAMA_API_KEY` is scoped to `ollama.com`; use `OLLAMA_REMOTE_API_KEY` or the Settings token field for private remote Ollama gateways.
 
 ## Notes
 

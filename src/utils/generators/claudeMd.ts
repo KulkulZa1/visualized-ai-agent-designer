@@ -107,7 +107,8 @@ export function generateClaudeMd(def: WorkflowDef): string {
   // ── Execution notes ──────────────────────────────────────────────────────
   lines.push("## Execution settings");
   lines.push("");
-  lines.push(`- Max parallel agents: **${def.executionSettings.maxParallel}**`);
+  lines.push(`- Configured max parallel agents: **${def.executionSettings.maxParallel}**`);
+  lines.push("- Runtime note: Harness Studio currently runs nodes sequentially in topological order. Parallel scheduling is planned.");
   lines.push(`- Workflow timeout: **${def.executionSettings.timeoutSeconds}s**`);
   lines.push(`- Retry on failure: **${def.executionSettings.retryOnFailure}**`);
   lines.push("");

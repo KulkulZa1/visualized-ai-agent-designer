@@ -1,162 +1,69 @@
-import { useEffect } from "react";
+import { useState } from "react";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { AgentRole } from "@/types/agent";
 import type { AgentNodeData } from "@/types/agent";
 import { ROLE_META } from "@/utils/nodeColors";
-import { useModelRegistry } from "@/hooks/useModelRegistry";
-import { inferProvider } from "@/utils/modelRegistry";
+import { ModelPicker } from "@/components/config-panel/ModelPicker";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { Sec, Fld, Input, Select } from "../shared";
 
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
 
-// ── Provider selector ─────────────────────────────────────────────────────────
-function ProviderSelector() {
-  const {
-    providers, selectedProvider, providerDef,
-    models, isLoading, loadError, hasLive,
-    setProvider, fetchLive, refresh,
-  } = useModelRegistry();
+// ── Bulk apply actions ────────────────────────────────────────────────────────
 
-  const canFetchLive = !!providerDef?.apiEndpoint;
+function BulkApplyActions({ model, role }: { model: string; role: AgentRole }) {
+  const bulkSetModel = useWorkflowStore((s) => s.bulkSetModel);
+  const nodes        = useWorkflowStore((s) => s.nodes);
+  const [flash, setFlash] = useState<string | null>(null);
 
-  return (
-    <div style={{ background: "var(--bg)", border: "1px solid var(--border)",
-      borderRadius: 6, padding: 10, marginBottom: 10 }}>
-      {/* Provider row */}
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-        <span style={{ fontSize: 11, color: "var(--muted)", minWidth: 60 }}>Provider</span>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap", flex: 1 }}>
-          {providers.map((p) => (
-            <button key={p.id} onClick={() => setProvider(p.id)} style={{
-              padding: "3px 9px", border: "none", borderRadius: 99,
-              cursor: "pointer", fontSize: 11, fontFamily: "inherit",
-              background: selectedProvider === p.id ? `${p.logoColor}25` : "var(--surface-3)",
-              color: selectedProvider === p.id ? p.logoColor : "var(--muted)",
-              outline: selectedProvider === p.id ? `1px solid ${p.logoColor}55` : "none",
-              fontWeight: selectedProvider === p.id ? 600 : 400,
-              transition: "all 100ms",
-            }}>{p.label}</button>
-          ))}
-        </div>
-      </div>
+  if (!model) return null;
 
-      {/* Live API row */}
-      {canFetchLive && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
-          <span style={{ fontSize: 10, color: "var(--hint)", flex: 1 }}>
-            {isLoading ? "Fetching models…" :
-             loadError ? `⚠ ${loadError}` :
-             hasLive ? `${models.length} models loaded from API` :
-             `${models.length} default models · click to load live list`}
-          </span>
-          <button onClick={isLoading ? undefined : (hasLive ? refresh : fetchLive)}
-            disabled={isLoading}
-            style={{
-              padding: "3px 8px", border: "none", borderRadius: 4, cursor: isLoading ? "default" : "pointer",
-              background: "var(--surface-3)", color: isLoading ? "var(--hint)" : "var(--accent)",
-              fontSize: 10, fontFamily: "inherit", display: "flex", alignItems: "center", gap: 4,
-            }}>
-            <NodeIcon name="history" size={10} color={isLoading ? "var(--hint)" : "var(--accent)"}/>
-            {isLoading ? "Loading…" : hasLive ? "Refresh" : "Load from API"}
-          </button>
-        </div>
-      )}
+  const roleNodes = nodes.filter((n) => n.data.role === role);
+  const allCount  = nodes.filter((n) => n.data.model !== model).length;
 
-      {/* Provider info */}
-      {providerDef?.requiresKey && (
-        <div style={{ marginTop: 6, fontSize: 10, color: "var(--hint)",
-          display: "flex", alignItems: "center", gap: 4 }}>
-          <NodeIcon name="lock" size={10}/>
-          API key required — store in <span style={{ fontFamily: MONO, color: "var(--muted)" }}>.env.local</span>
-        </div>
-      )}
-      {!providerDef?.requiresKey && providerDef?.id === "ollama" && (
-        <div style={{ marginTop: 6, fontSize: 10, color: "var(--hint)" }}>
-          Needs <span style={{ fontFamily: MONO, color: "var(--muted)" }}>ollama serve</span> running locally.
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ── Model selector ─────────────────────────────────────────────────────────────
-function ModelSelector({ nodeId, currentModel }: { nodeId: string; currentModel: string }) {
-  const { models, selectedProvider, setProvider } = useModelRegistry();
-  const upd = useWorkflowStore((s) => s.updateNodeData);
-
-  // Auto-detect provider from current model on first render
-  useEffect(() => {
-    if (currentModel) {
-      const inferred = inferProvider(currentModel);
-      if (inferred !== selectedProvider) setProvider(inferred);
-    }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const handleModelChange = (value: string) => {
-    upd(nodeId, { model: value });
+  const apply = (roleFilter?: AgentRole) => {
+    const count = bulkSetModel(model, roleFilter);
+    const roleName = roleFilter ? ROLE_META[roleFilter].label : null;
+    setFlash(
+      count === 0
+        ? "Already applied to all matching nodes"
+        : roleName
+        ? `Applied to ${count} ${roleName} node${count !== 1 ? "s" : ""}`
+        : `Applied to all ${count} node${count !== 1 ? "s" : ""}`
+    );
+    setTimeout(() => setFlash(null), 2200);
   };
 
-  // Custom entry for "custom" provider
-  if (selectedProvider === "custom") {
-    return (
-      <Input
-        value={currentModel}
-        onChange={handleModelChange}
-        placeholder="Enter any model ID (e.g. my-org/my-model)"
-        mono
-      />
-    );
-  }
-
-  const selectedInfo = models.find((m) => m.id === currentModel);
-
   return (
-    <div>
-      <Select value={currentModel} onChange={handleModelChange}>
-        <option value="">— no model —</option>
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>{m.label}</option>
-        ))}
-        {/* Allow keeping the current value even if not in list */}
-        {currentModel && !models.find((m) => m.id === currentModel) && (
-          <option value={currentModel}>{currentModel} (custom)</option>
-        )}
-      </Select>
-
-      {/* Model details */}
-      {selectedInfo && (
+    <div style={{ marginTop: 2 }}>
+      {flash ? (
         <div style={{
-          marginTop: 6, background: "var(--bg)", border: "1px solid var(--border)",
-          borderRadius: 4, padding: "6px 10px", display: "grid",
-          gridTemplateColumns: "1fr 1fr", gap: "4px 12px",
-          fontSize: 11, color: "var(--muted)", fontFamily: MONO,
+          fontSize: 11, color: "var(--green)",
+          display: "flex", alignItems: "center", gap: 5,
+          padding: "5px 8px", borderRadius: 5,
+          background: "rgba(16,185,129,0.07)", border: "1px solid rgba(16,185,129,0.2)",
         }}>
-          <span>context</span>
-          <span style={{ color: "var(--text)", textAlign: "right" }}>{selectedInfo.contextK}k tok</span>
-          {selectedInfo.costInPerMtok !== undefined && (
-            <>
-              <span>in / Mtok</span>
-              <span style={{ color: "var(--text)", textAlign: "right" }}>
-                {selectedInfo.costInPerMtok === 0 ? "free" : `$${selectedInfo.costInPerMtok}`}
-              </span>
-            </>
-          )}
-          {selectedInfo.costOutPerMtok !== undefined && (
-            <>
-              <span>out / Mtok</span>
-              <span style={{ color: "var(--text)", textAlign: "right" }}>
-                {selectedInfo.costOutPerMtok === 0 ? "free" : `$${selectedInfo.costOutPerMtok}`}
-              </span>
-            </>
-          )}
-          {selectedInfo.tags?.length && (
-            <>
-              <span>tags</span>
-              <span style={{ color: "var(--hint)", textAlign: "right" }}>
-                {selectedInfo.tags.join(", ")}
-              </span>
-            </>
+          <NodeIcon name="check" size={11} color="var(--green)"/>
+          {flash}
+        </div>
+      ) : (
+        <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+          <button
+            onClick={() => apply()}
+            disabled={allCount === 0}
+            title={`Set ${model} on every node in the workflow`}
+            style={applyBtnStyle(allCount > 0)}>
+            <NodeIcon name="grid" size={10}/>
+            Apply to all nodes
+          </button>
+          {roleNodes.length > 1 && (
+            <button
+              onClick={() => apply(role)}
+              title={`Set ${model} on all ${ROLE_META[role].label} nodes`}
+              style={applyBtnStyle(true)}>
+              <NodeIcon name="history" size={10}/>
+              Apply to {ROLE_META[role].label} nodes ({roleNodes.length})
+            </button>
           )}
         </div>
       )}
@@ -164,7 +71,230 @@ function ModelSelector({ nodeId, currentModel }: { nodeId: string; currentModel:
   );
 }
 
-// ── ThinkDepth selector ────────────────────────────────────────────────────────
+function applyBtnStyle(active: boolean): React.CSSProperties {
+  return {
+    padding: "3px 9px", border: "none", borderRadius: 4,
+    cursor: active ? "pointer" : "not-allowed",
+    background: active ? "var(--surface-3)" : "var(--surface-2)",
+    color: active ? "var(--muted)" : "var(--hint)",
+    fontSize: 11, fontFamily: "inherit",
+    display: "inline-flex", alignItems: "center", gap: 4,
+    opacity: active ? 1 : 0.5,
+    transition: "all 80ms",
+  };
+}
+
+// ── Model presets bar ─────────────────────────────────────────────────────────
+
+type PresetName = "Full Ollama" | "Full Claude" | "Claude Mix" | "Ollama Cloud";
+
+const MODEL_PRESETS: Record<PresetName, { label: string; hint: string; assign: (role: AgentRole) => string }> = {
+  "Full Ollama": {
+    label: "🖥 Ollama",
+    hint: "All nodes → qwen2.5-coder:7b (free, local)",
+    assign: () => "qwen2.5-coder:7b",
+  },
+  "Ollama Cloud": {
+    label: "☁ Cloud",
+    hint: "All nodes → gemma4:31b-cloud (Ollama Cloud)",
+    assign: () => "gemma4:31b-cloud",
+  },
+  "Full Claude": {
+    label: "◆ Claude",
+    hint: "All nodes → claude-sonnet-4.6",
+    assign: () => "claude-sonnet-4.6",
+  },
+  "Claude Mix": {
+    label: "◆ Mix",
+    hint: "Orchestrators/Critics → claude-opus-4.6, Workers → claude-haiku-4.5",
+    assign: (role) =>
+      role === AgentRole.Orchestrator || role === AgentRole.Critic
+        ? "claude-opus-4.6"
+        : role === AgentRole.Worker || role === AgentRole.ToolCaller
+        ? "claude-haiku-4.5"
+        : "claude-sonnet-4.6",
+  },
+};
+
+function ModelPresetsBar() {
+  const nodes        = useWorkflowStore((s) => s.nodes);
+  const bulkSetModel = useWorkflowStore((s) => s.bulkSetModel);
+  const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
+  const [flash, setFlash] = useState<string | null>(null);
+  const [tooltip, setTooltip] = useState<string | null>(null);
+
+  if (nodes.length === 0) return null;
+
+  const applyPreset = (name: PresetName) => {
+    const preset = MODEL_PRESETS[name];
+    // For uniform presets (all same model), use bulkSetModel
+    if (name === "Full Ollama" || name === "Ollama Cloud" || name === "Full Claude") {
+      const model = preset.assign(AgentRole.Worker);
+      bulkSetModel(model);
+      setFlash(`${name} applied (${nodes.length} nodes → ${model})`);
+    } else {
+      // Role-differentiated: update each node individually
+      nodes.forEach((n) => {
+        const model = preset.assign(n.data.role);
+        if (model && n.data.role !== AgentRole.Hook && n.data.role !== AgentRole.Memory) {
+          updateNodeData(n.id, { model });
+        }
+      });
+      setFlash(`${name} applied`);
+    }
+    setTimeout(() => setFlash(null), 2200);
+  };
+
+  return (
+    <div style={{
+      background: "var(--bg)", border: "1px solid var(--border)",
+      borderRadius: 6, padding: "8px 10px",
+    }}>
+      <div style={{ fontSize: 10, color: "var(--hint)", marginBottom: 6, letterSpacing: "0.06em" }}>
+        WORKFLOW PRESETS
+      </div>
+      {flash ? (
+        <div style={{
+          fontSize: 11, color: "var(--green)",
+          display: "flex", alignItems: "center", gap: 5,
+        }}>
+          <NodeIcon name="check" size={11} color="var(--green)"/>
+          {flash}
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+            {(Object.keys(MODEL_PRESETS) as PresetName[]).map((name) => (
+              <button
+                key={name}
+                onClick={() => applyPreset(name)}
+                onMouseEnter={() => setTooltip(MODEL_PRESETS[name].hint)}
+                onMouseLeave={() => setTooltip(null)}
+                style={{
+                  padding: "4px 10px", border: "none", borderRadius: 99,
+                  cursor: "pointer", fontSize: 11, fontFamily: "inherit",
+                  background: "var(--surface-3)", color: "var(--text)",
+                  transition: "background 80ms",
+                }}>
+                {MODEL_PRESETS[name].label}
+              </button>
+            ))}
+          </div>
+          {tooltip && (
+            <div style={{ fontSize: 10, color: "var(--hint)", marginTop: 5 }}>
+              {tooltip}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ── Fallback model section ────────────────────────────────────────────────────
+
+const FALLBACK_TRIGGERS = [
+  { value: "rate_limit", label: "Rate limit" },
+  { value: "error",      label: "Any error" },
+  { value: "timeout",    label: "Timeout" },
+  { value: "any",        label: "Any issue" },
+] as const;
+
+function FallbackModelSection({ nodeId, data }: { nodeId: string; data: AgentNodeData }) {
+  const upd = useWorkflowStore((s) => s.updateNodeData);
+  const hasFallback = !!data.fallback?.model;
+
+  const enable = () =>
+    upd(nodeId, { fallback: { model: "gpt-4o-mini", trigger: "rate_limit" } });
+
+  const disable = () =>
+    upd(nodeId, { fallback: undefined });
+
+  return (
+    <Fld label="Fallback model">
+      <div style={{
+        background: "var(--bg)", border: "1px solid var(--border)",
+        borderRadius: 6, padding: 10,
+      }}>
+        {/* Toggle row */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: hasFallback ? 10 : 0 }}>
+          <div style={{ fontSize: 11, color: "var(--hint)", display: "flex", alignItems: "center", gap: 5 }}>
+            <NodeIcon name="history" size={11} color="var(--blue)"/>
+            Auto-switch when primary fails
+          </div>
+          <button
+            onClick={hasFallback ? disable : enable}
+            style={{
+              padding: "2px 9px", border: "none", borderRadius: 99,
+              cursor: "pointer", fontSize: 10, fontFamily: "inherit",
+              background: hasFallback ? "rgba(16,185,129,0.12)" : "var(--surface-3)",
+              color: hasFallback ? "var(--green)" : "var(--muted)",
+              outline: hasFallback ? "1px solid rgba(16,185,129,0.3)" : "none",
+            }}>
+            {hasFallback ? "● Enabled" : "○ Off"}
+          </button>
+        </div>
+
+        {/* Trigger selector + model picker when enabled */}
+        {hasFallback && (
+          <>
+            {/* Trigger row */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+              fontSize: 11, color: "var(--muted)",
+            }}>
+              <span>Trigger on</span>
+              <select
+                value={data.fallback?.trigger ?? "rate_limit"}
+                onChange={(e) =>
+                  upd(nodeId, {
+                    fallback: data.fallback
+                      ? { ...data.fallback, trigger: e.target.value as typeof FALLBACK_TRIGGERS[number]["value"] }
+                      : undefined,
+                  })
+                }
+                style={{
+                  background: "var(--surface-3)", border: "none",
+                  borderRadius: 4, padding: "3px 7px", color: "var(--text)",
+                  fontSize: 11, fontFamily: "inherit", outline: "none", cursor: "pointer",
+                }}>
+                {FALLBACK_TRIGGERS.map((t) => (
+                  <option key={t.value} value={t.value}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Same ModelPicker, compact mode */}
+            <ModelPicker
+              compact
+              value={data.fallback?.model ?? ""}
+              onChange={(v) =>
+                upd(nodeId, {
+                  fallback: { model: v, trigger: data.fallback?.trigger ?? "rate_limit" },
+                })
+              }
+            />
+
+            {/* Flow indicator */}
+            {data.fallback?.model && (
+              <div style={{
+                marginTop: 8, fontSize: 10, color: "var(--blue)",
+                fontFamily: MONO, display: "flex", alignItems: "center", gap: 4,
+              }}>
+                <NodeIcon name="chev" size={10} color="var(--blue)"/>
+                {data.model || "primary"} → {data.fallback.model}
+                <span style={{ color: "var(--hint)" }}>on {data.fallback.trigger}</span>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </Fld>
+  );
+}
+
+// ── ThinkDepth selector ───────────────────────────────────────────────────────
+
 type ThinkDepth = "none" | "low" | "medium" | "high";
 const THINK_DEPTHS: ThinkDepth[] = ["none", "low", "medium", "high"];
 
@@ -200,12 +330,16 @@ function ThinkDepthSelector({ nodeId, data }: { nodeId: string; data: AgentNodeD
   );
 }
 
-// ── RoleTab ────────────────────────────────────────────────────────────────────
+// ── RoleTab ───────────────────────────────────────────────────────────────────
+
 export function RoleTab({ nodeId }: { nodeId: string }) {
   const node = useWorkflowStore((s) => s.nodes.find((n) => n.id === nodeId));
   const upd  = useWorkflowStore((s) => s.updateNodeData);
+  // Needed so Zustand doesn't re-render on irrelevant node count changes
+  const nodeCount = useWorkflowStore((s) => s.nodes.length);
   if (!node) return null;
   const d = node.data;
+  const canHaveModel = d.role !== AgentRole.Hook && d.role !== AgentRole.Memory;
 
   return (
     <div>
@@ -226,7 +360,8 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
             onChange={(e) => upd(nodeId, { description: e.target.value })}
             style={{ width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
               borderRadius: 4, padding: "6px 8px", color: "var(--text)",
-              fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none" }}/>
+              fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none",
+              boxSizing: "border-box" }}/>
         </Fld>
         <Fld label="Comment (annotation)">
           <textarea
@@ -236,67 +371,46 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
             onChange={(e) => upd(nodeId, { comment: e.target.value })}
             style={{ width: "100%", background: "var(--bg)", border: "1px solid var(--border)",
               borderRadius: 4, padding: "6px 8px", color: "var(--text)",
-              fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none" }}
+              fontSize: 12, fontFamily: "inherit", outline: "none", resize: "none",
+              boxSizing: "border-box" }}
           />
         </Fld>
       </Sec>
 
-      <Sec title="Model">
-        <ProviderSelector />
-        <Fld label="Primary model">
-          <ModelSelector nodeId={nodeId} currentModel={d.model}/>
-        </Fld>
+      {canHaveModel && (
+        <Sec title="Model">
+          <Fld label="Primary model">
+            <ModelPicker
+              value={d.model}
+              onChange={(v) => upd(nodeId, { model: v })}
+            />
+          </Fld>
 
-        <ThinkDepthSelector nodeId={nodeId} data={d}/>
+          {/* Bulk apply — only useful when there are other nodes */}
+          {nodeCount > 1 && (
+            <BulkApplyActions model={d.model} role={d.role}/>
+          )}
 
-        {/* Fallback model */}
-        <Fld label="Fallback model">
-          <div style={{ background: "var(--bg)", border: "1px solid var(--border)",
-            borderRadius: 6, padding: 10 }}>
-            <div style={{ fontSize: 11, color: "var(--hint)", marginBottom: 8,
-              display: "flex", alignItems: "center", gap: 6 }}>
-              <NodeIcon name="history" size={12} color="var(--blue)"/>
-              Auto-switch when primary is rate-limited or errors
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 6, alignItems: "end" }}>
-              <Fld label="Fallback model ID">
-                <Input
-                  value={d.fallback?.model ?? ""}
-                  onChange={(v) => upd(nodeId, {
-                    fallback: v ? { model: v, trigger: d.fallback?.trigger ?? "rate_limit" } : undefined,
-                  })}
-                  placeholder="e.g. gpt-5.5-xhigh"
-                  mono
-                />
-              </Fld>
-              <Fld label="Trigger on">
-                <select
-                  value={d.fallback?.trigger ?? "rate_limit"}
-                  disabled={!d.fallback?.model}
-                  onChange={(e) => upd(nodeId, {
-                    fallback: d.fallback ? { ...d.fallback, trigger: e.target.value as "rate_limit" | "error" | "timeout" | "any" } : undefined,
-                  })}
-                  style={{ background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 4, padding: "6px 8px", color: d.fallback?.model ? "var(--text)" : "var(--hint)",
-                    fontSize: 12, fontFamily: "inherit", outline: "none" }}
-                >
-                  <option value="rate_limit">Rate limit</option>
-                  <option value="error">Any error</option>
-                  <option value="timeout">Timeout</option>
-                  <option value="any">Any issue</option>
-                </select>
-              </Fld>
-            </div>
-            {d.fallback?.model && (
-              <div style={{ marginTop: 6, fontSize: 10, color: "var(--blue)",
-                fontFamily: MONO, display: "flex", alignItems: "center", gap: 4 }}>
-                <NodeIcon name="chev" size={10} color="var(--blue)"/>
-                {d.model || "primary"} → {d.fallback.model} on {d.fallback.trigger}
-              </div>
-            )}
+          <ThinkDepthSelector nodeId={nodeId} data={d}/>
+
+          <FallbackModelSection nodeId={nodeId} data={d}/>
+
+          {/* Workflow presets — affects all nodes */}
+          <Fld label="Workflow model presets">
+            <ModelPresetsBar/>
+          </Fld>
+        </Sec>
+      )}
+
+      {!canHaveModel && (
+        <Sec title="Model">
+          <div style={{ fontSize: 11, color: "var(--hint)", padding: "6px 0" }}>
+            {d.role === AgentRole.Hook
+              ? "Hook nodes execute scripts — no LLM model required."
+              : "Memory nodes store key/value pairs — no LLM model required."}
           </div>
-        </Fld>
-      </Sec>
+        </Sec>
+      )}
 
       <Sec title="Limits">
         <Fld label={`Token budget · ${d.tokens.budget.toLocaleString()}`}>

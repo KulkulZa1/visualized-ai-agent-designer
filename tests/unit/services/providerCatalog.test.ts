@@ -45,6 +45,21 @@ describe("provider catalog", () => {
     expect(serialized).not.toMatch(/sk-ant-[A-Za-z0-9_-]{10,}/);
   });
 
+  it("defines Ollama Cloud as an enabled hosted Ollama endpoint using a credential reference", () => {
+    const cloud = DEFAULT_PROVIDER_CATALOG.find((provider) => provider.id === "ollama-cloud");
+
+    expect(cloud).toEqual(expect.objectContaining({
+      name: "Ollama Cloud",
+      type: "ollama-remote",
+      baseUrl: "https://ollama.com/api",
+      apiKeyRef: "env:OLLAMA_API_KEY",
+      defaultModel: "gemma4:31b-cloud",
+      isLocal: false,
+      enabled: true,
+      securityLevel: "hosted",
+    }));
+  });
+
   it("describes capability flags and health status for each provider", () => {
     for (const provider of DEFAULT_PROVIDER_CATALOG as ProviderConfig[]) {
       expect(provider.capabilities).toEqual(

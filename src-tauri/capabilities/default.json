@@ -13,8 +13,6 @@
     "store:allow-get",
     "store:allow-set",
     "store:allow-load",
-    "store:allow-save",
-    "shell:allow-execute",
-    "shell:allow-kill"
+    "store:allow-save"
   ]
 }

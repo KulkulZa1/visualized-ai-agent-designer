@@ -817,6 +817,322 @@ nodePositions:
   agent-11: { x: 60,   y: 560 }
 `;
 
+const PURCHASING_DECISION_YAML = `\
+meta:
+  name: Purchasing Decision Assistant
+  version: "1.0.0"
+  description: >
+    Five-agent demo workflow that ranks suppliers against a requirements file.
+    Deterministic verification rubric in docs/E2E_DEMO_PLAN.md.
+  projectRoot: ""
+  createdAt: "2026-05-17T00:00:00Z"
+  updatedAt: "2026-05-17T00:00:00Z"
+agents:
+  - name: Requirement Parser
+    role: orchestrator
+    model: claude-haiku-4.5
+    temperature: 0.2
+    maxTokens: 4096
+    maxSteps: 5
+    timeoutSeconds: 60
+    description: Reads requirements.yaml and emits a parsed requirements object.
+    promptSource:
+      type: inline
+      content: |
+        You are the Requirement Parser. Read .harness/inputs/requirements.yaml.
+        Parse into JSON: budgetUsd, deliveryDays, mustHaveCertifications, preferredRegion, suppliers.
+        If the file is missing, output {"error":"requirements_missing"} and stop.
+    tools: [read_file, todo_write]
+    memoryRead: []
+    memoryWrite: [parsed-requirements]
+    tokens: { used: 0, budget: 6000 }
+    status: idle
+  - name: Supplier Evaluator
+    role: worker
+    model: claude-haiku-4.5
+    temperature: 0.0
+    maxTokens: 4096
+    maxSteps: 10
+    timeoutSeconds: 90
+    description: Scores each supplier using a deterministic rubric and outputs a ranked list.
+    promptSource:
+      type: inline
+      content: |
+        Score each supplier: score = 100
+          - max(0, unitPriceUsd - 460) * 0.05
+          - max(0, leadDays - deliveryDays) * 1.5
+          - 30 * missing_required_certifications
+          - 1000 * historicalDefectRate
+          + (region == preferredRegion ? 5 : 0)
+        Sort descending. Round to 1 decimal.
+    tools: [read_file]
+    memoryRead: [parsed-requirements]
+    memoryWrite: [scored-suppliers]
+    tokens: { used: 0, budget: 8000 }
+    status: idle
+  - name: Risk Reviewer
+    role: critic
+    model: claude-sonnet-4.6
+    temperature: 0.1
+    maxTokens: 3072
+    maxSteps: 5
+    timeoutSeconds: 90
+    description: Validates the top-ranked supplier against hard constraints. Returns PASS or REVISE.
+    promptSource:
+      type: inline
+      content: |
+        Inspect the top-ranked supplier. Check certs, lead time vs SLA, defect rate <= 0.02.
+        Output {"verdict":"PASS","topId":"..."} or {"verdict":"REVISE","reasons":[...]}.
+    tools: [read_file]
+    memoryRead: [scored-suppliers]
+    memoryWrite: [risk-verdict]
+    tokens: { used: 0, budget: 4000 }
+    status: idle
+  - name: Report Writer
+    role: aggregator
+    model: claude-haiku-4.5
+    temperature: 0.3
+    maxTokens: 4096
+    maxSteps: 5
+    timeoutSeconds: 90
+    description: Writes the final ranking report to .harness/artifacts/ranking.md.
+    promptSource:
+      type: inline
+      content: |
+        Write .harness/artifacts/ranking.md with:
+          ## Recommended Supplier
+          ## Ranking Table (id | name | score | reason)
+          ## Risk Reviewer Verdict
+          ## Rubric Citation
+    tools: [fs.read, fs.write]
+    memoryRead: [scored-suppliers, risk-verdict]
+    memoryWrite: [report-path]
+    tokens: { used: 0, budget: 6000 }
+    status: idle
+  - name: Decision Memory
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 30
+    description: Appends a JSONL line per workflow run to .harness/decision-log.jsonl.
+    promptSource: { type: inline, content: "" }
+    tools: [fs.append, fs.read]
+    memoryRead: [scored-suppliers, risk-verdict, report-path]
+    memoryWrite: [decision-log]
+    tokens: { used: 0, budget: 0 }
+    status: idle
+connections:
+  - { id: edge-parse-evaluate,  sourceAgentId: agent-0, targetAgentId: agent-1, label: parsed requirements,  edgeKind: dataflow }
+  - { id: edge-evaluate-review, sourceAgentId: agent-1, targetAgentId: agent-2, label: scored suppliers,     edgeKind: dataflow }
+  - { id: edge-review-report,   sourceAgentId: agent-2, targetAgentId: agent-3, label: ranking + risks,      edgeKind: dataflow }
+  - { id: edge-review-revise,   sourceAgentId: agent-2, targetAgentId: agent-1, label: revise,               edgeKind: feedback }
+  - { id: edge-report-memory,   sourceAgentId: agent-3, targetAgentId: agent-4, label: decision log,         edgeKind: memory }
+  - { id: edge-evaluate-memory, sourceAgentId: agent-1, targetAgentId: agent-4, label: scoring rationale,    edgeKind: memory }
+  - { id: edge-review-memory,   sourceAgentId: agent-2, targetAgentId: agent-4, label: reviewer approval,    edgeKind: control }
+executionSettings:
+  maxParallel: 1
+  timeoutSeconds: 600
+  retryOnFailure: false
+  maxRetries: 0
+nodePositions:
+  agent-0: { x: 80,  y: 220 }
+  agent-1: { x: 320, y: 220 }
+  agent-2: { x: 560, y: 220 }
+  agent-3: { x: 800, y: 220 }
+  agent-4: { x: 560, y: 440 }
+`;
+
+const RESEARCH_SYNTHESIS_YAML = `\
+meta:
+  name: Research & Synthesis Pipeline
+  version: "1.0.0"
+  description: >
+    Full Ollama demo: Orchestrator decomposes a topic, two Workers analyse pros and cons in
+    parallel, a Critic issues a verdict, Memory persists findings, and a Final Check produces
+    a complete report. All agents use qwen2.5-coder:7b (local Ollama, no cloud key needed).
+  projectRoot: ""
+  createdAt: "2026-05-17T00:00:00Z"
+  updatedAt: "2026-05-17T00:00:00Z"
+agents:
+  - name: Orchestrator
+    role: orchestrator
+    model: qwen2.5-coder:7b
+    temperature: 0.6
+    maxTokens: 1024
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Receives the user's topic and produces a structured JSON plan for both workers.
+    promptSource:
+      type: inline
+      content: |
+        You are the Orchestrator. The user gave you a topic or question to analyze.
+        Your job:
+        1. Restate the topic clearly in ONE sentence.
+        2. Break it into 3-4 specific sub-questions.
+        3. Assign Worker 1 (Pro Analyst) to research BENEFITS/ADVANTAGES/OPPORTUNITIES.
+        4. Assign Worker 2 (Con Analyst) to research RISKS/CHALLENGES/LIMITATIONS.
+        Output EXACTLY this JSON (no extra text before or after):
+        {"topic":"<one-sentence topic>","questions":["<q1>","<q2>","<q3>"],"worker1_task":"<what pro analyst should focus on>","worker2_task":"<what con analyst should focus on>"}
+    tools: []
+    memoryRead: []
+    memoryWrite: [task-plan]
+    tokens: { used: 0, budget: 8000 }
+    status: idle
+  - name: Pro Analyst
+    role: worker
+    model: qwen2.5-coder:7b
+    temperature: 0.5
+    maxTokens: 1500
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Analyzes benefits, advantages, and opportunities using the Orchestrator's plan.
+    promptSource:
+      type: inline
+      content: |
+        You are the Pro Analyst. The Orchestrator's plan is in your UPSTREAM OUTPUTS.
+        Read the plan JSON and focus on the "worker1_task" assignment.
+        Produce a structured benefits analysis:
+        ## Benefits & Advantages
+        For EACH benefit (aim for 3-5):
+        **Benefit N: <name>**
+        - Why it matters: <explanation>
+        - Concrete example: <specific example>
+        - Impact level: High / Medium / Low
+        ## Summary
+        <2-3 sentences overall assessment of the opportunities>
+    tools: [read_file, list_files]
+    memoryRead: [task-plan]
+    memoryWrite: [analysis-pros]
+    tokens: { used: 0, budget: 12000 }
+    status: idle
+  - name: Con Analyst
+    role: worker
+    model: qwen2.5-coder:7b
+    temperature: 0.5
+    maxTokens: 1500
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Analyzes risks, challenges, and limitations using the Orchestrator's plan.
+    promptSource:
+      type: inline
+      content: |
+        You are the Con Analyst. The Orchestrator's plan is in your UPSTREAM OUTPUTS.
+        Read the plan JSON and focus on the "worker2_task" assignment.
+        Produce a structured risks analysis:
+        ## Risks & Challenges
+        For EACH risk (aim for 3-5):
+        **Risk N: <name>**
+        - Why it matters: <explanation>
+        - Real-world impact: <specific scenario>
+        - Mitigation: <how to address it>
+        - Severity: High / Medium / Low
+        ## Summary
+        <2-3 sentences overall assessment of the risks>
+    tools: [read_file, list_files]
+    memoryRead: [task-plan]
+    memoryWrite: [analysis-cons]
+    tokens: { used: 0, budget: 12000 }
+    status: idle
+  - name: Critic
+    role: critic
+    model: qwen2.5-coder:7b
+    temperature: 0.3
+    maxTokens: 1200
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Reviews both worker analyses, identifies gaps, and issues a structured verdict.
+    promptSource:
+      type: inline
+      content: |
+        You are the Critic. In your UPSTREAM OUTPUTS you have:
+        - Pro Analyst output (from: Pro Analyst -> pros)
+        - Con Analyst output (from: Con Analyst -> cons)
+        Read both analyses. Then:
+        1. Identify any major gaps or inconsistencies.
+        2. Assess balance (are risks overstated or understated vs benefits?).
+        3. Issue a verdict.
+        Output EXACTLY this JSON:
+        {"verdict":"PROCEED"|"PROCEED WITH CAUTION"|"DO NOT PROCEED","rationale":"<2-3 sentences>","gaps_found":["<gap1>","<gap2>"],"key_insight":"<most important finding>","recommendations":["<rec1>","<rec2>","<rec3>"]}
+    tools: []
+    memoryRead: [analysis-pros, analysis-cons]
+    memoryWrite: [critic-verdict]
+    tokens: { used: 0, budget: 10000 }
+    status: idle
+  - name: Findings Log
+    role: memory
+    model: ""
+    temperature: 0.0
+    maxTokens: 0
+    maxSteps: 1
+    timeoutSeconds: 30
+    description: Aggregates Pro analysis, Con analysis, and Critic verdict into memory keys for the Final Check.
+    promptSource: { type: inline, content: "" }
+    tools: [fs.append, fs.read]
+    memoryRead: []
+    memoryWrite: [synthesis, analysis-pros, analysis-cons, critic-verdict]
+    tokens: { used: 0, budget: 0 }
+    status: idle
+  - name: Final Check
+    role: aggregator
+    model: qwen2.5-coder:7b
+    temperature: 0.4
+    maxTokens: 2000
+    maxSteps: 3
+    timeoutSeconds: 120
+    description: Reads all findings from memory and upstream, produces a polished Markdown executive report.
+    promptSource:
+      type: inline
+      content: |
+        You are the Final Check. Your MEMORY context contains all findings from the pipeline,
+        and your UPSTREAM OUTPUTS show the full agent chain.
+        Write a polished executive report in Markdown:
+        # Analysis Report: [Topic Name]
+        ## Executive Summary
+        [3-5 sentences: topic, key finding, recommendation]
+        ## Key Findings
+        | Category | Finding | Impact |
+        |----------|---------|--------|
+        [3-5 rows mixing pros and cons]
+        ## Critic's Verdict
+        **[VERDICT]** — [rationale]
+        ## Recommendations
+        1. [rec1]
+        2. [rec2]
+        3. [rec3]
+        ## Confidence Level
+        **[High / Medium / Low]** — [1 sentence]
+        ---
+        *Research & Synthesis Pipeline · Ollama (qwen2.5-coder:7b)*
+    tools: [fs.read]
+    memoryRead: [synthesis, analysis-pros, analysis-cons, critic-verdict]
+    memoryWrite: [final-report]
+    tokens: { used: 0, budget: 16000 }
+    status: idle
+connections:
+  - { id: orch-to-pro,    sourceAgentId: agent-0, targetAgentId: agent-1, label: task plan,    edgeKind: dataflow }
+  - { id: orch-to-con,    sourceAgentId: agent-0, targetAgentId: agent-2, label: task plan,    edgeKind: dataflow }
+  - { id: pro-to-critic,  sourceAgentId: agent-1, targetAgentId: agent-3, label: pros,         edgeKind: dataflow }
+  - { id: con-to-critic,  sourceAgentId: agent-2, targetAgentId: agent-3, label: cons,         edgeKind: dataflow }
+  - { id: pro-to-memory,  sourceAgentId: agent-1, targetAgentId: agent-4, label: pros log,     edgeKind: memory   }
+  - { id: con-to-memory,  sourceAgentId: agent-2, targetAgentId: agent-4, label: cons log,     edgeKind: memory   }
+  - { id: crit-to-memory, sourceAgentId: agent-3, targetAgentId: agent-4, label: verdict,      edgeKind: memory   }
+  - { id: memory-to-final,sourceAgentId: agent-4, targetAgentId: agent-5, label: all findings, edgeKind: memory   }
+executionSettings:
+  maxParallel: 2
+  timeoutSeconds: 900
+  retryOnFailure: false
+  maxRetries: 0
+nodePositions:
+  agent-0: { x: 60,   y: 240 }
+  agent-1: { x: 320,  y: 100 }
+  agent-2: { x: 320,  y: 380 }
+  agent-3: { x: 580,  y: 240 }
+  agent-4: { x: 840,  y: 240 }
+  agent-5: { x: 1100, y: 240 }
+`;
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export const EXAMPLES: ExampleMeta[] = [
@@ -864,6 +1180,24 @@ export const EXAMPLES: ExampleMeta[] = [
     nodeCount: 12,
     edgeCount: 18,
     yaml: HARNESS_STUDIO_PROJECT_YAML,
+  },
+  {
+    id: "purchasing-decision",
+    name: "Purchasing Decision Assistant",
+    description: "Beginner-friendly deterministic demo: 5 agents rank 3 suppliers using a scoring rubric. Verifiable without paid API — runs on local Ollama. See docs/E2E_DEMO_PLAN.md.",
+    pattern: "Deterministic pipeline",
+    nodeCount: 5,
+    edgeCount: 7,
+    yaml: PURCHASING_DECISION_YAML,
+  },
+  {
+    id: "research-synthesis",
+    name: "Research & Synthesis Pipeline",
+    description: "Runnable demo: Orchestrator → Pro Analyst | Con Analyst → Critic → Memory → Final Check. All agents use qwen2.5-coder:7b. Enter any topic in the Run dialog and it produces a full analysis report.",
+    pattern: "Parallel fan-in + memory chain",
+    nodeCount: 6,
+    edgeCount: 8,
+    yaml: RESEARCH_SYNTHESIS_YAML,
   },
 ];
 

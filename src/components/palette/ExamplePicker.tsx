@@ -168,12 +168,26 @@ export function ExamplePicker({ onClose }: ExamplePickerProps) {
         {/* Footer */}
         <div style={{
           padding: "10px 18px", borderTop: "1px solid var(--border)",
-          fontSize: 11, color: "var(--hint)", display: "flex", alignItems: "center", gap: 8,
+          fontSize: 11, color: "var(--hint)",
+          display: "flex", flexDirection: "column", gap: 6,
         }}>
-          <NodeIcon name="file" size={12}/>
-          Full YAML files are in the <span style={{ fontFamily: MONO, color: "var(--muted)" }}>examples/</span> folder.
-          Click any <span style={{ fontFamily: MONO, color: "var(--accent)" }}>.harness.yaml</span> file
-          in the sidebar tree to load it too.
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <NodeIcon name="file" size={12}/>
+            Full YAML files are in the <span style={{ fontFamily: MONO, color: "var(--muted)" }}>examples/</span> folder.
+            Click any <span style={{ fontFamily: MONO, color: "var(--accent)" }}>.harness.yaml</span> file
+            in the sidebar tree to load it too.
+          </div>
+          <div style={{
+            display: "flex", alignItems: "center", gap: 6, padding: "5px 8px",
+            background: "rgba(124,158,255,0.06)", border: "1px solid rgba(124,158,255,0.2)",
+            borderRadius: 5, color: "rgba(124,158,255,0.9)", fontSize: 10,
+          }}>
+            <NodeIcon name="history" size={10} color="rgba(124,158,255,0.9)"/>
+            <span>
+              <strong>Execution note:</strong> Agents run <strong>sequentially</strong> in topological
+              order — even fan-out graphs. True parallel scheduling is on the roadmap.
+            </span>
+          </div>
         </div>
       </div>
     </div>

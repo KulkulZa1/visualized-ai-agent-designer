@@ -9,12 +9,16 @@ import { ConfigPanel }    from "@/components/config-panel/ConfigPanel";
 import { EditorArea }     from "@/components/editor/EditorTab";
 import { AuditStrip }     from "@/components/layout/AuditStrip";
 import { GeneratePanel }  from "@/components/generate/GeneratePanel";
+import { AgentActivityPanel }  from "@/components/execution/AgentActivityPanel";
+import { WorkflowInputDialog }  from "@/components/execution/WorkflowInputDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { ExamplePicker }  from "@/components/palette/ExamplePicker";
 import { PermissionMatrix } from "@/components/permissions/PermissionMatrix";
 import { RunPanel }       from "@/components/execution/RunPanel";
 import { SettingsPanel }  from "@/components/layout/SettingsPanel";
-import { KeyboardHelp }   from "@/components/layout/KeyboardHelp";
+import { QuickStartGuide } from "@/components/layout/QuickStartGuide";
+import { WorkflowWizard } from "@/components/wizard/WorkflowWizard";
+import { GuidePanel } from "@/components/guide/GuidePanel";
 import { SnapshotSearchPanel } from "@/components/palette/SnapshotSearchPanel";
 import { WorkflowMetaEditor } from "@/components/palette/WorkflowMetaEditor";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -22,10 +26,12 @@ import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useUIStore } from "@/store/uiStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useWorkflowStore } from "@/store/workflowStore";
+import { useExecutionStore } from "@/store/executionStore";
 import { useStore } from "zustand";
 import { loadWorkflow } from "@/ipc/tauriCommands";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import { EXAMPLES, useExamples } from "@/hooks/useExamples";
+import { ErrorToast } from "@/components/ui/ErrorToast";
 
 type Modal = "generate" | "palette" | "examples" | "permissions" | null;
 
@@ -39,10 +45,25 @@ function AppInner() {
   const [showHelp, setShowHelp] = useState(false);
   const [showSnapshotSearch, setShowSnapshotSearch] = useState(false);
   const [showMetaEditor, setShowMetaEditor] = useState(false);
+  const [showActivityPanel, setShowActivityPanel] = useState(false);
+  const [showRunInput, setShowRunInput] = useState(false);
+  const [showWizard, setShowWizard] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode = useUIStore((s) => s.selectNode);
   const uiMode = useUIStore((s) => s.uiMode);
+  const currentRun = useExecutionStore((s) => s.currentRun);
+  const isRunning  = useExecutionStore((s) => s.isRunning);
+  // Auto-show when the node is actively running
+  const selectedNodeIsRunning =
+    isRunning && selectedNodeId !== null &&
+    currentRun?.agents[selectedNodeId]?.status === "running";
+  // Keep visible after run completes if the selected node has output
+  const selectedNodeHasOutput =
+    !isRunning && selectedNodeId !== null &&
+    (currentRun?.agents[selectedNodeId]?.output?.length ?? 0) > 0;
   const undo = useStore(useWorkflowStore.temporal, (s) => s.undo);
   const redo = useStore(useWorkflowStore.temporal, (s) => s.redo);
 
@@ -68,8 +89,7 @@ function AppInner() {
   }, []);
 
   function handleRun() {
-    setShowRunPanel(true);
-    executeWorkflow().catch(console.error);
+    setShowRunInput(true);   // open preflight dialog; run starts after user confirms
   }
 
   // Global keyboard: ⌘K / Ctrl+K → command palette
@@ -103,6 +123,11 @@ function AppInner() {
       e.preventDefault();
       setShowHelp((v) => !v);
     }
+    // Ctrl+Shift+W — Workflow Wizard (Create from Goal)
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "w") {
+      e.preventDefault();
+      setShowWizard((v) => !v);
+    }
     // Undo / Redo
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z") {
       e.preventDefault();
@@ -126,7 +151,16 @@ function AppInner() {
       e.preventDefault();
       setShowSnapshotSearch((v) => !v);
     }
-    if (e.key === "Escape") { setModal(null); setShowSettings(false); setShowHelp(false); setShowSnapshotSearch(false); }
+    // Ctrl+I — toggle agent activity panel for selected node
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "i" && !e.shiftKey) {
+      e.preventDefault();
+      setShowActivityPanel((v) => !v);
+    }
+    if (e.key === "Escape") {
+      setModal(null); setShowSettings(false); setShowHelp(false);
+      setShowSnapshotSearch(false); setShowActivityPanel(false);
+      setShowWizard(false); setShowGuide(false);
+    }
   }, [loadExample, undo, redo, selectedNodeId, selectNode]);
 
   useEffect(() => {
@@ -156,10 +190,11 @@ function AppInner() {
         onOpenSettings={() => setShowSettings(true)}
         onOpenHelp={() => setShowHelp(true)}
         onOpenMetaEditor={() => setShowMetaEditor(true)}
+        onOpenWizard={() => setShowWizard(true)}
       />
       <Sidebar />
 
-      {/* Center: canvas + optional editor split */}
+      {/* Center: canvas + optional editor split + agent activity panel */}
       <div style={{ gridArea: "center", display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <CanvasToolbar />
         <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
@@ -171,6 +206,15 @@ function AppInner() {
               <EditorArea />
             </div>
           )}
+          {/* Agent activity panel — shows during run, persists after, or when explicitly opened */}
+          {selectedNodeId && (selectedNodeIsRunning || selectedNodeHasOutput || showActivityPanel) && (
+            <div style={{ height: 260, flexShrink: 0, borderTop: "2px solid var(--accent)" }}>
+              <AgentActivityPanel
+                nodeId={selectedNodeId}
+                onClose={() => setShowActivityPanel(false)}
+              />
+            </div>
+          )}
         </div>
       </div>
 
@@ -178,14 +222,38 @@ function AppInner() {
       <AuditStrip />
       <StatusBar />
 
+      {/* Workflow input dialog — preflight before every run */}
+      {showRunInput && (
+        <WorkflowInputDialog
+          onCancel={() => setShowRunInput(false)}
+          onStart={(config) => {
+            setShowRunInput(false);
+            setShowRunPanel(true);
+            executeWorkflow(config, (msg) => setErrorMsg(msg)).catch(console.error);
+          }}
+        />
+      )}
+
       {/* Run panel (slides in from right) */}
       {showRunPanel && <RunPanel onClose={() => setShowRunPanel(false)}/>}
 
       {/* Settings modal */}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)}/>}
 
-      {/* Keyboard help modal */}
-      {showHelp && <KeyboardHelp onClose={() => setShowHelp(false)}/>}
+      {/* Error toast — replaces alert() for workflow errors */}
+      {errorMsg && <ErrorToast message={errorMsg} onDismiss={() => setErrorMsg(null)}/>}
+
+      {/* Quick Start Guide (replaces old KeyboardHelp) */}
+      {showHelp && <QuickStartGuide onClose={() => setShowHelp(false)}/>}
+
+      {/* Workflow Wizard — Create from Goal (Ctrl+Shift+W) */}
+      {showWizard && <WorkflowWizard onClose={() => setShowWizard(false)}/>}
+
+      {/* Floating Guide Assistant (always available) */}
+      <GuidePanel
+        open={showGuide}
+        onToggle={() => setShowGuide((v) => !v)}
+      />
 
       {/* Snapshot search */}
       {showSnapshotSearch && <SnapshotSearchPanel onClose={() => setShowSnapshotSearch(false)}/>}

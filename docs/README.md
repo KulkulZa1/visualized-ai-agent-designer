@@ -1,39 +1,21 @@
-# Agent Workflow Builder
+# Harness Studio Docs
 
-A local-first visual desktop app for designing, configuring, and managing multi-agent AI workflows.
+Harness Studio is a local-first Tauri desktop app for designing, validating,
+running, and inspecting multi-agent AI workflows.
 
-## What It Does
+Start here:
 
-- **Visual canvas** — drag-drop nodes to design multi-agent systems (Orchestrator, Worker, Critic, Tool Caller, Memory, Gateway)
-- **Per-agent configuration** — set role, model, system prompt, tool permissions, pre/post hooks, and memory keys
-- **Config file management** — create and edit CLAUDE.md, AGENTS.md, system prompt files, and hook scripts from one place
-- **YAML workflow files** — version-controlled, human-readable workflow definitions
-- **Audit log** — every file write and hook execution is logged to `.agent-audit/audit.log.jsonl`
+- `QUICK_START.md` - beginner setup and first workflow.
+- `INSTALLATION.md` - source run and installer build.
+- `PROJECT_STATUS.md` - current verified project state.
+- `DEPLOYMENT_READINESS.md` - release checklist and evidence.
+- `MCP_USAGE.md` - MCP stdio server usage and safety boundary.
+- `SECURITY.md` - current security model and blockers.
 
-## Quick Start
+Current audit path:
 
-See [SETUP.md](SETUP.md) for prerequisites.
-
-```powershell
-git clone <repo>
-cd AI_agent
-npm install
-npm run tauri -- dev
+```text
+.harness/audit.log.jsonl
 ```
 
-## Project Structure
-
-| Directory | Purpose |
-|-----------|---------|
-| `src/` | React frontend (TypeScript) |
-| `src-tauri/` | Rust backend (Tauri) |
-| `docs/` | Project documentation |
-| `tests/` | Unit and component tests |
-
-## Current Status
-
-See [PROJECT_STATUS.md](PROJECT_STATUS.md) for current phase and what's working.
-
-## Architecture
-
-See [ARCHITECTURE.md](ARCHITECTURE.md) for system design details.
+Do not use the old `.agent-audit/` path in new code or documentation.

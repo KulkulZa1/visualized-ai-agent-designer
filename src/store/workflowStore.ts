@@ -40,6 +40,8 @@ interface WorkflowStoreActions {
   removeNode: (nodeId: string) => void;
   duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
+  /** Set model on all nodes, optionally filtered by role. Returns the count changed. */
+  bulkSetModel: (model: string, roleFilter?: AgentRole) => number;
   updateEdgeLabel: (edgeId: string, label: string) => void;
   updateMeta: (meta: Partial<WorkflowMeta>) => void;
   updateExecutionSettings: (settings: Partial<ExecutionSettings>) => void;
@@ -124,6 +126,21 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           Object.assign(node.data, data);
           state.isDirty = true;
         }),
+
+      bulkSetModel: (model, roleFilter) => {
+        const targets = get().nodes.filter(
+          (n) => !roleFilter || n.data.role === roleFilter
+        );
+        set((state) => {
+          state.nodes.forEach((node) => {
+            if (!roleFilter || node.data.role === roleFilter) {
+              node.data.model = model;
+            }
+          });
+          state.isDirty = true;
+        });
+        return targets.length;
+      },
 
       updateEdgeLabel: (edgeId, label) =>
         set((state) => {

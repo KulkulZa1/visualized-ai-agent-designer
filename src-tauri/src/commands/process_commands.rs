@@ -25,7 +25,14 @@ pub fn execute_hook(
     hook_path: String,
     agent_id: String,
     env: Option<HashMap<String, String>>,
+    consent_granted: bool,
 ) -> AppResult<HookResult> {
+    if !consent_granted {
+        return Err(AppError::HookExecution(
+            "Hook execution requires explicit user consent.".to_string(),
+        ));
+    }
+
     // Validate path stays within workspace
     let safe = resolve_safe_path(&workspace_path, &hook_path)?;
     let hook_arg = safe.to_string_lossy().to_string();
@@ -55,6 +62,36 @@ pub fn execute_hook(
         &args,
         Path::new(&workspace_path),
         &env_vars,
+        Duration::from_secs(HOOK_TIMEOUT_SECS),
+    )
+}
+
+#[tauri::command]
+pub fn execute_inline_command(
+    workspace_path: String,
+    command: String,
+    consent_granted: bool,
+) -> AppResult<HookResult> {
+    if !consent_granted {
+        return Err(AppError::HookExecution(
+            "Inline command execution requires explicit user consent.".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    let (program, args): (&str, Vec<String>) = (
+        "powershell.exe",
+        vec!["-NonInteractive".into(), "-Command".into(), command.clone()],
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    let (program, args): (&str, Vec<String>) = ("sh", vec!["-c".into(), command.clone()]);
+
+    run_command_with_timeout(
+        program,
+        &args,
+        Path::new(&workspace_path),
+        &HashMap::new(),
         Duration::from_secs(HOOK_TIMEOUT_SECS),
     )
 }
@@ -110,7 +147,53 @@ fn run_command_with_timeout(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn execute_inline_command_requires_consent() {
+        let dir = tempdir().unwrap();
+        let result = execute_inline_command(
+            dir.path().to_string_lossy().to_string(),
+            "echo hello".to_string(),
+            false,
+        );
+        assert!(
+            matches!(result, Err(AppError::HookExecution(msg)) if msg.contains("consent"))
+        );
+    }
+
+    #[test]
+    fn execute_inline_command_runs_command() {
+        let dir = tempdir().unwrap();
+        let result = execute_inline_command(
+            dir.path().to_string_lossy().to_string(),
+            "echo harness-studio".to_string(),
+            true,
+        );
+        let output = result.unwrap();
+        assert_eq!(output.exit_code, 0);
+        assert!(output.stdout.contains("harness-studio"));
+    }
+
+    #[test]
+    fn execute_hook_requires_explicit_consent() {
+        let dir = tempdir().unwrap();
+        let hook_path = dir.path().join("hook.bat");
+        fs::write(&hook_path, "echo should-not-run").unwrap();
+
+        let result = execute_hook(
+            dir.path().to_string_lossy().to_string(),
+            "hook.bat".to_string(),
+            "agent-1".to_string(),
+            None,
+            false,
+        );
+
+        assert!(
+            matches!(result, Err(AppError::HookExecution(message)) if message.contains("consent"))
+        );
+    }
 
     #[test]
     fn run_hook_passes_custom_environment() {

@@ -1,508 +1,572 @@
+/**
+ * useWorkflowExecution — real multi-agent execution engine.
+ *
+ * What this now does properly:
+ * 1. AGENT CHAINING   — upstream agent outputs are passed as context to downstream agents
+ * 2. MEMORY           — memoryRead/memoryWrite keys persist values across agents per run
+ * 3. TOOL EXECUTION   — read_file, list_files, grep executed via Tauri on <tool_call> tags
+ * 4. GATEWAY ROUTING  — gateway JSON output determines which downstream branch to follow
+ * 5. MEMORY NODES     — aggregate upstream outputs into memory keys (no LLM call needed)
+ * 6. PARALLEL EXEC    — independent branches run concurrently up to executionSettings.maxParallel
+ */
+
 import { invoke } from "@tauri-apps/api/core";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useAuditStore } from "@/store/auditStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { AgentRole } from "@/types/agent";
-import type { AgentNode } from "@/types/workflow";
-import type { Edge } from "@xyflow/react";
 import type { HookResult } from "@/types/hookResult";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
 import { createSnapshot } from "@/services/context-builder/snapshotService";
-import { MOCK_ARTIFACTS } from "@/services/artifact-manager/mockArtifacts";
+import type { Artifact } from "@/types/inspection";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
   isBillingRelatedError,
+  isOllamaCloudUrl,
+  isRemoteOllamaUrl,
   selectProviderForModel,
-  shouldFallbackToOllama,
   type LlmProvider,
   type RuntimeProvider,
 } from "@/utils/providerConfig";
+import {
+  callProvider,
+  buildSystemMessage,
+  resolveModel,
+  REASONING_EFFORT,
+  estimateTokens,
+} from "@/services/model-providers/providerAdapter";
+import { readWorkspaceFile } from "@/ipc/tauriCommands";
+import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
+import { MemoryService } from "@/services/execution/memoryService";
+import {
+  buildToolInstructions,
+  parseToolCall,
+  stripToolCall,
+  executeTool,
+} from "@/services/execution/toolExecutor";
+import { runParallel } from "@/services/execution/parallelScheduler";
 
-// ── Model alias resolution ────────────────────────────────────────────────────
+// ── Gateway route parser ──────────────────────────────────────────────────────
 
-const MODEL_ALIASES: Record<string, string> = {
-  "gpt-5.5-xhigh": "gpt-5.5",
-  "gpt-5.5-high":  "gpt-5.5",
-  "gpt-5.5-mid":   "gpt-5.4-mini",
-  "gpt-4o-high":   "gpt-4o",
-  "gpt-4o-mini":   "gpt-4o-mini",
-};
+type EdgeData = { label?: string; edgeKind?: string };
 
-const REASONING_EFFORT: Record<string, string> = {
-  "gpt-5.5-xhigh": "high",
-  "gpt-5.5-high":  "medium",
-  "gpt-5.5-mid":   "medium",
-};
-
-function resolveModel(model: string): string {
-  return MODEL_ALIASES[model] ?? model;
+/**
+ * Try to extract a routing key from a gateway's text output.
+ * Looks for JSON `{"route":"X"}`, `{"target":"X"}`, `{"domain":"X"}`, `{"verdict":"X"}`.
+ */
+function parseGatewayRoute(text: string): string | null {
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      const obj = JSON.parse(jsonMatch[0]);
+      const val = obj.route ?? obj.target ?? obj.domain ?? obj.verdict ?? obj.action ?? null;
+      if (typeof val === "string" && val.trim()) return val.trim().toLowerCase();
+    } catch { /* fall through */ }
+  }
+  const kvMatch = text.match(/(?:route|target|domain|verdict|action)\s*[":]\s*"?([a-zA-Z0-9_-]+)"?/i);
+  if (kvMatch) return kvMatch[1].toLowerCase();
+  return null;
 }
 
-// ── Topological sort (Kahn's algorithm) ───────────────────────────────────────
-
-function topoSort(nodes: AgentNode[], edges: Edge[]): string[] {
-  const inDegree = new Map<string, number>();
-  const adj = new Map<string, string[]>();
-
-  for (const n of nodes) {
-    inDegree.set(n.id, 0);
-    adj.set(n.id, []);
-  }
-
-  for (const e of edges) {
-    if (!adj.has(e.source)) continue;
-    adj.get(e.source)!.push(e.target);
-    inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
-  }
-
-  const queue: string[] = [];
-  for (const [id, deg] of inDegree) {
-    if (deg === 0) queue.push(id);
-  }
-
-  const result: string[] = [];
-  while (queue.length > 0) {
-    const current = queue.shift()!;
-    result.push(current);
-    for (const neighbor of adj.get(current) ?? []) {
-      const newDeg = (inDegree.get(neighbor) ?? 1) - 1;
-      inDegree.set(neighbor, newDeg);
-      if (newDeg === 0) queue.push(neighbor);
-    }
-  }
-
-  const sorted = new Set(result);
-  for (const n of nodes) {
-    if (!sorted.has(n.id)) result.push(n.id);
-  }
-
-  return result;
-}
-
-// ── Provider health check ─────────────────────────────────────────────────────
+// ── Provider types ────────────────────────────────────────────────────────────
 
 interface ProviderHealth {
-  ok: boolean;
-  provider: string;
-  latency_ms: number;
-  message: string;
-  model_available: boolean;
-  pull_command: string | null;
+  ok: boolean; provider: string; latency_ms: number;
+  message: string; model_available: boolean; pull_command: string | null;
 }
 
 interface ProviderDefaults {
-  llm_provider: LlmProvider;
-  ollama_base_url: string;
-  ollama_model: string;
-  openai_api_key_configured: boolean;
-  anthropic_api_key_configured: boolean;
-  suggested_ollama_models: string[];
+  llm_provider: LlmProvider; ollama_base_url: string; ollama_model: string;
+  openai_api_key_configured: boolean; anthropic_api_key_configured: boolean;
+  ollama_api_key_configured: boolean; suggested_ollama_models: string[];
 }
 
-const FALLBACK_PROVIDER_DEFAULTS: ProviderDefaults = {
-  llm_provider: "auto",
-  ollama_base_url: DEFAULT_OLLAMA_BASE_URL,
-  ollama_model: DEFAULT_OLLAMA_MODEL,
-  openai_api_key_configured: false,
-  anthropic_api_key_configured: false,
+const FALLBACK_DEFAULTS: ProviderDefaults = {
+  llm_provider: "auto", ollama_base_url: DEFAULT_OLLAMA_BASE_URL,
+  ollama_model: DEFAULT_OLLAMA_MODEL, openai_api_key_configured: false,
+  anthropic_api_key_configured: false, ollama_api_key_configured: false,
   suggested_ollama_models: [],
 };
 
-function isExecutableAgent(role: AgentRole): boolean {
+function isExecutable(role: AgentRole): boolean {
   return role !== AgentRole.Memory && role !== AgentRole.Hook;
 }
 
+// ── Health checks ─────────────────────────────────────────────────────────────
+
 async function runHealthChecks(
-  openaiApiKey: string,
-  apiKey: string,
-  ollamaBaseUrl: string,
-  ollamaModel: string,
+  openaiKey: string, anthropicKey: string,
+  ollamaUrl: string, ollamaModel: string, ollamaKey: string,
+  ollamaProvider: Extract<RuntimeProvider, "ollama" | "ollama-cloud">,
   addEntry: ReturnType<typeof useAuditStore.getState>["addEntry"],
-  hasOpenAIKey = Boolean(openaiApiKey),
-  hasAnthropicKey = Boolean(apiKey),
 ): Promise<ProviderHealth[]> {
-  const checks: Promise<ProviderHealth | null>[] = [];
-
-  if (hasOpenAIKey) {
-    checks.push(
-      invoke<ProviderHealth>("check_provider_health", {
-        provider: "openai", apiKey: openaiApiKey, baseUrl: "", model: "",
-      }).catch((e): ProviderHealth => ({
-        ok: false, provider: "openai", latency_ms: 0,
-        message: String(e), model_available: false, pull_command: null,
-      }))
-    );
+  const checks: Promise<ProviderHealth>[] = [];
+  if (openaiKey) {
+    checks.push(invoke<ProviderHealth>("check_provider_health", {
+      provider: "openai", apiKey: openaiKey, baseUrl: "", model: "",
+    }).catch((e): ProviderHealth => ({ ok: false, provider: "openai", latency_ms: 0, message: String(e), model_available: false, pull_command: null })));
   }
-
-  if (hasAnthropicKey) {
-    checks.push(
-      invoke<ProviderHealth>("check_provider_health", {
-        provider: "anthropic", apiKey, baseUrl: "", model: "",
-      }).catch((e): ProviderHealth => ({
-        ok: false, provider: "anthropic", latency_ms: 0,
-        message: String(e), model_available: false, pull_command: null,
-      }))
-    );
+  if (anthropicKey) {
+    checks.push(invoke<ProviderHealth>("check_provider_health", {
+      provider: "anthropic", apiKey: anthropicKey, baseUrl: "", model: "",
+    }).catch((e): ProviderHealth => ({ ok: false, provider: "anthropic", latency_ms: 0, message: String(e), model_available: false, pull_command: null })));
   }
-
-  if (ollamaBaseUrl) {
-    checks.push(
-      invoke<ProviderHealth>("check_provider_health", {
-        provider: "ollama", apiKey: "", baseUrl: ollamaBaseUrl, model: ollamaModel,
-      }).catch((e): ProviderHealth => ({
-        ok: false, provider: "ollama", latency_ms: 0,
-        message: String(e), model_available: false, pull_command: `ollama pull ${ollamaModel}`,
-      }))
-    );
+  if (ollamaUrl) {
+    checks.push(invoke<ProviderHealth>("check_provider_health", {
+      provider: ollamaProvider, apiKey: ollamaKey, baseUrl: ollamaUrl, model: ollamaModel,
+    }).catch((e): ProviderHealth => ({
+      ok: false,
+      provider: ollamaProvider,
+      latency_ms: 0,
+      message: String(e),
+      model_available: false,
+      pull_command: ollamaProvider === "ollama" ? `ollama pull ${ollamaModel}` : null,
+    })));
   }
-
-  const results = (await Promise.all(checks)).filter(Boolean) as ProviderHealth[];
-
+  const results = await Promise.all(checks);
   for (const h of results) {
-    const icon = h.ok ? "✓" : "⚠";
     addEntry({
-      id: `health-${h.provider}-${Date.now()}`,
-      timestamp: new Date().toISOString(),
-      action: "workflow_loaded",
-      agentId: "system",
-      details: `Provider health: ${icon} ${h.provider.charAt(0).toUpperCase() + h.provider.slice(1)} — ${h.message}`,
-      success: h.ok,
+      id: `health-${h.provider}-${Date.now()}`, timestamp: new Date().toISOString(),
+      action: "workflow_loaded", agentId: "system",
+      details: `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`, success: h.ok,
     });
   }
-
   return results;
 }
 
-// ── Hook ─────────────────────────────────────────────────────────────────────
+// ── Main hook ─────────────────────────────────────────────────────────────────
 
 export function useWorkflowExecution() {
-  const nodes          = useWorkflowStore((s) => s.nodes);
-  const edges          = useWorkflowStore((s) => s.edges);
-  const meta           = useWorkflowStore((s) => s.meta);
-  const updateNodeData = useWorkflowStore((s) => s.updateNodeData);
-  const workspacePath  = useWorkspaceStore((s) => s.workspacePath);
-
+  const nodes             = useWorkflowStore((s) => s.nodes);
+  const edges             = useWorkflowStore((s) => s.edges);
+  const meta              = useWorkflowStore((s) => s.meta);
+  const executionSettings = useWorkflowStore((s) => s.executionSettings);
+  const updateNodeData    = useWorkflowStore((s) => s.updateNodeData);
+  const workspacePath     = useWorkspaceStore((s) => s.workspacePath);
   const {
-    currentRun, apiKey, openaiApiKey,
+    currentRun, apiKey, openaiApiKey, ollamaApiKey,
+    customApiUrl, customApiKey, customApiModel,
     llmProvider, ollamaBaseUrl, ollamaModel,
-    startRun, updateAgent, finishRun, cancelRun, isRunning,
-    continueOnError,
+    startRun, updateAgent, finishRun, cancelRun, isRunning, continueOnError,
   } = useExecutionStore();
-
   const addEntry = useAuditStore((s) => s.addEntry);
 
-  async function executeWorkflow() {
+  async function executeWorkflow(
+    config: WorkflowRunConfig = {
+      userInput: "", contextFilePaths: [], thinkDepthOverride: null, providerOverride: null,
+    },
+    onError?: (msg: string) => void,
+  ) {
+    const reportError = (msg: string) => { if (onError) onError(msg); else alert(msg); };
+    // ── Resolve provider settings ────────────────────────────────────────────
     const providerDefaults = await invoke<ProviderDefaults>("get_provider_defaults")
-      .catch(() => FALLBACK_PROVIDER_DEFAULTS);
+      .catch(() => FALLBACK_DEFAULTS);
+    const activeProvider   = config.providerOverride ?? llmProvider;
     const effectiveProvider =
-      llmProvider === "auto" && providerDefaults.llm_provider !== "auto"
-        ? providerDefaults.llm_provider
-        : llmProvider;
-    const effectiveOllamaBaseUrl = ollamaBaseUrl || providerDefaults.ollama_base_url || DEFAULT_OLLAMA_BASE_URL;
-    const effectiveOllamaModel = ollamaModel || providerDefaults.ollama_model || DEFAULT_OLLAMA_MODEL;
-    const hasOpenAIKey = Boolean(openaiApiKey || providerDefaults.openai_api_key_configured);
-    const hasAnthropicKey = Boolean(apiKey || providerDefaults.anthropic_api_key_configured);
+      activeProvider === "auto" && providerDefaults.llm_provider !== "auto"
+        ? providerDefaults.llm_provider : activeProvider;
+    const effectiveOllamaUrl   = ollamaBaseUrl || providerDefaults.ollama_base_url || DEFAULT_OLLAMA_BASE_URL;
+    const effectiveOllamaModel = resolveModel(
+      ollamaModel || providerDefaults.ollama_model || DEFAULT_OLLAMA_MODEL
+    );
+    const ollamaProviderType: Extract<RuntimeProvider, "ollama" | "ollama-cloud"> =
+      effectiveProvider === "ollama-cloud" || isRemoteOllamaUrl(effectiveOllamaUrl)
+        ? "ollama-cloud" : "ollama";
 
-    const selectedHostedProviderMissingKey =
-      (effectiveProvider === "openai" && !hasOpenAIKey) ||
-      (effectiveProvider === "anthropic" && !hasAnthropicKey);
-    if (selectedHostedProviderMissingKey) {
-      alert("The selected hosted provider has no API key. Save a key in Settings or switch LLM_PROVIDER=ollama.");
+    const hasOpenAIKey    = Boolean(openaiApiKey || providerDefaults.openai_api_key_configured);
+    const hasAnthropicKey = Boolean(apiKey       || providerDefaults.anthropic_api_key_configured);
+    const hasOllamaKey    = Boolean(ollamaApiKey || providerDefaults.ollama_api_key_configured);
+
+    // Guard: missing key for explicitly chosen hosted provider
+    const missingKey =
+      (effectiveProvider === "openai"       && !hasOpenAIKey)    ||
+      (effectiveProvider === "anthropic"    && !hasAnthropicKey)  ||
+      (effectiveProvider === "ollama-cloud" && !hasOllamaKey && isOllamaCloudUrl(effectiveOllamaUrl));
+    if (missingKey) {
+      reportError("No API key for the selected provider. Add one in Settings or switch to Ollama.");
       return;
     }
 
+    // Health checks
+    const healthResults = await runHealthChecks(
+      openaiApiKey, apiKey, effectiveOllamaUrl, effectiveOllamaModel,
+      ollamaApiKey, ollamaProviderType, addEntry,
+    );
+    const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
+    const ollamaHealth = healthMap.get(ollamaProviderType);
+    const ollamaReady  = Boolean(ollamaHealth?.ok && ollamaHealth.model_available);
+
     const requiredProviders = new Set<RuntimeProvider>();
     for (const node of nodes) {
-      if (!isExecutableAgent(node.data.role)) continue;
-      const selected = selectProviderForModel({
-        mode: effectiveProvider,
-        model: node.data.model || "gpt-4o-mini",
-        hasOpenAIKey,
-        hasAnthropicKey,
-        ollamaModel: effectiveOllamaModel,
+      if (!isExecutable(node.data.role)) continue;
+      const sel = selectProviderForModel({
+        mode: effectiveProvider, model: node.data.model || "qwen2.5-coder:7b",
+        hasOpenAIKey, hasAnthropicKey, ollamaModel: effectiveOllamaModel,
       });
-      requiredProviders.add(selected.provider);
+      requiredProviders.add(sel.provider === "ollama" ? ollamaProviderType : sel.provider);
     }
 
-    const healthResults = await runHealthChecks(
-      openaiApiKey,
-      apiKey,
-      effectiveOllamaBaseUrl,
-      effectiveOllamaModel,
-      addEntry,
-      hasOpenAIKey,
-      hasAnthropicKey,
-    );
-    const healthByProvider = new Map(healthResults.map((health) => [health.provider, health]));
-    const ollamaHealth = healthByProvider.get("ollama");
-    const ollamaReady = Boolean(ollamaHealth?.ok && ollamaHealth.model_available);
-
-    for (const provider of requiredProviders) {
-      const health = healthByProvider.get(provider);
-      if (provider === "ollama") {
+    for (const prov of requiredProviders) {
+      if (prov === "ollama" || prov === "ollama-cloud") {
         if (!ollamaReady) {
-          const pull = ollamaHealth?.pull_command ? `\n${ollamaHealth.pull_command}` : "";
-          alert(`${ollamaHealth?.message ?? "Ollama is not available."}${pull}`);
+          const pull = ollamaHealth?.pull_command ? `\nRun: ${ollamaHealth.pull_command}` : "";
+          reportError(`${ollamaHealth?.message ?? "Ollama not reachable."}${pull}`);
           return;
         }
         continue;
       }
-
-      if (health && !health.ok) {
-        if (isBillingRelatedError(health.message) && ollamaReady) {
-          continue;
-        }
-        alert(health.message);
+      const h = healthMap.get(prov);
+      if (h && !h.ok) {
+        if (isBillingRelatedError(h.message) && ollamaReady) continue;
+        reportError(h.message);
         return;
       }
     }
 
-    const order = topoSort(nodes, edges);
-    startRun(meta.name);
-
-    // Reset all nodes to idle
-    for (const nodeId of order) {
-      updateNodeData(nodeId, { status: "idle" });
+    // ── Pre-read context files ────────────────────────────────────────────────
+    let contextFileContent = "";
+    if (config.contextFilePaths.length > 0 && workspacePath) {
+      const parts = await Promise.all(
+        config.contextFilePaths.map((p) =>
+          readWorkspaceFile(workspacePath, p)
+            .then((t) => `--- ${p} ---\n${t}`)
+            .catch(() => `--- ${p} --- (not found)`),
+        ),
+      );
+      contextFileContent = parts.join("\n\n");
     }
 
-    for (const nodeId of order) {
-      if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
+    // ── Per-run runtime state ─────────────────────────────────────────────────
+    const memory        = new MemoryService();
+    const agentOutputs  = new Map<string, string>(); // nodeId → output text
+    const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
+
+    const incomingSet = new Set(edges.map((e) => e.target));
+    const isEntryNode = (id: string) => !incomingSet.has(id);
+
+    startRun(meta.name);
+    for (const n of nodes) updateNodeData(n.id, { status: "idle" });
+
+    // ── Per-node async processor (called by parallel scheduler) ──────────────
+    async function processNode(nodeId: string): Promise<void> {
+      if (useExecutionStore.getState().currentRun?.status === "cancelled") return;
 
       const node = nodes.find((n) => n.id === nodeId);
-      if (!node) continue;
+      if (!node) return;
       const data = node.data;
 
-      // ── Memory nodes — passthrough ──────────────────────────────────────────
+      // ── MEMORY NODE — aggregate upstream → memoryWrite keys ──────────────
       if (data.role === AgentRole.Memory) {
-        updateAgent(nodeId, { agentId: nodeId, agentName: data.name, status: "done", output: "(memory node — passthrough)" });
+        const upstreamText = edges
+          .filter((e) => e.target === nodeId)
+          .map((e) => {
+            const src = nodes.find((n) => n.id === e.source);
+            const out = agentOutputs.get(e.source) ?? "";
+            if (!out) return null;
+            return `[${src?.data.name ?? e.source}]\n${out}`;
+          })
+          .filter(Boolean)
+          .join("\n\n---\n\n");
+
+        const stored = upstreamText || "(no upstream output)";
+        memory.writeAll(data.memoryWrite, stored);
+        agentOutputs.set(nodeId, stored);
+
+        updateAgent(nodeId, {
+          agentId: nodeId, agentName: data.name, status: "done",
+          output: `Stored ${data.memoryWrite.length} key(s): ${data.memoryWrite.join(", ")}`,
+          finishedAt: Date.now(),
+        });
         updateNodeData(nodeId, { status: "done" });
-        addEntry({ id: `${nodeId}-${Date.now()}`, timestamp: new Date().toISOString(), action: "workflow_loaded", agentId: nodeId, details: "memory passthrough", success: true });
-        continue;
+        addEntry({ id: `${nodeId}-mem-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "workflow_loaded", agentId: nodeId,
+          details: `Memory wrote: ${data.memoryWrite.join(", ")}`, success: true });
+        return;
       }
 
-      // ── Hook nodes ─────────────────────────────────────────────────────────
+      // ── HOOK NODE — execute pre-hook script ──────────────────────────────
       if (data.role === AgentRole.Hook) {
         updateAgent(nodeId, { agentId: nodeId, agentName: data.name, status: "running" });
         updateNodeData(nodeId, { status: "running" });
-        const workspace = useWorkflowStore.getState().meta.projectRoot || ".";
-
+        const wsPath = workspacePath || useWorkflowStore.getState().meta.projectRoot || ".";
+        let hookFailed = false;
         if (data.preHook?.path) {
-          try {
-            const result = await invoke<HookResult>("execute_hook", {
-              workspacePath: workspace,
-              hookPath: data.preHook.path,
-              agentId: nodeId,
-              env: {},
-            });
-            updateAgent(nodeId, { status: "done", output: result.stdout, finishedAt: Date.now() });
-          } catch (e) {
-            updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
+          if (data.preHook.requireConsent) {
+            const message =
+              "Hook requires explicit manual consent. Open the Hooks tab and run it there.";
+            hookFailed = true;
+            updateAgent(nodeId, { status: "error", error: message, finishedAt: Date.now() });
+            addEntry({ id: `${nodeId}-hook-consent-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "hook_executed", agentId: nodeId, details: message, success: false });
+          } else {
+            try {
+              const result = await invoke<HookResult>("execute_hook", {
+                workspacePath: wsPath, hookPath: data.preHook.path, agentId: nodeId,
+                env: data.preHook.env ?? {}, consentGranted: true,
+              });
+              agentOutputs.set(nodeId, result.stdout);
+              if (result.exitCode === 0) {
+                updateAgent(nodeId, { status: "done", output: result.stdout, finishedAt: Date.now() });
+              } else {
+                hookFailed = true;
+                updateAgent(nodeId, {
+                  status: "error",
+                  error: `Hook exited ${result.exitCode}: ${result.stderr || result.stdout || "no output"}`,
+                  output: result.stdout, finishedAt: Date.now(),
+                });
+              }
+            } catch (e) {
+              hookFailed = true;
+              updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
+            }
           }
         } else {
           updateAgent(nodeId, { status: "done", output: "(no hook script)", finishedAt: Date.now() });
         }
-        updateNodeData(nodeId, { status: "done" });
-        continue;
+        updateNodeData(nodeId, { status: hookFailed ? "error" : "done" });
+        if (hookFailed && !continueOnError) throw new Error("Hook failed — stopping run");
+        return;
       }
 
-      // ── Agent nodes ────────────────────────────────────────────────────────
+      // ── AGENT / GATEWAY / WORKER / CRITIC / AGGREGATOR NODE ─────────────
       updateAgent(nodeId, { agentId: nodeId, agentName: data.name, status: "running", startedAt: Date.now() });
       updateNodeData(nodeId, { status: "running" });
 
-      const rawModel = data.model || "gpt-4o-mini";
-      const selectedProvider = selectProviderForModel({
-        mode: effectiveProvider,
-        model: rawModel,
-        hasOpenAIKey,
-        hasAnthropicKey,
-        ollamaModel: effectiveOllamaModel,
+      const rawModel = data.model || (effectiveProvider === "openai-compatible" ? customApiModel : effectiveOllamaModel);
+      const selProv  = selectProviderForModel({
+        mode: effectiveProvider, model: rawModel,
+        hasOpenAIKey, hasAnthropicKey, ollamaModel: effectiveOllamaModel,
       });
-      const model = selectedProvider.provider === "openai"
-        ? resolveModel(selectedProvider.model)
-        : selectedProvider.model;
-      const key = selectedProvider.provider === "openai"
-        ? openaiApiKey
-        : selectedProvider.provider === "anthropic"
-          ? apiKey
-          : "";
+      const runtimeProvider = selProv.provider === "ollama" ? ollamaProviderType : selProv.provider;
+      const model =
+        selProv.provider === "openai"           ? resolveModel(selProv.model) :
+        runtimeProvider === "openai-compatible" ? (customApiModel || rawModel) :
+        selProv.model;
+      const apiKeyForProvider =
+        selProv.provider === "openai"           ? openaiApiKey :
+        selProv.provider === "anthropic"        ? apiKey       :
+        runtimeProvider === "openai-compatible" ? customApiKey : "";
 
       addEntry({
-        id: `${nodeId}-start-${Date.now()}`,
-        timestamp: new Date().toISOString(),
-        action: "hook_executed",
-        agentId: nodeId,
-        details: selectedProvider.provider === "ollama"
-          ? `Running ${effectiveOllamaModel} via Ollama fallback/local provider`
-          : `Running ${model} via ${selectedProvider.provider}${rawModel !== model ? ` (alias: ${rawModel})` : ""}`,
-        success: true,
+        id: `${nodeId}-start-${Date.now()}`, timestamp: new Date().toISOString(),
+        action: "hook_executed", agentId: nodeId,
+        details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
       });
 
       try {
-        const promptContent = data.promptSource.type === "inline"
-          ? data.promptSource.content
-          : `[System prompt from file: ${data.promptSource.path ?? ""}]`;
+        const promptContent =
+          data.promptSource.type === "inline"
+            ? data.promptSource.content
+            : `[System prompt from file: ${data.promptSource.type === "file" ? data.promptSource.path : "?"}]`;
+
+        const toolInstructions = buildToolInstructions(data.tools as string[]);
+        const memoryContext    = memory.buildContext(data.memoryRead);
+
+        const upstreamParts: string[] = [];
+        for (const e of edges) {
+          if (e.target !== nodeId) continue;
+          const edgeData = e.data as EdgeData | undefined;
+          if (edgeData?.edgeKind === "feedback") continue;
+          const out = agentOutputs.get(e.source);
+          if (!out) continue;
+          const srcNode = nodes.find((n) => n.id === e.source);
+          const srcName = srcNode?.data.name ?? e.source;
+          const label   = edgeData?.label ? ` → ${edgeData.label}` : "";
+          upstreamParts.push(`[From: ${srcName}${label}]\n${out}`);
+        }
+        const upstreamContext = upstreamParts.join("\n\n─────────────────\n\n");
 
         const systemMsg = [
-          `You are ${data.name}, a ${data.role} agent in the ${meta.name} workflow.`,
-          data.description ? `\nYour role: ${data.description}` : "",
-          `\nAllowed tools: ${data.tools.join(", ") || "none"}`,
-          `\nMemory keys to read: ${data.memoryRead.join(", ") || "none"}`,
-          `\nMemory keys to write: ${data.memoryWrite.join(", ") || "none"}`,
-          promptContent ? `\n\n${promptContent}` : "",
-        ].join("");
+          buildSystemMessage({
+            agentName: data.name, role: data.role, workflowName: meta.name,
+            description: data.description, tools: data.tools as string[],
+            memoryRead: data.memoryRead, memoryWrite: data.memoryWrite, promptContent,
+          }),
+          toolInstructions,
+        ].filter(Boolean).join("\n\n");
 
-        const userMsg = `[Workflow execution] Please describe what you would do as ${data.name} for the current task in the ${meta.name} workflow. This is a demonstration run.`;
-
-        const maxTok = Math.min(data.maxTokens || 1024, 2048);
-
-        // Helper: call via Ollama fallback
-        const callOllama = () =>
-          invoke<string>("call_ollama_api", {
-            model: effectiveOllamaModel,
-            system: systemMsg,
-            userMessage: userMsg,
-            baseUrl: effectiveOllamaBaseUrl,
-            maxTokens: maxTok,
-          });
-
-        let result: string;
-
-        if (selectedProvider.provider === "ollama") {
-          result = await callOllama();
-        } else {
-          if (!key && selectedProvider.requiresKey) {
-            throw new Error(`No ${selectedProvider.provider} API key. Add it in Settings or set the provider key in the environment.`);
-          }
-
-          const reasoningEffort: string | null = (() => {
-            if (selectedProvider.provider !== "openai") return null;
-            if (data.thinkDepth && data.thinkDepth !== "none") return data.thinkDepth;
-            return REASONING_EFFORT[rawModel] ?? null;
-          })();
-
-          try {
-            result = await invoke<string>(
-              selectedProvider.provider === "openai" ? "call_openai_api" : "call_claude_api",
-              {
-                model,
-                system: systemMsg,
-                userMessage: userMsg,
-                apiKey: key,
-                maxTokens: maxTok,
-                ...(selectedProvider.provider === "openai" ? { reasoningEffort } : {}),
-              }
-            );
-          } catch (primaryErr) {
-            const errStr = String(primaryErr);
-            if (shouldFallbackToOllama(errStr) && effectiveOllamaBaseUrl) {
-              addEntry({
-                id: `${nodeId}-fallback-${Date.now()}`,
-                timestamp: new Date().toISOString(),
-                action: "hook_executed",
-                agentId: nodeId,
-                details: `Billing/quota error - retrying with Ollama fallback (${effectiveOllamaModel})`,
-                success: false,
-              });
-              result = (await callOllama()) + "\n[ran on Ollama fallback]";
-            } else {
-              throw primaryErr;
-            }
-          }
+        const userMsgParts: string[] = [];
+        if (isEntryNode(nodeId)) {
+          if (contextFileContent) userMsgParts.push(`CONTEXT FILES:\n${contextFileContent}`);
+          if (config.userInput)   userMsgParts.push(`USER TASK:\n${config.userInput}`);
         }
+        if (memoryContext)   userMsgParts.push(`MEMORY:\n${memoryContext}`);
+        if (upstreamContext) userMsgParts.push(`UPSTREAM OUTPUTS:\n${upstreamContext}`);
+        if (userMsgParts.length === 0)
+          userMsgParts.push(`Execute your role as ${data.name} in the ${meta.name} workflow.`);
 
-        const tokenEstimate = Math.ceil((systemMsg.length + userMsg.length + result.length) / 4);
+        const baseUserMsg = userMsgParts.join("\n\n");
+        const maxTok = Math.min(data.maxTokens || 2048, 4096);
+        const effectiveThinkDepth =
+          config.thinkDepthOverride !== null ? config.thinkDepthOverride : (data.thinkDepth ?? null);
+        const reasoningEffort: string | null =
+          selProv.provider !== "openai" ? null :
+          effectiveThinkDepth && effectiveThinkDepth !== "none" ? effectiveThinkDepth :
+          (REASONING_EFFORT[rawModel] ?? null);
 
-        // Simulated streaming: chunk result with setTimeout delays
-        const chunkSize = result.length > 2000 ? 100 : 50;
-        const delay = result.length > 2000 ? 20 : 30;
-        const chunks: string[] = [];
-        for (let i = 0; i < result.length; i += chunkSize) {
-          chunks.push(result.slice(i, i + chunkSize));
-        }
-        let accumulated = "";
-        for (const chunk of chunks) {
+        const maxSteps    = data.maxSteps || 5;
+        let currentMsg    = baseUserMsg;
+        let finalText     = "";
+        let stepsDone     = 0;
+        let toolCallCount = 0;
+
+        while (stepsDone < maxSteps) {
           if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
-          await new Promise<void>((resolve) => setTimeout(resolve, delay));
-          accumulated += chunk;
+
+          const callResult = await callProvider(
+            {
+              provider: runtimeProvider, model, rawModel,
+              systemMsg, userMsg: currentMsg, maxTokens: maxTok,
+              apiKey: apiKeyForProvider, requiresKey: selProv.requiresKey,
+              ollamaBaseUrl: effectiveOllamaUrl, ollamaModel: effectiveOllamaModel,
+              ollamaApiKey: ollamaApiKey || undefined,
+              customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
+              reasoningEffort,
+            },
+            invoke,
+          );
+
+          if (callResult.usedOllamaFallback) {
+            addEntry({ id: `${nodeId}-fb-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "hook_executed", agentId: nodeId,
+              details: `Billing error — fell back to Ollama (${effectiveOllamaModel})`, success: false });
+          }
+
+          const responseText = callResult.text;
+          const toolCall     = parseToolCall(responseText);
+
+          if (!toolCall) {
+            finalText = responseText;
+            break;
+          }
+
+          toolCallCount++;
+          addEntry({ id: `${nodeId}-tool-${toolCallCount}-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "file_read", agentId: nodeId,
+            details: `Tool: ${toolCall.name}(${JSON.stringify(toolCall.args)})`, success: true });
+
+          const toolResult = await executeTool(toolCall, workspacePath, invoke, data.tools as string[]);
+          const beforeTool = stripToolCall(responseText);
+
+          currentMsg =
+            `${currentMsg}\n\n` +
+            `[Step ${toolCallCount}: called ${toolCall.name}]\n` +
+            (beforeTool ? `${beforeTool}\n` : "") +
+            `<tool_result>${toolResult}</tool_result>\n\n` +
+            `Now continue your task based on the tool result above.`;
+
+          stepsDone++;
+        }
+
+        if (!finalText && stepsDone >= maxSteps)
+          finalText = `[Reached max steps (${maxSteps}). Last context:\n${currentMsg.slice(-500)}]`;
+
+        // Store output + memory
+        agentOutputs.set(nodeId, finalText);
+        memory.writeAll(data.memoryWrite, finalText);
+
+        // Gateway routing
+        if (data.role === AgentRole.Gateway) {
+          const route = parseGatewayRoute(finalText);
+          if (route) {
+            gatewayRoutes.set(nodeId, route);
+            addEntry({ id: `${nodeId}-route-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId,
+              details: `Gateway routed → "${route}"`, success: true });
+          }
+        }
+
+        // Simulated streaming display
+        const chunkSize = finalText.length > 2000 ? 120 : 60;
+        let accumulated = "";
+        for (let i = 0; i < finalText.length; i += chunkSize) {
+          if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
+          await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
+          accumulated += finalText.slice(i, i + chunkSize);
           updateAgent(nodeId, { output: accumulated });
         }
 
+        const tokenEstimate = estimateTokens(systemMsg, currentMsg, finalText);
         updateAgent(nodeId, {
-          status: "done",
-          output: result,
-          finishedAt: Date.now(),
-          tokenEstimate,
-          providerUsed: selectedProvider.provider,
-          modelUsed: model,
+          status: "done", output: finalText, finishedAt: Date.now(),
+          tokenEstimate, providerUsed: runtimeProvider, modelUsed: model,
         });
-        updateNodeData(nodeId, {
-          status: "done",
-          tokens: { used: tokenEstimate, budget: data.tokens.budget },
-        });
+        updateNodeData(nodeId, { status: "done", tokens: { used: tokenEstimate, budget: data.tokens.budget } });
         addEntry({
-          id: `${nodeId}-done-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          action: "hook_executed",
-          agentId: nodeId,
-          details: result.slice(0, 200),
+          id: `${nodeId}-done-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "hook_executed", agentId: nodeId,
+          details: `✓ ${data.name} — ${tokenEstimate} est. tokens${toolCallCount > 0 ? ` (${toolCallCount} tool calls)` : ""}`,
           success: true,
         });
 
-        // Non-blocking snapshot save
-        const ctxDone = buildContextSnapshot({
-          node,
-          nodes,
-          edges,
-          agentRun: { agentId: nodeId, agentName: data.name, status: "done", output: result },
-          artifacts: MOCK_ARTIFACTS,
-        });
-        createSnapshot(ctxDone, {
-          workspacePath,
-          workflowId: meta.name,
-          runId: currentRun?.id,
-          snapshotStatus: "completed",
-        }).catch(console.error);
+        // Build real artifact from agent output (not mock)
+        const liveArtifacts: Artifact[] = [{
+          id: `artifact-${nodeId}-${Date.now()}`,
+          title: `${data.name} output`,
+          type: "markdown",
+          sourceNodeId: nodeId,
+          content: finalText,
+          status: "live" as const,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          version: 1,
+          previewMode: "rendered",
+        }];
+
+        createSnapshot(
+          buildContextSnapshot({ node, nodes, edges,
+            agentRun: { agentId: nodeId, agentName: data.name, status: "done", output: finalText },
+            artifacts: liveArtifacts }),
+          { workspacePath, workflowId: meta.name, runId: currentRun?.id, snapshotStatus: "completed" },
+        ).catch(console.error);
+
       } catch (e) {
         updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
         updateNodeData(nodeId, { status: "error" });
-        addEntry({
-          id: `${nodeId}-err-${Date.now()}`,
-          timestamp: new Date().toISOString(),
-          action: "hook_executed",
-          agentId: nodeId,
-          details: String(e),
-          success: false,
-        });
+        addEntry({ id: `${nodeId}-err-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "hook_executed", agentId: nodeId, details: String(e), success: false });
 
-        // Non-blocking snapshot save for failed run
-        const ctxErr = buildContextSnapshot({
-          node,
-          nodes,
-          edges,
-          agentRun: { agentId: nodeId, agentName: data.name, status: "error", output: "" },
-          artifacts: MOCK_ARTIFACTS,
-        });
-        createSnapshot(ctxErr, {
-          workspacePath,
-          workflowId: meta.name,
-          runId: currentRun?.id,
-          snapshotStatus: "failed",
-          metadata: { error: String(e) },
-        }).catch(console.error);
+        createSnapshot(
+          buildContextSnapshot({ node, nodes, edges,
+            agentRun: { agentId: nodeId, agentName: data.name, status: "error", output: "" },
+            artifacts: [] }),
+          { workspacePath, workflowId: meta.name, runId: currentRun?.id,
+            snapshotStatus: "failed", metadata: { error: String(e) } },
+        ).catch(console.error);
 
-        if (!continueOnError) {
-          finishRun("error");
-          return;
-        }
+        if (!continueOnError) throw e; // propagate to scheduler → stops remaining nodes
       }
     }
 
-    const finalStatus = useExecutionStore.getState().currentRun?.status;
-    if (finalStatus !== "cancelled") {
-      finishRun("done");
+    // ── Parallel execution (replaces sequential for-loop) ────────────────────
+    const maxParallel = executionSettings.maxParallel || 4;
+    try {
+      await runParallel(
+        nodes,
+        edges,
+        processNode,
+        {
+          maxParallel,
+          isCancelled: () => useExecutionStore.getState().currentRun?.status === "cancelled",
+          onSkipped: (nodeId) => {
+            const n = nodes.find((x) => x.id === nodeId);
+            updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
+            updateNodeData(nodeId, { status: "idle" });
+            addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, details: "skipped by gateway routing", success: true });
+          },
+          gatewayRoutes,
+        },
+      );
+    } catch {
+      finishRun("error");
+      return;
     }
+
+    const finalStatus = useExecutionStore.getState().currentRun?.status;
+    if (finalStatus !== "cancelled") finishRun("done");
   }
 
   return { executeWorkflow, currentRun, isRunning, cancelRun };
