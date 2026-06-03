@@ -9,9 +9,9 @@ This is the source of truth for what is verified, partial, mocked, or blocked.
 Not ready for broad end-user release, but materially closer.
 
 The app builds, launches as a Tauri desktop app, packages successfully, and has
-working read-only CLI/MCP surfaces. Release blockers remain around true
-parallel execution, durable run traces/artifacts, OS keychain storage, installer
-smoke testing, signing, and clearer production-grade error recovery.
+working read-only CLI/MCP surfaces. Release blockers remain around durable run
+traces/artifacts, OS keychain storage, installer smoke testing, signing, and
+clearer production-grade error recovery.
 
 ## Evidence From This Pass
 
@@ -45,6 +45,7 @@ Installer outputs:
 | Feature | Current state |
 |---|---|
 | Canvas/editor | Working |
+| Parallel execution | Working; `runParallel()` (`src/services/execution/parallelScheduler.ts`) runs independent branches concurrently up to `executionSettings.maxParallel`; feedback edges excluded from deps, gateway routing prunes skipped branches |
 | YAML examples | Working; 7 workflow files detected by CLI/MCP |
 | AuditStrip filters | Working with All chip, kind filters, agent chips, empty states |
 | Workflow Wizard | Rule-based, working; blog and self-improvement flows verified in UI |
@@ -59,7 +60,6 @@ Installer outputs:
 
 | Feature | Current state | Required action |
 |---|---|---|
-| Parallel execution | Not implemented; execution is sequential topological order | Add scheduler that honors `executionSettings.maxParallel` |
 | Agent independence | Logical per-node state only, not process isolation | Add run-level persisted records and clearer UI labeling |
 | Streaming | Simulated chunks after full response | Implement provider streaming/SSE |
 | Context snapshots | Partial and not a complete request/response trace | Capture actual system/user messages, tool results, provider metadata |
@@ -91,7 +91,7 @@ Verified through browser DOM inspection of the frontend:
 - Template details show agents, setup requirements, artifacts, verification method, and privacy notes.
 - Loading the template creates a 7-node / 8-edge workflow.
 - Settings expose Ollama Cloud setup, `OLLAMA_API_KEY`, auth token field, and `gemma4:31b-cloud`.
-- Run dialog states `sequential topological order` and `streaming simulated`.
+- Run dialog footer still reads `sequential topological order · streaming simulated`. The `streaming simulated` half is accurate, but `sequential topological order` is stale UI copy: the engine now runs bounded-parallel via `runParallel()`. (`src/components/execution/WorkflowInputDialog.tsx`)
 - AuditStrip empty state says no events yet and includes the All chip.
 
 Screenshot limitation: the Browser tool rendered and interacted with the app,
@@ -104,7 +104,7 @@ evidence instead of screenshots.
 2. Code signing decision for Windows installers.
 3. OS keychain integration for API keys.
 4. Durable run logs, snapshots, and artifact persistence.
-5. True parallel scheduler or all product text must remain explicit that runs are sequential.
+5. Sync stale "sequential" UI copy (Run dialog footer, guide panels) with the implemented parallel scheduler — `runParallel()` now executes independent branches concurrently.
 6. E2E browser/Tauri smoke tests for first-run, workflow creation, settings, run failure, logs, and inspector.
 
 ## Next Verification Before Release

@@ -52,6 +52,14 @@ function Write-Ok   { param([string]$msg) Write-Host "  OK  $msg"   -ForegroundC
 function Write-Warn { param([string]$msg) Write-Host "  WARN $msg"  -ForegroundColor Yellow }
 function Write-Fail { param([string]$msg) Write-Host "  FAIL $msg"  -ForegroundColor Red    }
 
+# Write UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's `Set-Content -Encoding utf8`
+# prepends a BOM, which Tauri's JSON config parser rejects with
+# "expected value at line 1 column 1". Use .NET to write clean UTF-8.
+function Write-Utf8NoBom {
+    param([string]$Path, [string]$Text)
+    [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
+}
+
 $BuildLabel = if ($Dev) { "DEVELOPMENT" } else { "RELEASE" }
 
 Write-Host ""
@@ -103,7 +111,7 @@ $targetWv2 = if ($Offline) { "offlineInstaller" } else { "embedBootstrapper" }
 if ($Offline) { Write-Warn "Offline mode: embedding full WebView2 installer (~150 MB extra)." }
 
 $conf.bundle.windows.webviewInstallMode.type = $targetWv2
-$conf | ConvertTo-Json -Depth 20 | Set-Content $tauriConf -Encoding utf8
+Write-Utf8NoBom -Path $tauriConf -Text ($conf | ConvertTo-Json -Depth 20)
 
 # ── Install JS dependencies ───────────────────────────────────────────────────
 
@@ -111,7 +119,7 @@ Write-Step "Installing Node dependencies..."
 npm ci --prefer-offline 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" }
 if ($LASTEXITCODE -ne 0) {
     # Restore config before failing
-    $confText | Set-Content $tauriConf -Encoding utf8
+    Write-Utf8NoBom -Path $tauriConf -Text $confText
     Write-Fail "npm ci failed"; exit 1
 }
 Write-Ok "Node dependencies ready"
@@ -128,7 +136,7 @@ Write-Host ""
 $buildExit = $LASTEXITCODE
 
 # Restore tauri.conf.json regardless of outcome
-$confText | Set-Content $tauriConf -Encoding utf8
+Write-Utf8NoBom -Path $tauriConf -Text $confText
 
 if ($buildExit -ne 0) {
     Write-Fail "Build failed. Check errors above."

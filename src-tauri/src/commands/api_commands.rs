@@ -1586,4 +1586,63 @@ mod tests {
             ]
         );
     }
+
+    // ── OpenAI-compatible custom endpoint (air-gapped local server) ────────────
+
+    #[tokio::test]
+    async fn call_openai_api_uses_custom_base_url_and_omits_auth_when_key_empty() {
+        // Air-gapped case: a local OpenAI-compatible server that needs no auth.
+        // The request must go to the custom base URL with NO Authorization header.
+        let (base_url, request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"choices":[{"message":{"content":"air-gapped ok"}}]}"#,
+        );
+
+        let text = call_openai_api(
+            "local-model".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            String::new(), // no API key
+            128,
+            None,             // no reasoning effort
+            Some(base_url),   // custom endpoint base URL
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(text, "air-gapped ok");
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(!request.to_lowercase().contains("authorization:"));
+        assert!(request.contains(r#""model":"local-model""#));
+    }
+
+    #[tokio::test]
+    async fn call_openai_api_sends_bearer_to_custom_base_url_when_key_present() {
+        // Air-gapped case with an authenticated local gateway: the provided key
+        // must be sent as a Bearer token to the custom base URL.
+        let (base_url, request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"choices":[{"message":{"content":"authed ok"}}]}"#,
+        );
+
+        let text = call_openai_api(
+            "local-model".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            "local-token".to_string(),
+            128,
+            None,
+            Some(base_url),
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(text, "authed ok");
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request
+            .to_lowercase()
+            .contains("authorization: bearer local-token"));
+    }
 }

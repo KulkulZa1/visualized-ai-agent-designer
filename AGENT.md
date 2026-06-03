@@ -49,6 +49,7 @@ Last execution pass: 2026-05-18.
 - Rule-based Guide Assistant. It makes no live AI calls.
 - Provider settings and adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
+- Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
 - CLI v0:
   - `npm run harness -- project status`
   - `npm run harness -- provider list`
@@ -99,6 +100,8 @@ Last execution pass: 2026-05-18.
 | `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
 | `src-tauri/src/commands/process_commands.rs` | Hook execution |
 | `docs/DEPLOYMENT_READINESS.md` | Current readiness source of truth |
+| `docs/AIRGAPPED.md` | Offline / air-gapped deployment runbook |
+| `scripts/build-installer.ps1` | Installer build; `-Offline` embeds WebView2 |
 
 ## Next Best Work
 
