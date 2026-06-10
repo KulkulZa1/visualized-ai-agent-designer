@@ -1,0 +1,8 @@
+# Statically link the MSVC C runtime so the installer has no dependency on
+# VCRUNTIME140.dll / MSVCP140.dll.  Without this, the app silently fails to
+# launch on clean Windows machines that lack the VC++ redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
