@@ -5,7 +5,7 @@ import { writeWorkspaceFile, readWorkspaceFile } from "@/ipc/tauriCommands";
 import { useState, useEffect } from "react";
 
 const MonacoEditor = React.lazy(() =>
-  import("@monaco-editor/react").then((m) => ({ default: m.default }))
+  import("./monacoLocal").then((m) => ({ default: m.default }))
 );
 
 interface MarkdownEditorProps {

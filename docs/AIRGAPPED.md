@@ -95,7 +95,9 @@ Then:
 3. Check the audit strip — each agent logs `▶ <name> — <model> via openai-compatible`.
 
 If the server is unreachable, an agent fails with `Cannot reach <base-url>: ...`
-rather than hanging.
+rather than hanging. Generation calls are also time-bounded: connect fails after
+10 s, and a response that never completes is cut off after 10 min, so a wedged
+server can never hang a run forever.
 
 ---
 
@@ -105,6 +107,7 @@ rather than hanging.
 |---|---|---|
 | Run a workflow (Custom provider) | Your local server (Rust → reqwest) | Works |
 | Test connection / Load models (Custom) | Your local server (Rust → reqwest) | Works |
+| Open a `.md` / `.yaml` file in the editor | — (Monaco is bundled into the app) | Works |
 | Local Ollama (if installed) | `http://localhost:11434` | Works (allowed by CSP) |
 | OpenAI / Anthropic / Ollama Cloud | Public cloud hosts | Unreachable offline; leave unconfigured |
 | Per-node ModelPicker "live fetch" for Ollama/OpenRouter | In-WebView `fetch()` | Subject to CSP; not used by the Custom endpoint path. Use the Settings → Custom "Load models" button instead. |

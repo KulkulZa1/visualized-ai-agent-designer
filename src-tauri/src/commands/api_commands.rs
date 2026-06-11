@@ -77,6 +77,18 @@ pub struct ProviderDefaults {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+/// HTTP client for generation calls. Without explicit timeouts reqwest waits
+/// forever, hanging the whole workflow if an endpoint accepts the connection
+/// but never responds. Connect fails fast; the response timeout is generous
+/// so slow local CPU models still finish.
+fn generation_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
 fn mask_key(key: &str) -> String {
     if key.len() <= 8 {
         return "****".to_string();
@@ -227,7 +239,7 @@ pub async fn call_openai_api(
     // When None or empty, defaults to https://api.openai.com/v1
     base_url: Option<String>,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = generation_client()?;
 
     // Build the endpoint URL — use custom base URL if provided, otherwise OpenAI default
     let endpoint = base_url
@@ -432,7 +444,7 @@ pub async fn call_anthropic_api(
     api_key: String,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = generation_client()?;
     anthropic_call_inner(
         &client,
         &model,
@@ -453,7 +465,7 @@ pub async fn call_claude_api(
     api_key: String,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = generation_client()?;
     anthropic_call_inner(
         &client,
         &model,
@@ -476,7 +488,7 @@ pub async fn call_ollama_api(
     api_key: Option<String>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let client = reqwest::Client::new();
+    let client = generation_client()?;
     let base_url = if base_url.trim().is_empty() {
         DEFAULT_OLLAMA_BASE_URL.to_string()
     } else {
@@ -1252,6 +1264,10 @@ pub async fn check_provider_health(
                         format!("Custom endpoint OK ({}ms)", latency_ms)
                     } else if status == 401 || status == 403 {
                         "Authentication failed — check your API key.".into()
+                    } else if status == 404 {
+                        format!(
+                            "HTTP 404 at {endpoint} — check that the base URL includes the API prefix (most servers use /v1, e.g. http://host:port/v1)."
+                        )
                     } else {
                         format!("HTTP {status}: {text}")
                     };
@@ -1615,6 +1631,27 @@ mod tests {
         assert!(request.starts_with("POST /chat/completions "));
         assert!(!request.to_lowercase().contains("authorization:"));
         assert!(request.contains(r#""model":"local-model""#));
+    }
+
+    #[tokio::test]
+    async fn openai_compatible_health_404_suggests_v1_prefix() {
+        // Most common misconfiguration: base URL missing the /v1 prefix.
+        // The health check must say so instead of dumping a bare 404 body.
+        let (base_url, _request_rx) =
+            spawn_mock_ollama_server(404, r#"{"detail":"Not Found"}"#);
+
+        let health = check_provider_health(
+            "openai-compatible".to_string(),
+            String::new(),
+            base_url,
+            "local-model".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!health.ok);
+        assert!(health.message.contains("/v1"));
+        assert!(health.message.contains("404"));
     }
 
     #[tokio::test]
