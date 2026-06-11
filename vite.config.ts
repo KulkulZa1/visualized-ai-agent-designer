@@ -46,6 +46,9 @@ export default defineConfig(async () => ({
     globals: true,
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
+    // Stale agent worktrees under .claude/ carry their own test copies that
+    // reference modules absent from this repo — never run them.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/.claude/**", "**/src-tauri/**"],
     alias: {
       "@tauri-apps/api/core": path.resolve(__dirname, "./src/ipc/mockTauri.ts"),
       "@tauri-apps/plugin-dialog": path.resolve(__dirname, "./src/ipc/mockPlugins.ts"),

@@ -100,6 +100,7 @@ async function runHealthChecks(
   openaiKey: string, anthropicKey: string,
   ollamaUrl: string, ollamaModel: string, ollamaKey: string,
   ollamaProvider: Extract<RuntimeProvider, "ollama" | "ollama-cloud">,
+  customUrl: string, customKey: string, customModel: string,
   addEntry: ReturnType<typeof useAuditStore.getState>["addEntry"],
 ): Promise<ProviderHealth[]> {
   const checks: Promise<ProviderHealth>[] = [];
@@ -124,6 +125,11 @@ async function runHealthChecks(
       model_available: false,
       pull_command: ollamaProvider === "ollama" ? `ollama pull ${ollamaModel}` : null,
     })));
+  }
+  if (customUrl) {
+    checks.push(invoke<ProviderHealth>("check_provider_health", {
+      provider: "openai-compatible", apiKey: customKey, baseUrl: customUrl, model: customModel,
+    }).catch((e): ProviderHealth => ({ ok: false, provider: "openai-compatible", latency_ms: 0, message: String(e), model_available: false, pull_command: null })));
   }
   const results = await Promise.all(checks);
   for (const h of results) {
@@ -189,10 +195,19 @@ export function useWorkflowExecution() {
       return;
     }
 
+    // Guard: custom endpoint mode selected but no URL configured
+    if (effectiveProvider === "openai-compatible" && !customApiUrl.trim()) {
+      reportError("Custom endpoint URL is not configured. Add it in Settings → Custom Endpoint.");
+      return;
+    }
+
     // Health checks
     const healthResults = await runHealthChecks(
       openaiApiKey, apiKey, effectiveOllamaUrl, effectiveOllamaModel,
-      ollamaApiKey, ollamaProviderType, addEntry,
+      ollamaApiKey, ollamaProviderType,
+      // Only probe the custom endpoint when this run will actually use it.
+      effectiveProvider === "openai-compatible" ? customApiUrl : "",
+      customApiKey, customApiModel, addEntry,
     );
     const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
     const ollamaHealth = healthMap.get(ollamaProviderType);
