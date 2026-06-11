@@ -151,12 +151,12 @@ const QA_LIBRARY: GuideQA[] = [
     q: "Are agents really independent?",
     triggers: ["independent", "parallel", "concurrent", "real"],
     answer: [
-      { kind: "bold", text: "Yes, contextually — each agent has its own ID, prompt, model, tools, memory keys, output, and context snapshot." },
-      { kind: "bold", text: "No, temporally — " },
-      { kind: "text", text: "execution today is " },
-      { kind: "bold", text: "sequential " },
-      { kind: "text", text: "(topological order). Even if your workflow has parallel branches, they run one node at a time. True concurrent execution is on the roadmap." },
-      { kind: "text", text: "Click any node → Context tab to see the exact context that node received — they are different per agent." },
+      { kind: "bold", text: "Yes, contextually: " },
+      { kind: "text", text: "each agent has its own ID, prompt, model, tools, memory keys, output, and context snapshot." },
+      { kind: "bold", text: "Yes, for forward-edge scheduling: " },
+      { kind: "text", text: "independent branches can run concurrently up to the workflow's maxParallel limit." },
+      { kind: "text", text: "Feedback edges do not create scheduling dependencies, and gateway routes skip branches that do not match the selected route." },
+      { kind: "text", text: "Streaming is still simulated after each provider call returns; that is separate from branch scheduling." },
     ],
   },
   {

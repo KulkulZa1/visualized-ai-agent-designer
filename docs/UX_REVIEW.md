@@ -1,6 +1,6 @@
 ﻿# UX Review
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 ## Verification Method
 
@@ -23,7 +23,7 @@ processes.
 - `Load this workflow` creates a 7-node / 8-edge canvas workflow.
 - Settings show provider mode choices and Ollama local/cloud controls.
 - The Ollama Cloud preset exposes `https://ollama.com/api`, `gemma4:31b-cloud`, auth token guidance, and `OLLAMA_API_KEY`.
-- Run preflight dialog opens and explicitly says `sequential topological order` and `streaming simulated`.
+- Run preflight dialog opens and reports bounded parallel scheduling when `maxParallel > 1`; it still says `streaming simulated`.
 
 ## UX Strengths
 
@@ -31,7 +31,7 @@ processes.
 - Provider/model guidance is visible before run.
 - The wizard clearly labels itself rule-based and does not imply live AI.
 - The guide assistant is always available and rule-based.
-- Sequential execution is visible in the run dialog.
+- Execution mode is visible in the run dialog.
 - Mock/preview status is present in several inspector surfaces.
 
 ## UX Risks
@@ -43,7 +43,7 @@ processes.
 | Artifacts | Mock placeholders | Persist real artifacts per run/source node |
 | Settings density | Large modal with many controls | Add focused provider setup wizard for beginners |
 | Production clarity | App can run without workspace but save needs workspace | Keep no-workspace warnings prominent |
-| Parallel example naming | Fan-out graphs may imply concurrency | Keep run dialog/docs explicit until scheduler exists |
+| Parallel example naming | Fan-out graphs now can run concurrently, but only as renderer-level async scheduling | Keep UI explicit that this is bounded scheduling, not process isolation |
 
 ## Recommended Next UX Work
 

@@ -1,6 +1,6 @@
 ﻿# Architecture
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 ## Stack
 
@@ -17,19 +17,27 @@ Updated: 2026-05-18
 ## Current Runtime Architecture
 
 - `workflowStore` holds graph state and serializes/deserializes workflow YAML.
-- `useWorkflowExecution.ts` runs workflows in sequential topological order.
+- `useWorkflowExecution.ts` runs workflows through the dependency-aware `runParallel()` scheduler.
 - Provider calls go through `src/services/model-providers/providerAdapter.ts` and Rust IPC commands.
 - Rust commands own filesystem access, workflow load/save, audit writes, provider calls, and hook execution.
 - CLI and MCP are separate Node entrypoints; they do not require a Tauri runtime.
 
 ## Execution Model
 
-Current mode: sequential.
+Current mode: bounded parallel scheduling.
 
 Every executable node gets its own prompt/model/output/status in memory. The
 runner stores outputs in a map keyed by node id and passes upstream outputs to
-downstream nodes. Independent fan-out branches are not scheduled concurrently.
-`executionSettings.maxParallel` is reserved schema only.
+downstream nodes. Independent forward-edge fan-out branches can run concurrently
+up to `executionSettings.maxParallel`. Feedback edges are ignored for dependency
+scheduling, and gateway routes skip branches whose labels do not match the
+selected route.
+
+Important boundaries:
+
+- This is JavaScript async concurrency inside the renderer, not OS process isolation.
+- Provider streaming is still simulated after a full provider response returns.
+- The scheduler now rejects pure forward cycles instead of silently finishing.
 
 ## Provider Model
 
@@ -73,7 +81,7 @@ Partial/mock:
 ## Future Architecture Work
 
 1. Extract workflow execution into a testable core service shared by UI/CLI/MCP.
-2. Add a parallel scheduler honoring `executionSettings.maxParallel`.
-3. Add real streaming provider adapters.
-4. Persist run traces and artifacts by run id and source node id.
+2. Add real streaming provider adapters.
+3. Persist scheduler/run traces and artifacts by run id and source node id.
+4. Add deeper failure/cancellation recovery for bounded parallel runs.
 5. Move secrets to OS keychain/Stronghold.

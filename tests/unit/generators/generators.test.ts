@@ -75,7 +75,7 @@ describe("generateClaudeMd", () => {
   it("includes execution settings", () => {
     const md = generateClaudeMd(testWorkflow);
     expect(md).toContain("300s");
-    expect(md).toContain("runs nodes sequentially");
+    expect(md).toContain("runs independent forward-edge branches concurrently");
   });
 });
 

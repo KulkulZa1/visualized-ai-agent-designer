@@ -7,13 +7,13 @@ running, and inspecting multi-agent workflow definitions. The current goal is to
 make the product strong enough to help develop and debug itself, without hiding
 mocked or incomplete behavior.
 
-## Current Verified Baseline (2026-05-18)
+## Current Verified Baseline (2026-06-11)
 
 Verified in this pass:
 
 - TypeScript: `npx tsc --noEmit` passed.
-- Unit tests: `npx vitest run` passed, 229 tests in 26 files.
-- Rust tests: `cargo test` passed, 25 tests.
+- Unit tests: `npx vitest run` passed, 281 tests in 30 files.
+- Rust tests: `cargo test` passed, 30 tests.
 - Web build: `npm run build` passed with a known large chunk warning.
 - Tauri dev launch: `npm run tauri -- dev` launched the desktop binary and WebView2.
 - Tauri packaging: `npm run tauri -- build` produced MSI and NSIS installers.
@@ -25,7 +25,7 @@ Verified in this pass:
 - React/Tauri desktop shell with canvas, node palette, inspector, settings, run dialog, audit strip, help, and quick start surfaces.
 - Workflow YAML load/save/validation through the Tauri backend and CLI validator.
 - Example workflows in the app plus example YAML files for CLI validation.
-- Sequential workflow execution in topological order.
+- Dependency-aware bounded parallel workflow execution for independent forward-edge branches.
 - Provider adapter paths for OpenAI, Anthropic, local Ollama, Ollama Cloud, and OpenAI-compatible endpoints.
 - Ollama Cloud configuration using `https://ollama.com/api`, `gemma4:31b-cloud`, and endpoint-scoped credentials.
 - Rule-based workflow recommender with 8 templates, including blog automation and Harness Studio self-improvement.
@@ -37,7 +37,8 @@ Verified in this pass:
 
 ## Not Implemented Or Partial
 
-- True parallel scheduling is not implemented. `executionSettings.maxParallel` is schema/reserved only.
+- Parallel scheduling is renderer-level JavaScript async concurrency, not OS process isolation.
+- Parallel scheduler traces are not yet persisted as durable timeline events.
 - Streaming output is simulated in the UI; provider streaming is not wired end-to-end.
 - Artifact persistence is partial/mock-oriented and not a durable run artifact system.
 - Context snapshots are useful for inspection but are not a complete durable trace system.
@@ -49,10 +50,11 @@ Verified in this pass:
 
 ## Execution Mode
 
-The runner is currently sequential. Agents have individual node IDs, roles,
-prompts, outputs, logs, and state maps, but independent branches are not scheduled
-concurrently. Do not describe workflows as truly parallel until a scheduler is
-implemented and verified.
+The runner uses `runParallel()` from `src/services/execution/parallelScheduler.ts`.
+Independent forward-edge branches can run concurrently up to
+`executionSettings.maxParallel`. Feedback edges are excluded from dependencies.
+Gateway routes skip unmatched branches, and branch-only descendants of skipped
+routes are skipped. Do not describe this as OS/process isolation.
 
 ## Safety Rules
 
@@ -94,5 +96,7 @@ npm run mcp
 ## Recommended Next Step
 
 Implement a real execution trace model: run ID, per-node attempt ID, durable logs,
-context snapshots, artifacts, cancellation state, and failure recovery. This is
-the foundation for true parallel scheduling and reliable self-improvement runs.
+context snapshots, artifacts, queued/running/skipped scheduler events,
+cancellation state, and failure recovery. This is the foundation for reliable
+self-improvement runs.
+

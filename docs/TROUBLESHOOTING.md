@@ -1,6 +1,6 @@
 ﻿# Troubleshooting
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 ## App Launch
 
@@ -57,10 +57,18 @@ switch to Ollama local.
 
 ## Workflow Execution
 
-### Workflow feels parallel but runs one node at a time
+### Workflow fan-out does not run in parallel
 
-This is current behavior. Execution is sequential topological order. Fan-out
-branches are visually independent but do not execute concurrently yet.
+Expected behavior: independent forward-edge branches can run concurrently up to
+`executionSettings.maxParallel`.
+
+If fan-out still appears serial:
+
+- check the workflow's `maxParallel` value;
+- check whether the branches actually share upstream dependencies;
+- check whether a gateway route skipped a branch;
+- check whether provider calls are slow and only one branch is ready at a time;
+- remember that provider streaming is still simulated after each full response.
 
 ### Hook node fails with consent message
 

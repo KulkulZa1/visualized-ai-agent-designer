@@ -16,6 +16,12 @@ import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { LlmProvider } from "@/utils/providerConfig";
 import type { AgentRole } from "@/types/agent";
 
+type EdgeData = { edgeKind?: string };
+
+function isFeedbackEdge(edge: { type?: string; data?: unknown }): boolean {
+  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
+}
+
 // ── Prompt enhancements ──────────────────────────────────────────────────────
 
 const ENHANCEMENTS: { label: string; title: string; append: string }[] = [
@@ -113,13 +119,18 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
   const meta     = useWorkflowStore((s) => s.meta);
   const nodes    = useWorkflowStore((s) => s.nodes);
   const edges    = useWorkflowStore((s) => s.edges);
+  const executionSettings = useWorkflowStore((s) => s.executionSettings);
   const llmProvider = useExecutionStore((s) => s.llmProvider);
   const continueOnError = useExecutionStore((s) => s.continueOnError);
   const setContinueOnError = useExecutionStore((s) => s.setContinueOnError);
 
   // Detect entry-point nodes (no incoming edges)
-  const incomingSet = new Set(edges.map((e) => e.target));
+  const incomingSet = new Set(edges.filter((e) => !isFeedbackEdge(e)).map((e) => e.target));
   const entryNodes  = nodes.filter((n) => !incomingSet.has(n.id));
+  const executionModeLabel =
+    executionSettings.maxParallel <= 1
+      ? "sequential (maxParallel 1)"
+      : `bounded parallel up to ${executionSettings.maxParallel}`;
 
   const [userInput,        setUserInput]        = useState("");
   const [filePaths,        setFilePaths]        = useState<string[]>([]);
@@ -407,7 +418,7 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
           background: "var(--surface)",
         }}>
           <span style={{ flex: 1, fontSize: 10, color: "var(--hint)" }}>
-            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · sequential topological order · streaming simulated
+            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · {executionModeLabel} · streaming simulated
           </span>
           <button onClick={onCancel} style={{
             padding: "7px 16px", border: "1px solid var(--border-md)", borderRadius: 5,

@@ -40,11 +40,13 @@ export interface SchedulerOptions {
 
 function isForwardEdge(e: Edge): boolean {
   const kind = (e.data as EdgeData | undefined)?.edgeKind;
-  return kind !== "feedback";
+  return kind !== "feedback" && e.type !== "feedback";
 }
 
 function edgeLabel(e: Edge): string {
-  return ((e.data as EdgeData | undefined)?.label ?? "").toLowerCase().trim();
+  const dataLabel = (e.data as EdgeData | undefined)?.label;
+  const label = dataLabel ?? (typeof e.label === "string" ? e.label : "");
+  return label.toLowerCase().trim();
 }
 
 /**
@@ -103,16 +105,19 @@ export function runParallel(
   // ── Build dependency graph from forward edges only ──────────────────────
   const inDegree  = new Map<string, number>();
   const successors = new Map<string, string[]>(); // nodeId → direct successors
+  const predecessors = new Map<string, string[]>(); // nodeId → direct predecessors
 
   for (const n of nodes) {
     inDegree.set(n.id, 0);
     successors.set(n.id, []);
+    predecessors.set(n.id, []);
   }
   for (const e of edges) {
     if (!isForwardEdge(e)) continue;
     if (!inDegree.has(e.target) || !inDegree.has(e.source)) continue;
     inDegree.set(e.target, (inDegree.get(e.target) ?? 0) + 1);
     successors.get(e.source)!.push(e.target);
+    predecessors.get(e.target)!.push(e.source);
   }
 
   // ── Initial ready set: all nodes with no forward dependencies ───────────
@@ -123,6 +128,7 @@ export function runParallel(
 
   const running  = new Set<string>();
   const done     = new Set<string>(); // includes skipped nodes
+  const skipped  = new Set<string>();
   let   rejected = false;
 
   return new Promise<void>((resolve, reject) => {
@@ -132,20 +138,36 @@ export function runParallel(
       err ? reject(err) : resolve();
     }
 
+    function remainingIds(): string[] {
+      return nodes
+        .map((node) => node.id)
+        .filter((id) => !done.has(id) && !running.has(id));
+    }
+
     function markSkipped(nodeId: string) {
       if (done.has(nodeId)) return;
+      skipped.add(nodeId);
       done.add(nodeId);
       onSkipped(nodeId);
 
-      // Unblock successors of the skipped node as if it completed normally
+      // Unblock successors of the skipped node as if it completed normally.
+      // If every forward predecessor of a successor is skipped, the successor
+      // is branch-only and should be skipped too. If at least one predecessor
+      // is not skipped, the successor is a join/aggregator and can still run
+      // after its remaining required predecessors complete.
       for (const succ of successors.get(nodeId) ?? []) {
+        const preds = predecessors.get(succ) ?? [];
+        const allPredsSkipped = preds.length > 0 && preds.every((pred) => skipped.has(pred));
+        if (allPredsSkipped) {
+          markSkipped(succ);
+          continue;
+        }
         const deg = (inDegree.get(succ) ?? 1) - 1;
         inDegree.set(succ, deg);
         if (deg <= 0 && !done.has(succ) && !running.has(succ)) {
           ready.push(succ);
         }
       }
-      schedule();
     }
 
     function schedule() {
@@ -182,7 +204,12 @@ export function runParallel(
 
             // Terminate if all nodes are processed
             if (running.size === 0 && ready.length === 0) {
-              finish();
+              const remaining = remainingIds();
+              if (remaining.length > 0 && !isCancelled()) {
+                finish(new Error(`No runnable nodes remain. Workflow may contain a cycle or blocked dependency: ${remaining.join(", ")}`));
+              } else {
+                finish();
+              }
             } else {
               schedule();
             }
@@ -203,14 +230,22 @@ export function runParallel(
 
       // Nothing left (everything done or all remaining are still running)
       if (ready.length === 0 && running.size === 0 && !isCancelled()) {
-        finish();
+        const remaining = remainingIds();
+        if (remaining.length > 0) {
+          finish(new Error(`No runnable nodes remain. Workflow may contain a cycle or blocked dependency: ${remaining.join(", ")}`));
+        } else {
+          finish();
+        }
       }
     }
 
     // Kick off
     if (ready.length === 0) {
-      // No runnable nodes at all — empty workflow or pure cycle
-      finish();
+      if (nodes.length === 0) {
+        finish();
+      } else {
+        finish(new Error(`No runnable nodes found. Workflow may contain a cycle: ${nodes.map((node) => node.id).join(", ")}`));
+      }
     } else {
       schedule();
     }

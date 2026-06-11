@@ -1,11 +1,11 @@
 # Roadmap - Harness Studio
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 Current truth:
 
-- Phase 5 execution exists but is sequential, not parallel.
-- `executionSettings.maxParallel` is reserved schema only.
+- Phase 5 execution uses dependency-aware bounded parallel scheduling via `runParallel()`.
+- `executionSettings.maxParallel` is active for forward-edge branches; feedback edges are excluded from dependency scheduling.
 - CLI v0 and MCP v0 are implemented and verified.
 - Workflow Wizard and Guide Assistant are implemented as rule-based, non-live helpers.
 - Ollama Cloud is implemented for `https://ollama.com/api` and `gemma4:31b-cloud`.
@@ -13,11 +13,11 @@ Current truth:
 
 Near-term roadmap:
 
-1. True parallel scheduler.
-2. Real streaming.
-3. Durable run traces and artifact persistence.
-4. OS keychain storage.
-5. E2E UI automation and installer smoke tests.
+1. Real provider streaming.
+2. Durable run traces and artifact persistence.
+3. OS keychain storage.
+4. E2E UI automation and installer smoke tests.
+5. Stronger cancellation/failure recovery coverage for parallel runs.
 
 ---
 
@@ -122,12 +122,14 @@ Near-term roadmap:
 **Goal:** Full live execution tracing with trajectory replay and streaming provider events.
 
 - Capture streaming provider events instead of mock stream placeholders
+- Persist scheduler events for queued/running/skipped/blocked nodes
 - Per-node trace panel: duration, tokens, tool calls
 - Live sparklines on running nodes
 - Swimlane timeline + scrubber
 - Replay any past trajectory from `.harness/trajectories/*.jsonl`
 - Token usage + cost summary per run
 - Persist real execution context snapshots during workflow runs (not just mock/on-open)
+- Add regression fixtures for gateway routing, skipped branches, cancellation, and failed parallel branches
 
 ---
 

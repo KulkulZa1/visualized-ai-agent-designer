@@ -184,8 +184,9 @@ export function ExamplePicker({ onClose }: ExamplePickerProps) {
           }}>
             <NodeIcon name="history" size={10} color="rgba(124,158,255,0.9)"/>
             <span>
-              <strong>Execution note:</strong> Agents run <strong>sequentially</strong> in topological
-              order — even fan-out graphs. True parallel scheduling is on the roadmap.
+              <strong>Execution note:</strong> Independent forward-edge branches run with
+              bounded parallel scheduling; feedback edges are excluded. Provider streaming
+              is still simulated after each call returns.
             </span>
           </div>
         </div>

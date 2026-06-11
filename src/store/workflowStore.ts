@@ -7,6 +7,29 @@ import type { AgentNode, WorkflowDef, WorkflowMeta, ExecutionSettings } from "@/
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
 
+type WorkflowEdgeKind = NonNullable<WorkflowDef["connections"][number]["edgeKind"]>;
+type WorkflowEdgeData = { label?: string; edgeKind?: WorkflowEdgeKind };
+
+function isWorkflowEdgeKind(value: unknown): value is WorkflowEdgeKind {
+  return value === "dataflow" || value === "memory" || value === "feedback" || value === "control";
+}
+
+function getEdgeData(edge: Edge): WorkflowEdgeData {
+  return (edge.data as WorkflowEdgeData | undefined) ?? {};
+}
+
+function getEdgeLabel(edge: Edge): string | undefined {
+  const dataLabel = getEdgeData(edge).label;
+  if (typeof dataLabel === "string") return dataLabel;
+  return typeof edge.label === "string" ? edge.label : undefined;
+}
+
+function getEdgeKind(edge: Edge): WorkflowEdgeKind {
+  const dataKind = getEdgeData(edge).edgeKind;
+  if (isWorkflowEdgeKind(dataKind)) return dataKind;
+  return isWorkflowEdgeKind(edge.type) ? edge.type : "dataflow";
+}
+
 const DEFAULT_META: WorkflowMeta = {
   name: "Untitled Workflow",
   version: "1.0.0",
@@ -79,7 +102,11 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
 
       onConnect: (connection) =>
         set((state) => {
-          state.edges = addEdge({ ...connection, type: "dataflow" }, state.edges);
+          state.edges = addEdge({
+            ...connection,
+            type: "dataflow",
+            data: { edgeKind: "dataflow" },
+          }, state.edges);
           state.isDirty = true;
         }),
 
@@ -145,7 +172,11 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
       updateEdgeLabel: (edgeId, label) =>
         set((state) => {
           const edge = state.edges.find((e) => e.id === edgeId);
-          if (edge) { edge.label = label; state.isDirty = true; }
+          if (edge) {
+            edge.label = label;
+            edge.data = { ...getEdgeData(edge), label };
+            state.isDirty = true;
+          }
         }),
 
       updateMeta: (meta) =>
@@ -170,6 +201,10 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
             target: c.targetAgentId,
             label: c.label,
             type: c.edgeKind ?? "dataflow",
+            data: {
+              label: c.label,
+              edgeKind: c.edgeKind ?? "dataflow",
+            },
           }));
           state.nodes = def.agents.map((agent, i) => {
             const pos = def.nodePositions[`agent-${i}`] ?? { x: i * 240, y: 120 };
@@ -201,8 +236,8 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
             id: e.id,
             sourceAgentId: e.source,
             targetAgentId: e.target,
-            label: typeof e.label === "string" ? e.label : undefined,
-            edgeKind: e.type !== "dataflow" ? (e.type as "memory" | "feedback" | "control") : undefined,
+            label: getEdgeLabel(e),
+            edgeKind: getEdgeKind(e) !== "dataflow" ? getEdgeKind(e) : undefined,
           })),
           executionSettings,
           nodePositions: Object.fromEntries(nodes.map((n) => [n.id, n.position])),

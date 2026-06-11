@@ -1,6 +1,6 @@
 ﻿# Deployment Readiness
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 This is the source of truth for what is verified, partial, mocked, or blocked.
 
@@ -18,9 +18,9 @@ clearer production-grade error recovery.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed |
-| Frontend tests | `npx vitest run` | Passed, 229 tests / 26 files |
-| Rust tests | `cargo test` | Passed, 25 tests |
-| Frontend build | `npm run build` | Passed; Vite warned about large `index` chunk and empty `vendor-react` chunk |
+| Frontend tests | `npx vitest run` | Passed, 281 tests / 30 files |
+| Rust tests | `cargo test` | Passed, 30 tests |
+| Frontend build | `npm run build` | Passed; Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers |
 | CLI status | `npm run harness -- project status` | Passed; printed read-only v0 note, 7 workflows, docs present |
@@ -28,7 +28,7 @@ clearer production-grade error recovery.
 | CLI valid workflow | `npm run harness -- workflow validate examples\\purchasing-decision.harness.yaml` | Passed |
 | CLI missing workflow | `npm run harness -- workflow validate missing-file-does-not-exist.harness.yaml` | Failed correctly with JSON error |
 | MCP initialize/list | JSON-RPC stdio | Passed |
-| MCP project_status | JSON-RPC stdio | Passed; type check true, 7 workflows, 26 test files |
+| MCP project_status | JSON-RPC stdio | Passed; type check true, workflows detected, test files detected |
 | MCP validate_workflow | JSON-RPC stdio | Passed for purchasing demo |
 | MCP path rejection | JSON-RPC stdio with `../package.json` | Rejected path traversal |
 | MCP run_tests | JSON-RPC stdio, filtered wizard test file | Passed, 23 tests |
@@ -91,7 +91,7 @@ Verified through browser DOM inspection of the frontend:
 - Template details show agents, setup requirements, artifacts, verification method, and privacy notes.
 - Loading the template creates a 7-node / 8-edge workflow.
 - Settings expose Ollama Cloud setup, `OLLAMA_API_KEY`, auth token field, and `gemma4:31b-cloud`.
-- Run dialog footer still reads `sequential topological order · streaming simulated`. The `streaming simulated` half is accurate, but `sequential topological order` is stale UI copy: the engine now runs bounded-parallel via `runParallel()`. (`src/components/execution/WorkflowInputDialog.tsx`)
+- Run dialog footer now reports bounded parallel scheduling when `maxParallel > 1`, or sequential mode when `maxParallel = 1`; `streaming simulated` remains accurate.
 - AuditStrip empty state says no events yet and includes the All chip.
 
 Screenshot limitation: the Browser tool rendered and interacted with the app,
@@ -104,8 +104,8 @@ evidence instead of screenshots.
 2. Code signing decision for Windows installers.
 3. OS keychain integration for API keys.
 4. Durable run logs, snapshots, and artifact persistence.
-5. Sync stale "sequential" UI copy (Run dialog footer, guide panels) with the implemented parallel scheduler — `runParallel()` now executes independent branches concurrently.
-6. E2E browser/Tauri smoke tests for first-run, workflow creation, settings, run failure, logs, and inspector.
+5. E2E browser/Tauri smoke tests for first-run, workflow creation, settings, run failure, logs, inspector, and bounded parallel fan-out.
+6. Durable scheduler trace events for queued/running/skipped/blocked nodes.
 
 ## Next Verification Before Release
 
@@ -124,4 +124,5 @@ npm run harness -- workflow validate examples\purchasing-decision.harness.yaml
 
 Then install the generated NSIS installer on a clean Windows profile and verify
 the app launches without repo, Node, Rust, or Tauri developer tooling.
+
 

@@ -1,6 +1,6 @@
 ﻿# Installation and Build
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 ## Development Prerequisites
 
@@ -37,8 +37,8 @@ npm run build
 Latest verified results:
 
 - TypeScript passed.
-- Vitest passed, 229 tests / 26 files.
-- Rust tests passed, 25 tests.
+- Vitest passed, 281 tests / 30 files.
+- Rust tests passed, 30 tests.
 - Frontend build passed with Vite chunk warnings only.
 
 ## Build Installers
@@ -89,4 +89,5 @@ Do not commit `.env` files or raw secrets.
 - Generated installers are unsigned; Windows SmartScreen warnings are expected.
 - Clean-machine installer smoke testing is still required.
 - API keys still use localStorage/env development storage, not OS keychain.
+
 

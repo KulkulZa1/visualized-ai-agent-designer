@@ -1,5 +1,14 @@
 ﻿# Development Log
 
+## 2026-06-11 - Hard Review: Scheduler, Feedback Validation, Parallel Wording
+
+- Ran baseline verification before edits: `npx tsc --noEmit`, `npx vitest run`, and `cargo test --manifest-path src-tauri/Cargo.toml` all passed.
+- Found a validator bug: feedback loops were checked through `edge.type`, but the app stores semantic feedback status in `edge.data.edgeKind`. Added `tests/unit/utils/validateWorkflow.test.ts` and fixed `validateWorkflow()`.
+- Found the same feedback-edge field bug in auto-layout. Added `tests/unit/utils/autoLayout.test.ts` and fixed feedback-edge reversal in `applyDagreLayout()`.
+- Found a scheduler bug: gateway skip logic only skipped direct unmatched successors, so descendants that depended solely on a skipped branch could still run. Added a regression test and fixed `runParallel()` to propagate branch-only skips while allowing shared joins to run.
+- Added scheduler protection for pure forward cycles so the runner rejects blocked graphs instead of silently finishing without executing anything.
+- Fixed stale user-facing execution wording in the run dialog, guide assistant, example picker, generated CLAUDE.md output, and current status docs.
+- Focused verification passed after the fixes: scheduler tests, workflow validation tests, auto-layout tests, generator tests, and `npx tsc --noEmit`.
 ## 2026-05-18 - Execution Verification, MCP Hardening, Templates, Packaging
 
 - Ran real verification: `npx tsc --noEmit`, `npx vitest run` (229 tests / 26 files), `cargo test` (25 tests), `npm run build`, `npm run tauri -- dev`, and `npm run tauri -- build`.
@@ -600,4 +609,5 @@ The prototype uses `.design/` as the authoritative source. Key values confirmed:
 - Zustand 5 + zundo for undo/redo
 - YAML for workflow files (human-readable, diffable)
 - `std::fs` in Rust commands (not `tauri_plugin_fs`) for centralized path validation
+
 

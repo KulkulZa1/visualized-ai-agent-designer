@@ -4,22 +4,23 @@ Harness Studio is a local-first Tauri desktop app for designing, validating,
 running, and inspecting multi-agent AI workflows.
 
 The current app is not just a mockup: the canvas, workflow YAML load/save,
-provider adapters, read-only CLI, read/test MCP server, Tauri desktop launch,
-and installer build have all been exercised locally. Some important surfaces
-are still intentionally partial, especially true parallel scheduling, real
-provider streaming, durable run artifacts, and OS keychain storage.
+provider adapters, bounded parallel scheduling, read-only CLI, read/test MCP
+server, Tauri desktop launch, and installer build have all been exercised
+locally. Some important surfaces are still intentionally partial, especially
+real provider streaming, durable run artifacts, process isolation, and OS
+keychain storage.
 
 ## Current Status
 
 Source of truth: [docs/DEPLOYMENT_READINESS.md](docs/DEPLOYMENT_READINESS.md)
 
-Verified on 2026-05-18:
+Verified on 2026-06-11:
 
 | Area | Result |
 |---|---|
 | TypeScript | `npx tsc --noEmit` passed |
-| Frontend/unit tests | `npx vitest run` passed, 229 tests / 26 files |
-| Rust tests | `cargo test` passed, 25 tests |
+| Frontend/unit tests | `npx vitest run` passed, 281 tests / 30 files |
+| Rust tests | `cargo test` passed, 30 tests |
 | Frontend build | `npm run build` passed |
 | Tauri dev app | `npm run tauri -- dev` launched `agent-workflow-builder.exe` and WebView2 |
 | Tauri package | `npm run tauri -- build` produced MSI and NSIS installers |
@@ -32,9 +33,9 @@ Verified on 2026-05-18:
 |---|---|
 | Visual workflow editor | Implemented |
 | YAML examples and validation | Implemented |
-| Agent execution | Implemented sequentially in topological order |
+| Agent execution | Implemented with dependency-aware bounded parallel scheduling |
 | Agent independence | Logical per-node prompt/model/output/log state, not process isolation |
-| True parallel scheduling | Not implemented |
+| Parallel scheduling | Independent forward-edge branches run up to `executionSettings.maxParallel`; feedback edges are excluded |
 | Provider calls | Implemented for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints |
 | Gemini direct adapter | Planned/catalog only |
 | Streaming | Simulated UI chunks after full provider response |
@@ -80,4 +81,5 @@ Do not commit secrets. The CLI and MCP print credential references only.
 - [Security](docs/SECURITY.md)
 - [Project Status](docs/PROJECT_STATUS.md)
 - [Deployment Readiness](docs/DEPLOYMENT_READINESS.md)
+
 

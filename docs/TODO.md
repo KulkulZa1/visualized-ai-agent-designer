@@ -1,14 +1,21 @@
 # TODO
 
-## Current Priority - 2026-05-18
+## Current Priority - 2026-06-11
 
-- [ ] Implement true parallel scheduling or keep all UI/docs explicit that execution is sequential.
+- [ ] Persist scheduler trace events for queued/running/skipped/blocked nodes.
 - [ ] Persist real run artifacts from workflow execution instead of showing mock placeholders.
 - [ ] Capture actual request/response/tool traces in durable context snapshots.
 - [ ] Move API keys from localStorage to OS keychain/Stronghold before broad release.
-- [ ] Add E2E UI smoke tests for first launch, Create from Goal, Settings, Run failure, AuditStrip, and Context Inspector.
+- [ ] Add E2E UI smoke tests for first launch, Create from Goal, Settings, Run failure, AuditStrip, Context Inspector, and bounded parallel fan-out.
 - [ ] Run generated NSIS installer on a clean Windows profile and document the result.
 - [ ] Add code signing/release strategy.
+
+Completed in the 2026-06-11 hard review pass:
+
+- [x] Feedback-edge cycle validation now uses `edge.data.edgeKind`, not only the React Flow edge renderer type.
+- [x] Gateway skip scheduling now skips branch-only descendants and still allows shared joins to run.
+- [x] The scheduler now rejects pure forward cycles instead of silently completing.
+- [x] Run dialog, guide assistant, example picker, and docs now describe bounded parallel scheduling instead of stale sequential behavior.
 
 Completed in the 2026-05-18 verification pass:
 

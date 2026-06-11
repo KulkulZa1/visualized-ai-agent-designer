@@ -1,6 +1,6 @@
 ﻿# Harness Studio User Manual
 
-Updated: 2026-05-18
+Updated: 2026-06-11
 
 ## What Harness Studio Is
 
@@ -10,8 +10,9 @@ run the workflow against configured providers.
 
 ## Current Truth
 
-- Execution is sequential topological order, not parallel.
+- Execution uses dependency-aware bounded parallel scheduling for independent forward-edge branches.
 - Agents have separate node IDs, prompts, models, outputs, status, logs, and snapshots, but are not separate OS processes.
+- Feedback edges do not create scheduling dependencies, and gateway routing can skip unmatched branches.
 - Streaming is simulated after the full provider response arrives.
 - Context inspector is useful but not a complete durable trace yet.
 - Artifact viewer still uses mock placeholders during execution.
@@ -82,7 +83,8 @@ npm run build
 npm run tauri -- build
 ```
 
-Latest verified baseline: TypeScript passed, Vitest 229 tests passed, Rust 25
+Latest verified baseline: TypeScript passed, Vitest 281 tests passed, Rust 30
 tests passed, frontend build passed, Tauri dev launched, and Tauri package build
 produced MSI/NSIS installers.
+
 

@@ -52,6 +52,16 @@ import { runParallel } from "@/services/execution/parallelScheduler";
 
 type EdgeData = { label?: string; edgeKind?: string };
 
+function isFeedbackEdge(edge: { type?: string; data?: unknown }): boolean {
+  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
+}
+
+function edgeLabel(edge: { label?: unknown; data?: unknown }): string | undefined {
+  const dataLabel = (edge.data as EdgeData | undefined)?.label;
+  if (typeof dataLabel === "string") return dataLabel;
+  return typeof edge.label === "string" ? edge.label : undefined;
+}
+
 /**
  * Try to extract a routing key from a gateway's text output.
  * Looks for JSON `{"route":"X"}`, `{"target":"X"}`, `{"domain":"X"}`, `{"verdict":"X"}`.
@@ -258,7 +268,7 @@ export function useWorkflowExecution() {
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
 
-    const incomingSet = new Set(edges.map((e) => e.target));
+    const incomingSet = new Set(edges.filter((e) => !isFeedbackEdge(e)).map((e) => e.target));
     const isEntryNode = (id: string) => !incomingSet.has(id);
 
     startRun(meta.name);
@@ -275,7 +285,7 @@ export function useWorkflowExecution() {
       // ── MEMORY NODE — aggregate upstream → memoryWrite keys ──────────────
       if (data.role === AgentRole.Memory) {
         const upstreamText = edges
-          .filter((e) => e.target === nodeId)
+          .filter((e) => e.target === nodeId && !isFeedbackEdge(e))
           .map((e) => {
             const src = nodes.find((n) => n.id === e.source);
             const out = agentOutputs.get(e.source) ?? "";
@@ -382,13 +392,13 @@ export function useWorkflowExecution() {
         const upstreamParts: string[] = [];
         for (const e of edges) {
           if (e.target !== nodeId) continue;
-          const edgeData = e.data as EdgeData | undefined;
-          if (edgeData?.edgeKind === "feedback") continue;
+          if (isFeedbackEdge(e)) continue;
           const out = agentOutputs.get(e.source);
           if (!out) continue;
           const srcNode = nodes.find((n) => n.id === e.source);
           const srcName = srcNode?.data.name ?? e.source;
-          const label   = edgeData?.label ? ` → ${edgeData.label}` : "";
+          const labelText = edgeLabel(e);
+          const label   = labelText ? ` → ${labelText}` : "";
           upstreamParts.push(`[From: ${srcName}${label}]\n${out}`);
         }
         const upstreamContext = upstreamParts.join("\n\n─────────────────\n\n");

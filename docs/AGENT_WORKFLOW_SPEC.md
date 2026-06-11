@@ -216,7 +216,7 @@ If `edgeKind` is omitted, it defaults to `dataflow`.
 
 ```yaml
 executionSettings:
-  maxParallel: 4      # 1-32, schema/reserved today (runtime is sequential)
+  maxParallel: 4      # 1-32, active bounded-parallel scheduler limit
   timeoutSeconds: 300 # 1??600 ??hard timeout for the whole workflow
   retryOnFailure: false
   maxRetries: 0       # 0??0
@@ -224,7 +224,7 @@ executionSettings:
 
 ---
 
-Runtime note, verified 2026-05-18: Harness Studio currently ignores `maxParallel` during execution. The React runner executes nodes one at a time in topological order. This field is kept for future parallel scheduling and workflow portability.
+Runtime note, verified 2026-06-11: Harness Studio uses `maxParallel` during execution. Independent forward-edge branches can run concurrently up to this limit. Feedback edges are excluded from dependency scheduling, and gateway routes can skip unmatched branches.
 
 ---
 

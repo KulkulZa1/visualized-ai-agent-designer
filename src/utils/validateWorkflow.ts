@@ -5,6 +5,12 @@ import type { AgentNode, ValidationResult, ValidationError, ValidationWarning } 
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
 
+type EdgeData = { edgeKind?: string };
+
+function isFeedbackEdge(edge: Edge): boolean {
+  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
+}
+
 export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationResult {
   const errors:   ValidationError[]   = [];
   const warnings: ValidationWarning[] = [];
@@ -23,7 +29,7 @@ export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationR
   const adj = new Map<string, string[]>();
   nodes.forEach((n) => adj.set(n.id, []));
   edges.forEach((e) => {
-    if (e.type !== "feedback") adj.get(e.source)?.push(e.target);
+    if (!isFeedbackEdge(e)) adj.get(e.source)?.push(e.target);
   });
 
   const visited = new Set<string>();

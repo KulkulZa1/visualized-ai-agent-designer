@@ -17,14 +17,14 @@ provider/model choices, CLI/MCP access, and safety boundaries.
 
 ## Current Verified Baseline
 
-Last execution pass: 2026-05-18.
+Last execution pass: 2026-06-11.
 
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 229 tests / 26 files |
-| `cargo test` | Passed, 25 tests |
-| `npm run build` | Passed; Vite large chunk and empty `vendor-react` warnings remain |
+| `npx vitest run` | Passed, 281 tests / 30 files |
+| `cargo test` | Passed, 30 tests |
+| `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
 | CLI | Read-only commands tested |
@@ -110,4 +110,5 @@ Last execution pass: 2026-05-18.
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
 4. Add installer smoke tests on a clean Windows user profile.
 5. Wire real GitHub Actions CI (tsc + vitest + cargo test on every push).
+
 

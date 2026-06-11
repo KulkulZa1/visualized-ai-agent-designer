@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
 import { AgentRole } from "@/types/agent";
+import type { Edge } from "@xyflow/react";
 
 beforeEach(() => {
   useWorkflowStore.getState().reset();
@@ -70,12 +71,60 @@ describe("workflowStore", () => {
     expect(isDirty).toBe(false);
   });
 
+  it("loadWorkflow preserves connection label and kind in edge data", () => {
+    useWorkflowStore.getState().loadWorkflow({
+      meta: { name: "Loaded", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+      agents: [
+        makeDefaultAgentNode("a", AgentRole.Gateway, { x: 0, y: 0 }).data,
+        makeDefaultAgentNode("b", AgentRole.Worker, { x: 200, y: 0 }).data,
+      ],
+      connections: [{
+        id: "edge-1",
+        sourceAgentId: "agent-0",
+        targetAgentId: "agent-1",
+        label: "approved",
+        edgeKind: "control",
+      }],
+      executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+      nodePositions: {},
+    });
+
+    const edge = useWorkflowStore.getState().edges[0];
+    expect(edge.label).toBe("approved");
+    expect(edge.type).toBe("control");
+    expect(edge.data).toEqual({ label: "approved", edgeKind: "control" });
+  });
+
   it("toWorkflowDef serializes current state", () => {
     const store = useWorkflowStore.getState();
     store.addNode(makeDefaultAgentNode("n1", AgentRole.Orchestrator, { x: 10, y: 20 }));
     const def = store.toWorkflowDef();
     expect(def.agents).toHaveLength(1);
     expect(def.nodePositions["n1"]).toEqual({ x: 10, y: 20 });
+  });
+
+  it("toWorkflowDef serializes label and kind from edge data", () => {
+    const store = useWorkflowStore.getState();
+    store.addNode(makeDefaultAgentNode("n1", AgentRole.Gateway, { x: 0, y: 0 }));
+    store.addNode(makeDefaultAgentNode("n2", AgentRole.Worker, { x: 200, y: 0 }));
+    useWorkflowStore.setState({
+      edges: [{
+        id: "edge-1",
+        source: "n1",
+        target: "n2",
+        data: { label: "approved", edgeKind: "feedback" },
+      } as Edge],
+    });
+
+    const def = useWorkflowStore.getState().toWorkflowDef();
+
+    expect(def.connections[0]).toMatchObject({
+      id: "edge-1",
+      sourceAgentId: "n1",
+      targetAgentId: "n2",
+      label: "approved",
+      edgeKind: "feedback",
+    });
   });
 
   describe("updateEdgeLabel", () => {
