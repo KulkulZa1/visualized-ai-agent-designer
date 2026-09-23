@@ -1,6 +1,6 @@
 ﻿# Architecture
 
-Updated: 2026-06-11
+Updated: 2026-09-24
 
 ## Stack
 
@@ -60,7 +60,8 @@ Implemented:
 
 - Workflow YAML load/save via Rust IPC.
 - `.harness/audit.log.jsonl` append path for audit entries.
-- Snapshot/artifact service scaffolding.
+- Context snapshots saved under `.harness/snapshots/` when a workspace is open (in memory otherwise).
+- Artifact service scaffolding (not wired into runs).
 
 Partial/mock:
 
@@ -70,9 +71,14 @@ Partial/mock:
 
 ## Security Boundaries
 
-- Rust file paths must go through `resolve_safe_path()`.
+- Rust file paths must go through `resolve_safe_path()`, which resolves the
+  deepest existing ancestor for new files (no symlink/junction escape).
 - Hook execution goes through `execute_hook`, requires an explicit consent flag,
-  and has a timeout.
+  and has a fixed 30 s timeout. Hook processes do not inherit provider API keys.
+  During workflow runs only Hook-role nodes run their pre-hook.
+- Agents have no shell tool: `bash`/`run_command` calls are refused and the
+  `execute_inline_command` IPC command was removed. Agent file tools (read, list,
+  grep, `fs.write`, `fs.append`) are confined to the open workspace.
 - Default Tauri capabilities do not allow frontend shell execute/kill.
 - CLI is read-only.
 - MCP has no write tools and no workflow execution.

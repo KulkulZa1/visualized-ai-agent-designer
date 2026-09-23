@@ -1,4 +1,4 @@
-import { TOOL_RISK, ToolPermission, type AgentNodeData } from "@/types/agent";
+import { AgentRole, TOOL_RISK, ToolPermission, type AgentNodeData } from "@/types/agent";
 
 export type PermissionRisk = "low" | "medium" | "high";
 
@@ -30,8 +30,10 @@ export function getHighestRisk(tools: ToolPermission[]): PermissionRisk | null {
   }, null);
 }
 
+/** Pre/post hooks gate nothing on agent nodes: a workflow run executes a preHook
+ *  only for Hook-role nodes and never executes postHooks. */
 export function hasHookGate(agent: AgentNodeData): boolean {
-  return Boolean(agent.preHook?.path || agent.postHook?.path);
+  return agent.role === AgentRole.Hook && Boolean(agent.preHook?.path);
 }
 
 export function buildPermissionMatrix(agents: AgentNodeData[]): PermissionMatrixRow[] {

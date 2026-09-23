@@ -10,17 +10,12 @@
 import { useState, useRef, useCallback } from "react";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
+import { entryAgentIds } from "@/services/execution/entryNodes";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { ROLE_META } from "@/utils/nodeColors";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { LlmProvider } from "@/utils/providerConfig";
 import type { AgentRole } from "@/types/agent";
-
-type EdgeData = { edgeKind?: string };
-
-function isFeedbackEdge(edge: { type?: string; data?: unknown }): boolean {
-  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
-}
 
 // ── Prompt enhancements ──────────────────────────────────────────────────────
 
@@ -124,9 +119,9 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
   const continueOnError = useExecutionStore((s) => s.continueOnError);
   const setContinueOnError = useExecutionStore((s) => s.setContinueOnError);
 
-  // Detect entry-point nodes (no incoming edges)
-  const incomingSet = new Set(edges.filter((e) => !isFeedbackEdge(e)).map((e) => e.target));
-  const entryNodes  = nodes.filter((n) => !incomingSet.has(n.id));
+  // Entry agents receive the prompt (same rule as the run loop)
+  const entryIds    = entryAgentIds(nodes, edges);
+  const entryNodes  = nodes.filter((n) => entryIds.has(n.id));
   const executionModeLabel =
     executionSettings.maxParallel <= 1
       ? "sequential (maxParallel 1)"

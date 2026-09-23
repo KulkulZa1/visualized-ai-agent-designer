@@ -6,7 +6,6 @@ import { useNodeExecutionData } from "@/hooks/useNodeExecutionData";
 import { MOCK_ARTIFACTS } from "@/services/artifact-manager/mockArtifacts";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
 import {
-  createSnapshot,
   listSnapshotsForNode,
   updateSnapshot,
   type PersistedSnapshot,
@@ -274,14 +273,6 @@ export function ContextInspectorTab({ nodeId }: { nodeId: string }) {
   const node = nodes.find((candidate) => candidate.id === nodeId);
   const agentRun = useNodeExecutionData(nodeId);
   const [outputExpanded, setOutputExpanded] = useState(false);
-
-  // Seed a snapshot when the tab is opened (non-blocking)
-  useEffect(() => {
-    if (!node) return;
-    const snapshot = buildContextSnapshot({ node, nodes, edges, agentRun, artifacts: MOCK_ARTIFACTS });
-    createSnapshot(snapshot, { workspacePath, snapshotStatus: "mock" }).catch(console.error);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodeId]);
 
   if (!node) return null;
 

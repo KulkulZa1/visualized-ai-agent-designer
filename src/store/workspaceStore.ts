@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import type { FileTreeEntry } from "@/types/filesystem";
+import { listWorkspaceFiles, openWorkspaceDialog } from "@/ipc/tauriCommands";
 
 interface WorkspaceState {
   workspacePath: string | null;
@@ -52,7 +53,25 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
     }),
     {
       name: "workspace-storage",
-      partialize: (state) => ({ recentWorkspaces: state.recentWorkspaces }),
+      // workspacePath is persisted so the last session (workspace + harness) restores on start.
+      partialize: (state) => ({ recentWorkspaces: state.recentWorkspaces, workspacePath: state.workspacePath }),
     }
   )
 );
+
+/** Ask the user for a folder, make it the workspace and load its file tree.
+ *  Shared by the sidebar folder button and the Ctrl+Shift+O shortcut. */
+export async function openWorkspaceFolder(): Promise<void> {
+  const path = await openWorkspaceDialog();
+  if (!path) return;
+  const { setWorkspacePath, setFileTree, setLoading } = useWorkspaceStore.getState();
+  setLoading(true);
+  try {
+    setWorkspacePath(path);
+    setFileTree(await listWorkspaceFiles(path));
+  } catch (e) {
+    console.error(e);
+  } finally {
+    setLoading(false);
+  }
+}

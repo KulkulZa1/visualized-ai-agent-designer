@@ -6,6 +6,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore, makeDefaultAgentNode, nextNodeId } from "@/store/workflowStore";
 import { useAuditStore } from "@/store/auditStore";
+import { useUIStore } from "@/store/uiStore";
 import { AgentRole } from "@/types/agent";
 import { ROLE_META } from "@/utils/nodeColors";
 import { deserializeWorkflow } from "@/utils/yamlSerializer";
@@ -30,6 +31,15 @@ interface CommandPaletteProps {
 
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
 
+/** Trigger an app keyboard shortcut (Ctrl+S save, Ctrl+. validate, Ctrl+L layout).
+ *  Dispatched after the palette has closed, so its search input no longer has
+ *  focus (shortcut handlers ignore keys while the user is typing). */
+function pressShortcut(key: string) {
+  setTimeout(() => {
+    window.dispatchEvent(new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true }));
+  }, 0);
+}
+
 export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
@@ -40,6 +50,7 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
   const nodeCount      = useWorkflowStore((s) => s.nodes.length);
   const meta           = useWorkflowStore((s) => s.meta);
   const addAuditEntry  = useAuditStore((s) => s.addEntry);
+  const openEditorFile = useUIStore((s) => s.openEditorFile);
 
   async function pasteWorkflowYaml() {
     onClose();
@@ -81,11 +92,11 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
 
   const actions: PaletteAction[] = [
     // Workflow actions
-    { id:"save",     label:"Save workflow",     hint:meta.name,  icon:"save",    shortcut:"⌘S", group:"Workflow",   run: () => { onClose(); /* handled by useKeyboardShortcuts */ } },
+    { id:"save",     label:"Save workflow",     hint:meta.name,  icon:"save",    shortcut:"⌘S", group:"Workflow",   run: () => { onClose(); pressShortcut("s"); } },
     { id:"generate", label:"Generate…",         hint:"CLAUDE.md, LangGraph, CrewAI", icon:"grid", shortcut:"⌘G", group:"Workflow", run: () => { onClose(); onOpenGenerate(); } },
     { id:"permissions", label:"Permission matrix", hint:"node x tool grants", icon:"shield", shortcut:"Ctrl+Shift+P", group:"Workflow", run: () => { onClose(); onOpenPermissions(); } },
-    { id:"validate", label:"Validate graph",    icon:"check",   shortcut:"⌘.", group:"Workflow",  run: () => { onClose(); } },
-    { id:"layout",   label:"Auto-layout",       icon:"grid",    shortcut:"⌘L", group:"Workflow",  run: () => { onClose(); } },
+    { id:"validate", label:"Validate graph",    icon:"check",   shortcut:"⌘.", group:"Workflow",  run: () => { onClose(); pressShortcut("."); } },
+    { id:"layout",   label:"Auto-layout",       icon:"grid",    shortcut:"⌘L", group:"Workflow",  run: () => { onClose(); pressShortcut("l"); } },
 
     // Add nodes
     ...Object.values(AgentRole).map((role) => {
@@ -107,9 +118,9 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
     }),
 
     // Navigation
-    { id:"docs",     label:"Open AGENTS.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); } },
-    { id:"claude",   label:"Open CLAUDE.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); } },
-    { id:"audit",    label:"View audit log",    icon:"history",group:"Navigate",  run: () => { onClose(); } },
+    { id:"docs",     label:"Open AGENTS.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); openEditorFile("AGENTS.md"); } },
+    { id:"claude",   label:"Open CLAUDE.md",    icon:"file",   group:"Navigate",  run: () => { onClose(); openEditorFile("CLAUDE.md"); } },
+    { id:"audit",    label:"View audit log",    icon:"history",group:"Navigate",  run: () => { onClose(); openEditorFile(".harness/audit.log.jsonl"); } },
 
     // Import/Export
     { id:"paste_yaml", label:"Paste workflow YAML from clipboard", icon:"save", group:"Workflow",

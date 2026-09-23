@@ -9,7 +9,7 @@
  */
 
 import type { RuntimeProvider } from "@/utils/providerConfig";
-import { shouldFallbackToOllama } from "@/utils/providerConfig";
+import { isRemoteOllamaUrl, shouldFallbackToOllama } from "@/utils/providerConfig";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -73,8 +73,24 @@ export const REASONING_EFFORT: Record<string, string> = {
   "gpt-5.5-mid":   "medium",
 };
 
+/** OpenAI models that accept a reasoning effort (non-reasoning models reject it). */
+export function isReasoningModel(model: string): boolean {
+  return model.startsWith("gpt-5.5") || model.startsWith("o3") ||
+         model.startsWith("o4") || model.startsWith("o1");
+}
+
 export function resolveModel(model: string): string {
   return MODEL_ALIASES[model] ?? model;
+}
+
+/**
+ * Workflows and the model picker use dotted display versions ("claude-sonnet-4.6"),
+ * but Anthropic API model IDs are hyphenated ("claude-sonnet-4-6") and a dotted ID
+ * is rejected with a 404. Mirrored in Rust as normalize_anthropic_model().
+ */
+export function toAnthropicModelId(model: string): string {
+  const id = model.trim();
+  return id.startsWith("claude-") ? id.replace(/\./g, "-") : id;
 }
 
 // ── System message builder ────────────────────────────────────────────────────
@@ -167,7 +183,7 @@ export async function callProvider(
     const text = await invokeFn<string>(
       provider === "openai" ? "call_openai_api" : "call_claude_api",
       {
-        model,
+        model: provider === "anthropic" ? toAnthropicModelId(model) : model,
         system: systemMsg,
         userMessage: userMsg,
         apiKey,
@@ -178,7 +194,10 @@ export async function callProvider(
     return { text, usedOllamaFallback: false };
   } catch (primaryErr) {
     const errStr = String(primaryErr);
-    if (shouldFallbackToOllama(errStr) && ollamaBaseUrl) {
+    // Only fall back to a *local* Ollama server: silently re-sending the prompt to a
+    // remote/cloud endpoint the user did not choose for this call would be a hidden
+    // cloud call.
+    if (shouldFallbackToOllama(errStr) && ollamaBaseUrl && !isRemoteOllamaUrl(ollamaBaseUrl)) {
       const text = (await callOllama()) + "\n[ran on Ollama fallback]";
       return { text, usedOllamaFallback: true };
     }

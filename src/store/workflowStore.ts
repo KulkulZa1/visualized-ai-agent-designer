@@ -191,7 +191,7 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           state.isDirty = true;
         }),
 
-      loadWorkflow: (def) =>
+      loadWorkflow: (def) => {
         set((state) => {
           state.meta = def.meta;
           state.executionSettings = def.executionSettings;
@@ -212,7 +212,11 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           });
           state.isDirty = false;
           state.filePath = null;
-        }),
+        });
+        // A loaded workflow starts a fresh history: undoing past the load would put the
+        // previous graph under this workflow's name and file path.
+        useWorkflowStore.temporal.getState().clear();
+      },
 
       markClean: (filePath) =>
         set((state) => {
@@ -221,32 +225,42 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           state.meta.updatedAt = new Date().toISOString();
         }),
 
-      reset: () =>
+      reset: () => {
         set(() => ({
           ...initialState,
           meta: { ...DEFAULT_META, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-        })),
+        }));
+        useWorkflowStore.temporal.getState().clear();
+      },
 
       toWorkflowDef: () => {
         const { nodes, edges, meta, executionSettings } = get();
+        // Saved agents are identified by list position ("agent-<i>"), which is how
+        // loadWorkflow and the generators resolve them. Canvas node IDs are not stable
+        // across save/load, so connections and positions must be remapped.
+        const savedId = new Map(nodes.map((n, i) => [n.id, `agent-${i}`]));
         return {
           meta,
           agents: nodes.map((n) => n.data),
-          connections: edges.map((e) => ({
-            id: e.id,
-            sourceAgentId: e.source,
-            targetAgentId: e.target,
-            label: getEdgeLabel(e),
-            edgeKind: getEdgeKind(e) !== "dataflow" ? getEdgeKind(e) : undefined,
-          })),
+          connections: edges
+            .filter((e) => savedId.has(e.source) && savedId.has(e.target))
+            .map((e) => ({
+              id: e.id,
+              sourceAgentId: savedId.get(e.source)!,
+              targetAgentId: savedId.get(e.target)!,
+              label: getEdgeLabel(e),
+              edgeKind: getEdgeKind(e) !== "dataflow" ? getEdgeKind(e) : undefined,
+            })),
           executionSettings,
-          nodePositions: Object.fromEntries(nodes.map((n) => [n.id, n.position])),
+          nodePositions: Object.fromEntries(nodes.map((n, i) => [`agent-${i}`, n.position])),
         };
       },
     })),
     {
       limit: 50,
       partialize: (state) => ({ nodes: state.nodes, edges: state.edges }),
+      // Writes that leave the graph untouched (markClean, meta edits) are not undo steps.
+      equality: (past, current) => past.nodes === current.nodes && past.edges === current.edges,
     }
   )
 );

@@ -69,17 +69,16 @@ describe("buildToolInstructions", () => {
     expect(instructions).toContain("WRITE / EXECUTE TOOLS");
   });
 
-  it("includes bash in write/execute section when allowed", () => {
-    const instructions = buildToolInstructions(["bash"]);
-    expect(instructions).toContain("bash");
-    expect(instructions).toContain("WRITE / EXECUTE TOOLS");
+  it("does not advertise bash to the model: agent shell execution is disabled", () => {
+    expect(buildToolInstructions(["bash"])).toBe("");
+    expect(buildToolInstructions(["fs.write", "bash"])).not.toContain("bash");
   });
 
   it("separates read and write sections when both present", () => {
-    const instructions = buildToolInstructions(["read_file", "fs.write", "bash"]);
+    const instructions = buildToolInstructions(["read_file", "fs.write"]);
     expect(instructions).toContain("read_file");
     expect(instructions).toContain("WRITE / EXECUTE TOOLS");
-    expect(instructions).toContain("bash");
+    expect(instructions).toContain("fs.write");
   });
 });
 
@@ -220,10 +219,29 @@ describe("executeTool — fs.append", () => {
     expect(written).toBe("existing\nnew line");
   });
 
+  it("refuses to append when an existing file cannot be read, instead of overwriting it", async () => {
+    let written: string | null = null;
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "read_workspace_file") throw new Error("IO error: stream did not contain valid UTF-8");
+      if (cmd === "write_workspace_file") { written = args?.content as string; return undefined; }
+      throw new Error(`Unexpected: ${cmd}`);
+    }) as unknown as InvokeFn;
+
+    const result = await executeTool(
+      { name: "fs.append", args: { path: "data.csv", content: "x" } },
+      "/workspace",
+      invoke,
+      ["fs.append"],
+    );
+    expect(result).toContain("[error]");
+    expect(written).toBeNull();
+  });
+
   it("creates file when it does not exist", async () => {
     let written = "";
     const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
-      if (cmd === "read_workspace_file") throw new Error("not found");
+      // Rust io::Error text is localized, but the "(os error 2)" suffix is not.
+      if (cmd === "read_workspace_file") throw new Error("IO error: 지정된 파일을 찾을 수 없습니다. (os error 2)");
       if (cmd === "write_workspace_file") { written = args?.content as string; return undefined; }
       throw new Error(`Unexpected: ${cmd}`);
     }) as unknown as InvokeFn;
@@ -266,56 +284,18 @@ describe("executeTool — bash", () => {
     expect(result).toContain("not enabled");
   });
 
-  it("executes command and returns output", async () => {
-    const invoke = mockInvoke({
-      execute_inline_command: { exitCode: 0, stdout: "test output", stderr: "", durationMs: 50 },
-    });
+  it.each(["bash", "run_command"])("never runs %s commands, even when bash is allowed", async (name) => {
+    // Agent-issued shell execution is disabled until a real permission system exists.
+    const invoke = vi.fn() as unknown as InvokeFn;
     const result = await executeTool(
-      { name: "bash", args: { command: "echo test" } },
-      "/workspace",
-      invoke,
-      ["bash"],
-    );
-    expect(result).toContain("exit 0");
-    expect(result).toContain("test output");
-  });
-
-  it("run_command alias works when bash is allowed", async () => {
-    const invoke = mockInvoke({
-      execute_inline_command: { exitCode: 0, stdout: "ok", stderr: "", durationMs: 10 },
-    });
-    const result = await executeTool(
-      { name: "run_command", args: { command: "echo ok" } },
-      "/workspace",
-      invoke,
-      ["bash"],
-    );
-    expect(result).toContain("exit 0");
-  });
-
-  it("reports non-zero exit code", async () => {
-    const invoke = mockInvoke({
-      execute_inline_command: { exitCode: 1, stdout: "", stderr: "command failed", durationMs: 5 },
-    });
-    const result = await executeTool(
-      { name: "bash", args: { command: "false" } },
-      "/workspace",
-      invoke,
-      ["bash"],
-    );
-    expect(result).toContain("exit 1");
-    expect(result).toContain("command failed");
-  });
-
-  it("returns error when command is missing", async () => {
-    const invoke = mockInvoke({});
-    const result = await executeTool(
-      { name: "bash", args: {} },
+      { name, args: { command: "echo test" } },
       "/workspace",
       invoke,
       ["bash"],
     );
     expect(result).toContain("[error]");
+    expect(result).toContain("disabled");
+    expect(invoke).not.toHaveBeenCalled();
   });
 });
 
@@ -332,5 +312,37 @@ describe("executeTool — unknown tool", () => {
     );
     expect(result).toContain("[error]");
     expect(result).toContain("not available");
+  });
+});
+
+// ── executeTool — list_files ──────────────────────────────────────────────────
+
+describe("executeTool — list_files", () => {
+  // list_workspace_files returns a nested tree; on Windows paths use "\".
+  const tree = [{
+    name: "src", path: "src", isDirectory: true, children: [
+      { name: "components", path: "src\\components", isDirectory: true, children: [
+        { name: "App.tsx", path: "src\\components\\App.tsx", isDirectory: false, children: null },
+      ] },
+      { name: "main.ts", path: "src\\main.ts", isDirectory: false, children: null },
+    ],
+  }];
+
+  it("lists nested files under a sub-directory, whatever the path separator", async () => {
+    const invoke = mockInvoke({ list_workspace_files: tree });
+    const result = await executeTool(
+      { name: "list_files", args: { path: "src/components" } }, "/workspace", invoke,
+    );
+    expect(result).toContain("src/components/App.tsx");
+    expect(result).not.toContain("main.ts");
+  });
+
+  it("filters nested files by pattern", async () => {
+    const invoke = mockInvoke({ list_workspace_files: tree });
+    const result = await executeTool(
+      { name: "list_files", args: { pattern: ".tsx" } }, "/workspace", invoke,
+    );
+    expect(result).toContain("src/components/App.tsx");
+    expect(result).not.toContain("main.ts");
   });
 });

@@ -7,7 +7,7 @@ import { applyDagreLayout } from "@/utils/autoLayout";
 import { validateWorkflow } from "@/utils/validateWorkflow";
 import { ValidationPanel } from "./ValidationPanel";
 import type { ValidationResult } from "@/types/workflow";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 const TOOLBAR_ROLES: AgentRole[] = [
   AgentRole.Orchestrator,
@@ -46,6 +46,20 @@ export function CanvasToolbar() {
     // Always open the panel — valid shows success, errors/warnings show details
     setShowPanel(true);
   }
+
+  // Ctrl+L auto-layout and Ctrl+. validate (also sent by the command palette).
+  // Re-subscribed each render so the handlers see the current graph.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey) return;
+      const typing = ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName ?? "");
+      if (typing) return;
+      if (e.key.toLowerCase() === "l") { e.preventDefault(); handleLayout(); }
+      else if (e.key === ".") { e.preventDefault(); handleValidate(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   const errorCount   = validation ? validation.errors.length : 0;
   const warningCount = validation ? validation.warnings.length : 0;

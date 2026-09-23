@@ -188,6 +188,48 @@ describe("runParallel — error handling", () => {
     ).rejects.toThrow("A failed");
   });
 
+  it("does not start successors of in-flight nodes after the run has failed", async () => {
+    // A fails while B is still running; C depends only on B.
+    const nodes = [makeNode("A"), makeNode("B"), makeNode("C")];
+    const edges = [makeEdge("B", "C")];
+    const started: string[] = [];
+    let finishB!: () => void;
+    const bDone = new Promise<void>((resolve) => { finishB = resolve; });
+
+    const run = runParallel(nodes, edges, async (id) => {
+      started.push(id);
+      if (id === "A") throw new Error("A failed");
+      if (id === "B") await bDone;
+    }, defaultOptions());
+    const outcome = expect(run).rejects.toThrow("A failed");
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finishB();
+    await outcome;
+
+    expect(started).not.toContain("C");
+  });
+
+  it("settles a failed run only after in-flight nodes have finished", async () => {
+    // Callers treat settlement as "no node of this run is still running".
+    const nodes = [makeNode("A"), makeNode("B")];
+    const events: string[] = [];
+    let finishB!: () => void;
+    const bDone = new Promise<void>((resolve) => { finishB = resolve; });
+
+    const run = runParallel(nodes, [], async (id) => {
+      if (id === "A") throw new Error("A failed");
+      await bDone;
+      events.push("B finished");
+    }, defaultOptions()).catch(() => { events.push("run rejected"); });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finishB();
+    await run;
+
+    expect(events).toEqual(["B finished", "run rejected"]);
+  });
+
   it("nodes that throw don't block resolution if swallowed by caller", async () => {
     const nodes = [makeNode("A"), makeNode("B")];
     const completed: string[] = [];
@@ -345,5 +387,29 @@ describe("runParallel — gateway skip", () => {
     expect(executed).not.toContain("SkipChild");
     expect(skipped).toEqual(expect.arrayContaining(["Skip", "SkipChild"]));
     expect(skipped).not.toContain("Join");
+  });
+
+  it("still runs a join fed by a live branch when the gateway's own edge into it is not taken", async () => {
+    // G --no--> J and W --> J: route "yes" drops only G's edge; W still feeds J.
+    const nodes = [makeNode("G", AgentRole.Gateway), makeNode("Y"), makeNode("W"), makeNode("J")];
+    const edges = [makeEdge("G", "Y", "yes"), makeEdge("G", "J", "no"), makeEdge("W", "J")];
+    const executed: string[] = [];
+
+    await runParallel(nodes, edges, async (id) => { executed.push(id); },
+      defaultOptions({ gatewayRoutes: new Map([["G", "yes"]]) }));
+
+    expect(executed).toEqual(expect.arrayContaining(["G", "Y", "W", "J"]));
+  });
+
+  it("follows every branch when the route matches no edge label", async () => {
+    // e.g. a router answering "mixed", or prose parsed into an unrelated word.
+    const nodes = [makeNode("G", AgentRole.Gateway), makeNode("UI"), makeNode("Rust")];
+    const edges = [makeEdge("G", "UI", "ui"), makeEdge("G", "Rust", "rust")];
+    const executed: string[] = [];
+
+    await runParallel(nodes, edges, async (id) => { executed.push(id); },
+      defaultOptions({ gatewayRoutes: new Map([["G", "mixed"]]) }));
+
+    expect(executed).toEqual(expect.arrayContaining(["G", "UI", "Rust"]));
   });
 });

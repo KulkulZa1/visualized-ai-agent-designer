@@ -82,10 +82,11 @@ export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationR
         message: `"${d.name}" has ${d.tools.length} tools — consider restricting to what's needed.` });
     }
 
-    // Bash without hooks (security warning)
-    if (d.tools.includes(ToolPermission.Bash) && !d.preHook && !d.postHook) {
+    // Bash: agent-issued shell commands are refused at runtime (no consent system yet),
+    // and hooks on agent nodes are not run during workflows, so they are no gate.
+    if (d.tools.includes(ToolPermission.Bash)) {
       warnings.push({ nodeId: n.id, kind: "no_hooks_on_bash",
-        message: `"${d.name}" can execute bash but has no hook gate. Consider adding a pre-execution hook.` });
+        message: `"${d.name}" lists the bash tool, but agent shell commands are disabled — those calls will fail.` });
     }
   });
 

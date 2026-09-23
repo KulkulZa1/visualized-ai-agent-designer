@@ -4,7 +4,7 @@ How to run Harness Studio on a workstation with **no internet access**, against 
 **local OpenAI-compatible server** (URL, API key, and model name provided at that
 machine).
 
-Updated: 2026-05-31.
+Updated: 2026-09-24.
 
 ---
 
@@ -17,7 +17,8 @@ Harness Studio works air-gapped without code changes to the runtime. The key fac
   your local server, whatever host/port it runs on.
 - **Nothing phones home.** No analytics, no auto-updater, no web fonts/CDN, and no
   background provider checks. Health checks run only when you press **Run**, and
-  only for the providers you have configured.
+  only for the providers that run will use (plus a local Ollama URL, which is
+  always probed because it is the billing-error fallback).
 - **The "Custom" provider** is an OpenAI-compatible client: it POSTs to
   `<base-url>/chat/completions` and lists models from `<base-url>/models`. The API
   key is optional — when blank, no `Authorization` header is sent.
@@ -29,8 +30,9 @@ once on a connected machine. The air-gapped workstation only runs the installer.
 
 ## 1. Build the installer (on an internet-connected machine)
 
-Prerequisites on the **build** machine (not the target): Node.js 20+ LTS, Rust
-(stable), and VS Build Tools with "Desktop development with C++".
+Prerequisites on the **build** machine (not the target): Node.js
+^20.19.0 or >=22.12.0 (LTS), Rust 1.86 or newer (stable), and VS Build Tools
+with "Desktop development with C++".
 
 ```powershell
 # From the repo root

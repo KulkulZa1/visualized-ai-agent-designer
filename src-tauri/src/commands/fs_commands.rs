@@ -19,26 +19,57 @@ pub fn resolve_safe_path(workspace_root: &str, relative_path: &str) -> AppResult
     let resolved = match joined.canonicalize() {
         Ok(p) => p,
         Err(_) => {
-            // Path may not exist yet (new file). Walk components manually.
-            let mut clean = root.clone();
-            for component in Path::new(relative_path).components() {
-                use std::path::Component;
-                match component {
-                    Component::Normal(c) => clean.push(c),
-                    Component::ParentDir => {
-                        // reject traversal
-                        return Err(AppError::PathTraversal(relative_path.to_string()));
-                    }
-                    _ => {}
+            // Path does not exist yet (new file or folder). Canonicalize the deepest
+            // existing ancestor — following any symlink or junction — and re-append
+            // the missing components, so a link inside the workspace cannot place a
+            // new file outside it.
+            let mut ancestor = joined.clone();
+            let mut missing = Vec::new();
+            let base = loop {
+                if let Ok(base) = ancestor.canonicalize() {
+                    break base;
                 }
-            }
-            clean
+                match ancestor.components().next_back() {
+                    Some(std::path::Component::Normal(name)) => missing.push(name.to_os_string()),
+                    _ => return Err(AppError::PathTraversal(relative_path.to_string())),
+                }
+                ancestor.pop();
+            };
+            missing.iter().rev().fold(base, |path, name| path.join(name))
         }
     };
     if !resolved.starts_with(&root) {
         return Err(AppError::PathTraversal(relative_path.to_string()));
     }
     Ok(resolved)
+}
+
+/// Write via a uniquely named temp file in the same folder, then rename, so a
+/// failed write never leaves a truncated target. Refuses directory targets
+/// (including the workspace root itself).
+pub fn atomic_write(target: &Path, content: &[u8]) -> AppResult<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+
+    let (Some(parent), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(AppError::Other(format!("{} is not a file path", target.display())));
+    };
+    if target.is_dir() {
+        return Err(AppError::Other(format!("{} is a directory", target.display())));
+    }
+    std::fs::create_dir_all(parent)?;
+    let tmp = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        name.to_string_lossy(),
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::write(&tmp, content)?;
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -50,7 +81,8 @@ pub fn open_workspace_dialog(app: tauri::AppHandle) -> Option<String> {
         .map(|p| p.to_string())
 }
 
-#[tauri::command]
+// `async`: walking a large tree (node_modules, target) must not block the UI thread.
+#[tauri::command(async)]
 pub fn list_workspace_files(workspace_path: String) -> AppResult<Vec<FileTreeEntry>> {
     let root = Path::new(&workspace_path);
     if !root.is_dir() {
@@ -114,14 +146,7 @@ pub fn write_workspace_file(
     content: String,
 ) -> AppResult<()> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
-    if let Some(parent) = safe.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    // Atomic write: write to .tmp then rename
-    let tmp = safe.with_extension("tmp");
-    std::fs::write(&tmp, &content)?;
-    std::fs::rename(&tmp, &safe)?;
-    Ok(())
+    atomic_write(&safe, content.as_bytes())
 }
 
 #[cfg(test)]
@@ -146,6 +171,76 @@ mod tests {
         let dir = temp_workspace();
         let result = resolve_safe_path(dir.path().to_str().unwrap(), "../outside.txt");
         assert!(matches!(result, Err(AppError::PathTraversal(_))));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn resolve_safe_path_rejects_new_files_under_a_junction_leading_outside() {
+        let ws = temp_workspace();
+        let outside = temp_workspace();
+        let linked = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(ws.path().join("link"))
+            .arg(outside.path())
+            .output()
+            .unwrap();
+        assert!(linked.status.success());
+
+        let root = ws.path().to_str().unwrap();
+        assert!(matches!(resolve_safe_path(root, "link/new.txt"), Err(AppError::PathTraversal(_))));
+        assert!(matches!(
+            resolve_safe_path(root, "link/deep/nested/new.txt"),
+            Err(AppError::PathTraversal(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_safe_path_rejects_new_absolute_paths_outside_the_workspace() {
+        let ws = temp_workspace();
+        let outside = temp_workspace();
+        let target = outside.path().join("new.txt");
+        let result = resolve_safe_path(ws.path().to_str().unwrap(), target.to_str().unwrap());
+        assert!(matches!(result, Err(AppError::PathTraversal(_))));
+    }
+
+    #[test]
+    fn write_workspace_file_refuses_the_workspace_root_and_leaves_no_stray_temp_file() {
+        let parent = temp_workspace();
+        let ws = parent.path().join("ws");
+        fs::create_dir(&ws).unwrap();
+
+        let result = write_workspace_file(ws.to_string_lossy().to_string(), ".".to_string(), "x".to_string());
+
+        assert!(result.is_err());
+        assert!(!parent.path().join("ws.tmp").exists());
+    }
+
+    #[test]
+    fn write_workspace_file_does_not_clobber_a_sibling_tmp_file() {
+        let dir = temp_workspace();
+        fs::write(dir.path().join("report.tmp"), "user data").unwrap();
+
+        write_workspace_file(
+            dir.path().to_string_lossy().to_string(),
+            "report.md".to_string(),
+            "# report".to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.path().join("report.tmp")).unwrap(), "user data");
+    }
+
+    #[test]
+    fn reading_a_missing_file_reports_os_error_2() {
+        // Contract with toolExecutor's fs.append: only "(os error 2|3)" means
+        // "file does not exist yet"; any other read error must not be treated as empty.
+        let dir = temp_workspace();
+        let err = read_workspace_file(
+            dir.path().to_string_lossy().to_string(),
+            "missing.txt".to_string(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("(os error 2)"), "{err}");
     }
 
     #[test]

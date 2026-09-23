@@ -1,6 +1,6 @@
 ﻿# Troubleshooting
 
-Updated: 2026-06-11
+Updated: 2026-09-24
 
 ## App Launch
 
@@ -26,8 +26,9 @@ If it fails:
 ### Browser screenshot capture fails
 
 In the 2026-05-18 verification pass, Browser DOM inspection worked but CDP
-screenshots timed out. Use DOM evidence or a separate Playwright/screenshot
-pipeline until this is fixed.
+screenshots timed out. A later pass captured `docs/assets/empty-state.png` with
+Chrome headless instead. If CDP screenshots time out, use Chrome headless or a
+separate Playwright pipeline, or fall back to DOM evidence.
 
 ## Provider Issues
 
@@ -103,7 +104,8 @@ the project root.
 ### MCP run_tests filter is rejected
 
 The optional filter only accepts a safe file/name pattern. Avoid spaces, quotes,
-semicolons, pipes, ampersands, and path traversal.
+semicolons, pipes, ampersands, path traversal, and a leading `-` (CLI options such
+as `--watch` are rejected).
 
 ## Packaging
 

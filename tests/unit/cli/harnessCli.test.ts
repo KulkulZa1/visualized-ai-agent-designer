@@ -84,4 +84,25 @@ describe("harness CLI v0 subprocess", () => {
     expect(parsed.valid).toBe(false);
     expect(parsed.issues.length).toBeGreaterThan(0);
   });
+
+  it("does not treat a leading --workspace value as the command", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "harness-cli-ws-"));
+
+    const result = runHarness(["--workspace", workspace, "project", "status", "--json"]);
+
+    expect(result.status).toBe(0);
+    const status = JSON.parse(result.stdout) as { workspace: string };
+    expect(status.workspace).toBe(resolve(workspace));
+  });
+
+  it("validates the file, not the --workspace value, when the flag precedes the path", () => {
+    const workspace = mkdtempSync(join(tmpdir(), "harness-cli-ws-"));
+    const file = join(root, "examples", "purchasing-decision.harness.yaml");
+
+    const result = runHarness(["workflow", "validate", "--workspace", workspace, file]);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("VALID");
+    expect(result.stdout).toContain("Purchasing Decision Assistant");
+  });
 });

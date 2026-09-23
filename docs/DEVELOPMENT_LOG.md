@@ -1,5 +1,17 @@
 ﻿# Development Log
 
+## 2026-09-24 - Full Defect-Fix Pass and Documentation Truth Pass
+
+- Whole-repo defect review and fix pass; the review record, including the items left unfixed, is `docs/REVIEW_FULL_AUDIT_2026-09.md`.
+- Security: agent shell execution disabled (`bash`/`run_command` refused, `execute_inline_command` removed); hooks no longer inherit provider API keys and need an open workspace; release builds no longer enable DevTools; `resolve_safe_path` blocks symlink/junction escapes for new files; atomic writes use unique temp names.
+- Hooks: only Hook-role nodes run during workflows; consent-required or failed hooks stop the run; Windows `.bat`/`.ps1`/`.sh` hooks run and large output no longer deadlocks; workflow hook runs are audited.
+- Providers: Claude IDs normalized; OpenAI uses `max_completion_tokens`/`reasoning_effort`; env-only keys work; preflight only contacts providers the run uses; billing fallback only to local Ollama; 5xx/529 retried.
+- Execution: file prompts read from the workspace; per-node timeouts enforced; no hidden 4096 max-token cap; failed runs end as `error`; single-run guard; gateway join and unmatched-route fixes; the task reaches entry agents behind hook/memory nodes.
+- UI/editor: per-tab unsaved buffers, binary-file guard, validated Ctrl+S, working Ctrl+Shift+O / Ctrl+L / Ctrl+. / Ctrl+Shift+Z, fresh undo history on load, session restore, command-palette actions, edge-preserving save.
+- MCP: 8 tools documented; notification and JSON-RPC error-code handling, `isError` results, `-`-prefixed filters rejected, `npx --no-install`. CLI accepts `--workspace` before the command. CrewAI/LangGraph exports parse as valid Python for all 7 examples.
+- Docs and in-app help (GuidePanel, QuickStartGuide) updated to match the code; settings that are still not applied (temperature, per-node fallback, gateway condition, prompt variables, workflow timeout/retries) are labeled.
+- Verification: `npx tsc --noEmit` passed; `npx vitest run` 456 tests / 42 files; `cargo test --manifest-path src-tauri/Cargo.toml` 45 tests; `npm run build` passed with Vite chunk warnings only.
+
 ## 2026-06-11 - Hard Review: Scheduler, Feedback Validation, Parallel Wording
 
 - Ran baseline verification before edits: `npx tsc --noEmit`, `npx vitest run`, and `cargo test --manifest-path src-tauri/Cargo.toml` all passed.
@@ -184,7 +196,7 @@ provider behaviour, or secret-handling code was modified.
 - Created `docs/UX_REVIEW.md` ??P0?밣3 pain points, beginner-vs-expert
   capability matrix, recommended UX priorities.
 - Created `docs/CLI_MCP_PLAN.md` ??read-only CLI v0 surface (3 commands),
-  full read-only MCP tool surface, write-tool deferral, safety constraints.
+  read/test MCP tool surface, write-tool deferral, safety constraints.
 - Created `docs/VS_CODE_EXTENSION_PLAN.md` ??reusable layers, 5 blockers,
   target monorepo architecture, capability matrix, security constraints.
 - Created `docs/MATLAB_INTEGRATION_PLAN.md` ??5 integration options ranked

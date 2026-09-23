@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Edge } from "@xyflow/react";
-import { AgentRole } from "@/types/agent";
+import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import { validateWorkflow } from "@/utils/validateWorkflow";
 
@@ -37,6 +37,19 @@ function edge(source: string, target: string, edgeKind: "dataflow" | "feedback" 
 }
 
 describe("validateWorkflow", () => {
+  it("warns that bash is disabled at runtime even when a hook is attached to the node", () => {
+    // Agent-issued shell commands are refused, and pre/post hooks on agent
+    // nodes are never run during workflow runs, so a hook is not a gate.
+    const shell = node("shell");
+    shell.data.tools = [ToolPermission.Bash];
+    shell.data.preHook = { path: ".harness/hooks/destructive_guard.sh", requireConsent: false };
+
+    const { warnings } = validateWorkflow([shell], []);
+
+    const warning = warnings.find((w) => w.kind === "no_hooks_on_bash");
+    expect(warning?.message).toMatch(/disabled/);
+  });
+
   it("does not report a cycle for feedback edges stored in edge data", () => {
     const nodes = [node("A"), node("B")];
     const result = validateWorkflow(nodes, [

@@ -36,7 +36,7 @@ const FIX_SUGGESTIONS: Record<string, { icon: string; fix: string }> = {
   },
   no_hooks_on_bash: {
     icon: "⚠",
-    fix: "Open the Hooks tab and add a pre-execution hook (e.g. destructive_guard.sh) to gate bash usage.",
+    fix: "Remove the bash permission: agent-issued shell commands are disabled at runtime.",
   },
 };
 

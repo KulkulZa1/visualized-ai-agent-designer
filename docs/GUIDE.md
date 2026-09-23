@@ -1,6 +1,6 @@
 # Harness Studio — User Guide
 
-> Version 3 (Phase 3+) · Last updated 2026-05-16
+> Version 3 (Phase 3+) · Last updated 2026-09-24
 
 ---
 
@@ -29,12 +29,13 @@ You'll see 8 agent nodes appear on the canvas connected by 12 edges.
 
 ### 2. Select a node
 
-Click any node. The right panel shows 5 tabs:
+Click any node. The right panel shows 6 tabs:
 - **Role** — name, model, budget, limits
 - **Prompt** — system prompt (inline or file reference)
 - **Tools** — which tools this node is allowed to use
-- **Hooks** — pre/post execution scripts (with consent gate)
+- **Hooks** — pre/post execution scripts (run manually from this tab; during workflow runs only hook nodes run theirs)
 - **Memory** — which memory keys this node reads/writes
+- **Context** — context snapshot and snapshot history for this node
 
 ### 3. Add a node
 
@@ -42,7 +43,7 @@ Click one of the **Add:** buttons in the canvas toolbar. A new node appears at t
 
 ### 4. Connect nodes
 
-Drag from the **right port** of one node to the **left port** of another. An edge appears. To change edge type (data/memory/control/feedback), right-click the edge (Phase 4+).
+Drag from the **right port** of one node to the **left port** of another. An edge appears. Edge type (data/memory/control/feedback) is currently set only through the `edgeKind` field in the workflow YAML; there is no right-click UI for it yet.
 
 ### 5. Save the workflow
 
@@ -65,7 +66,7 @@ Press **Ctrl+G** → click **CLAUDE.md** → see a preview → it's written to y
 | ● | **Worker** | Executes a specific task (search, code, write). |
 | ◐ | **Critic** | Reviews output and returns PASS / REVISE feedback. |
 | ▣ | **Memory** | Persists shared state between agents (JSONL / vector). |
-| ✕ | **Hook** | Pre/post gate that runs a script (consent required). |
+| ✕ | **Hook** | Gate that runs its pre-hook script when a run reaches it; a failed or consent-required hook stops the run. |
 | ⊕ | **Aggregator** | Merges parallel outputs into a single result. |
 | ⬡ | **Tool Caller** | Specialized node for tool-heavy operations. |
 
@@ -120,15 +121,16 @@ Two modes:
 Checkboxes for all 17 tool permissions. Each shows a **risk level** (low / medium / high).
 
 > **Security principle:** grant only the tools the agent actually needs.
-> An agent with `bash` and no pre-hook is a security risk. Add a `destructive_guard.sh` hook.
+> The `bash` tool is disabled: agent shell commands are refused at runtime. Hooks attached to agent
+> nodes (such as `destructive_guard.sh`) do not run during workflow runs, so they cannot guard tool calls.
 
 ### Hooks tab
 
-Pre and post execution scripts. Each hook:
+Pre and post execution scripts. During workflow runs only **Hook**-role nodes run their pre-hook; hooks on other nodes run only when you click **Run hook** here, and post-hooks never run during runs. Each hook:
 - Must be a path within your workspace root (enforced by Rust path validation)
 - Runs with a **30-second timeout**
 - Is logged to `.harness/audit.log.jsonl`
-- Can require **user consent** (shown as a confirmation dialog before execution)
+- Can require **user consent** (a confirmation dialog when run from this tab; during a workflow run such a hook is not run and the run stops)
 
 Use **Ctrl+G → Hook Templates** to generate starter scripts.
 
@@ -301,11 +303,10 @@ Suggested local fallback models: `qwen2.5-coder:7b`, `qwen2.5-coder:14b`, `llama
 Before running any workflow, verify:
 
 - [ ] All hook scripts are yours or from a trusted source
-- [ ] API keys are in `.env.local` (never in `.harness.yaml`)
-- [ ] `bash` tool is only granted to nodes that truly need it
-- [ ] `destructive_guard.sh` is attached to any node with `bash`
+- [ ] API keys are in Settings or OS environment variables (never in `.harness.yaml`; `.env` files are not loaded)
+- [ ] `fs.write` / `fs.append` are only granted to nodes that truly need them (`bash` is disabled and refused at runtime)
 - [ ] Consent required is **on** for any hook that touches production systems
-- [ ] `path_scope.py` is attached to any node that reads/writes files outside `.harness/`
+- [ ] Hooks attached to agent nodes (e.g. `path_scope.py`) are not relied on as guards; they only run manually from the Hooks tab
 - [ ] Check the audit strip after every run
 
 ---
@@ -357,7 +358,7 @@ Before running any workflow, verify:
 src/
   components/
     canvas/          ← React Flow canvas, node types, edge types
-    config-panel/    ← 5-tab inspector
+    config-panel/    ← 6-tab inspector
     generate/        ← Generate panel modal
     palette/         ← ⌘K command palette, example picker, guide viewer
     layout/          ← TopBar, Sidebar, StatusBar, AuditStrip

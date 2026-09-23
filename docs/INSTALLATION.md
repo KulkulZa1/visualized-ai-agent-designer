@@ -1,12 +1,12 @@
 ﻿# Installation and Build
 
-Updated: 2026-06-11
+Updated: 2026-09-24
 
 ## Development Prerequisites
 
-- Node.js 20+
+- Node.js ^20.19.0 or >=22.12.0 (required by Vite 7)
 - npm 10+
-- Rust toolchain and Cargo
+- Rust toolchain and Cargo, Rust 1.86 or newer (`Cargo.lock` pins `icu_*` 2.2 crates, which need 1.86)
 - WebView2 Runtime on Windows
 
 ## Run From Source
@@ -34,11 +34,11 @@ npm run test:rust
 npm run build
 ```
 
-Latest verified results:
+Latest verified results (2026-09-24):
 
 - TypeScript passed.
-- Vitest passed, 281 tests / 30 files.
-- Rust tests passed, 30 tests.
+- Vitest passed, 456 tests / 42 files.
+- Rust tests passed, 45 tests.
 - Frontend build passed with Vite chunk warnings only.
 
 ## Build Installers
@@ -70,7 +70,9 @@ dependencies and bundler tooling are compiled/downloaded.
 
 No environment variables are required to launch the app.
 
-Optional provider variables:
+Optional provider variables. Set them as OS (or launching-process) environment
+variables; the app does not load `.env` files. In-app Settings values take
+precedence over them.
 
 ```powershell
 OPENAI_API_KEY=...

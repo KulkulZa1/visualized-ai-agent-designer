@@ -41,9 +41,9 @@ export interface ProviderDef {
 // ── Hardcoded default model lists ───────────────────────────────────────────
 
 const ANTHROPIC_MODELS: ModelInfo[] = [
-  { id: "claude-opus-4.6",   label: "Claude Opus 4.6",   contextK: 200, costInPerMtok: 15,  costOutPerMtok: 75,  tags: ["powerful", "long-ctx"] },
-  { id: "claude-sonnet-4.6", label: "Claude Sonnet 4.6", contextK: 200, costInPerMtok: 3,   costOutPerMtok: 15,  tags: ["balanced"] },
-  { id: "claude-haiku-4.5",  label: "Claude Haiku 4.5",  contextK: 200, costInPerMtok: 0.8, costOutPerMtok: 4,   tags: ["fast", "cheap"] },
+  { id: "claude-opus-4.6",   label: "Claude Opus 4.6",   contextK: 1000, costInPerMtok: 5, costOutPerMtok: 25, tags: ["powerful", "long-ctx"] },
+  { id: "claude-sonnet-4.6", label: "Claude Sonnet 4.6", contextK: 1000, costInPerMtok: 3, costOutPerMtok: 15, tags: ["balanced"] },
+  { id: "claude-haiku-4.5",  label: "Claude Haiku 4.5",  contextK: 200,  costInPerMtok: 1, costOutPerMtok: 5,  tags: ["fast", "cheap"] },
 ];
 
 const OPENAI_MODELS: ModelInfo[] = [

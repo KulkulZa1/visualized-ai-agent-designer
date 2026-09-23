@@ -14,30 +14,53 @@ interface MarkdownEditorProps {
 
 export function MarkdownEditor({ path }: MarkdownEditorProps) {
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
-  const markEditorDirty = useUIStore((s) => s.markEditorDirty);
+  const markEditorSaved = useUIStore((s) => s.markEditorSaved);
+  const setEditorBuffer = useUIStore((s) => s.setEditorBuffer);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
+  // A file that failed to load must never reach the editor: saving its empty
+  // buffer would truncate the real file (binary / non-UTF-8 files).
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!workspacePath) return;
+    // Switching back to a tab with unsaved edits restores them, not the disk copy.
+    const unsaved = useUIStore.getState().openEditorTabs.find((t) => t.path === path)?.unsaved;
+    if (unsaved !== undefined) {
+      setContent(unsaved);
+      setLoadError(null);
+      setLoading(false);
+      return;
+    }
+    // Ignore a slow read for a previous path: its text must not land in this tab.
+    let current = true;
     setLoading(true);
+    setLoadError(null);
     readWorkspaceFile(workspacePath, path)
-      .then(setContent)
-      .catch(() => setContent(""))
-      .finally(() => setLoading(false));
+      .then((text) => { if (current) setContent(text); })
+      .catch((err) => { if (current) setLoadError(String(err)); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, [workspacePath, path]);
 
   async function handleSave(value: string | undefined) {
     if (!workspacePath || value === undefined) return;
     try {
       await writeWorkspaceFile(workspacePath, path, value);
-      markEditorDirty(path, false);
+      markEditorSaved(path, value);
     } catch (err) {
       console.error("Failed to save file:", err);
     }
   }
 
   if (loading) return <div className="p-4 text-xs text-gray-400">Loading…</div>;
+  if (loadError) {
+    return (
+      <div style={{ padding: 16, fontSize: 12, color: "var(--red)" }}>
+        {path} cannot be opened as text: {loadError}
+      </div>
+    );
+  }
 
   return (
     <React.Suspense fallback={
@@ -49,7 +72,7 @@ export function MarkdownEditor({ path }: MarkdownEditorProps) {
         value={content}
         onChange={(v) => {
           setContent(v ?? "");
-          markEditorDirty(path, true);
+          setEditorBuffer(path, v ?? "");
         }}
         onMount={(editor) => {
           editor.addCommand(

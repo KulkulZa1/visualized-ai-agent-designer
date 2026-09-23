@@ -10,12 +10,13 @@
  *   fs.write / write_file   — overwrite a file
  *   fs.append / append_file — append to a file
  *
- * Execute tools (require "bash" in node's allowedTools):
- *   bash / run_command — run a shell command in the workspace directory
+ * Execute tools: bash / run_command are DISABLED. Agent-issued shell commands
+ * are refused (never sent to the backend) until a real permission system exists;
+ * the tool is not advertised to the model.
  */
 
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
-import type { FileTreeEntry, HookResult } from "@/types/filesystem";
+import type { FileTreeEntry } from "@/types/filesystem";
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -69,13 +70,6 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
     args: {
       path: "Relative path from workspace root",
       content: "Text to append",
-    },
-  },
-  bash: {
-    name: "bash",
-    description: "Run a shell command in the workspace directory. Returns stdout, stderr, and exit code.",
-    args: {
-      command: "Shell command to run, e.g. npx tsc --noEmit or npm test",
     },
   },
 };
@@ -214,11 +208,21 @@ export async function executeTool(
       const entries = await invokeFn<FileTreeEntry[]>("list_workspace_files", {
         workspacePath,
       });
-      const prefix = (args.path ?? "").trim().replace(/^\/|\/$/g, "");
+      // The backend returns a nested tree (with "\" separators on Windows): flatten
+      // it and use "/" so sub-directory prefixes and patterns match nested files.
+      const flat: FileTreeEntry[] = [];
+      const walk = (items: FileTreeEntry[]) => {
+        for (const e of items) {
+          flat.push({ ...e, path: e.path.replace(/\\/g, "/") });
+          if (e.children) walk(e.children);
+        }
+      };
+      walk(entries);
+      const prefix = (args.path ?? "").trim().replace(/\\/g, "/").replace(/^\/|\/$/g, "");
       const pattern = (args.pattern ?? "").trim();
-      const filtered = entries
+      const filtered = flat
         .filter((e) => {
-          if (prefix && !e.path.startsWith(prefix)) return false;
+          if (prefix && e.path !== prefix && !e.path.startsWith(`${prefix}/`)) return false;
           if (pattern && !e.path.endsWith(pattern)) return false;
           return true;
         })
@@ -266,10 +270,22 @@ export async function executeTool(
       const path = args.path ?? "";
       if (!path) return "[error] fs.append requires a 'path' argument.";
       const toAppend = args.content ?? "";
-      const existing = await invokeFn<string>("read_workspace_file", {
-        workspacePath,
-        relativePath: path.trim(),
-      }).catch(() => "");
+      // Only a missing file counts as empty. Any other read failure (e.g. a
+      // non-UTF-8 file) must not turn the append into an overwrite. Rust io
+      // errors end in "(os error 2)" (not found) / "(os error 3)" (no such
+      // directory) regardless of the OS language.
+      let existing: string;
+      try {
+        existing = await invokeFn<string>("read_workspace_file", {
+          workspacePath,
+          relativePath: path.trim(),
+        });
+      } catch (e) {
+        if (!/\(os error [23]\)/.test(String(e))) {
+          return `[error] fs.append could not read ${path}; nothing was written: ${String(e)}`;
+        }
+        existing = "";
+      }
       await invokeFn<void>("write_workspace_file", {
         workspacePath,
         relativePath: path.trim(),
@@ -281,18 +297,8 @@ export async function executeTool(
     // ── Execute tools ────────────────────────────────────────────────────────
 
     if (name === "bash" || name === "run_command") {
-      const command = args.command ?? "";
-      if (!command) return "[error] bash requires a 'command' argument.";
-      const result = await invokeFn<HookResult>("execute_inline_command", {
-        workspacePath,
-        command,
-        consentGranted: true,
-      });
-      const out = [
-        result.stdout.trim(),
-        result.stderr.trim() ? `[stderr] ${result.stderr.trim()}` : "",
-      ].filter(Boolean).join("\n");
-      return `exit ${result.exitCode}\n${out || "(no output)"}`;
+      return `[error] ${name} is disabled: agent-issued shell commands are not executed ` +
+        "(there is no per-command consent system yet). Ask the user to run the command instead.";
     }
 
     return `[error] Tool "${name}" is not available or not safe to execute automatically.`;

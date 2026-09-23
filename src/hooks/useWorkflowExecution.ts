@@ -36,8 +36,9 @@ import {
   resolveModel,
   REASONING_EFFORT,
   estimateTokens,
+  isReasoningModel,
 } from "@/services/model-providers/providerAdapter";
-import { readWorkspaceFile } from "@/ipc/tauriCommands";
+import { readWorkspaceFile, writeAuditEntry } from "@/ipc/tauriCommands";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import { MemoryService } from "@/services/execution/memoryService";
 import {
@@ -47,6 +48,8 @@ import {
   executeTool,
 } from "@/services/execution/toolExecutor";
 import { runParallel } from "@/services/execution/parallelScheduler";
+import { resolvePromptContent } from "@/services/execution/promptSource";
+import { entryAgentIds } from "@/services/execution/entryNodes";
 
 // ── Gateway route parser ──────────────────────────────────────────────────────
 
@@ -102,6 +105,28 @@ const FALLBACK_DEFAULTS: ProviderDefaults = {
 
 function isExecutable(role: AgentRole): boolean {
   return role !== AgentRole.Memory && role !== AgentRole.Hook;
+}
+
+// Set synchronously when a run starts so a second Run click during the async
+// provider preflight (before isRunning flips) is rejected too.
+let runInFlight = false;
+
+/** Reject once `deadline` (epoch ms) passes or the run is stopped. The provider
+ *  call itself cannot be aborted; its late result is discarded. Giving up on Stop
+ *  lets the run settle (and a new run start) without waiting for the call. */
+function beforeDeadline<T>(
+  work: Promise<T>, deadline: number, message: string, isCancelled: () => boolean,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadline - Date.now()));
+    poll = setInterval(() => { if (isCancelled()) reject(new Error("Run stopped")); }, 200);
+  });
+  return Promise.race([work, expired]).finally(() => {
+    clearTimeout(timer);
+    clearInterval(poll);
+  });
 }
 
 // ── Health checks ─────────────────────────────────────────────────────────────
@@ -176,6 +201,23 @@ export function useWorkflowExecution() {
     onError?: (msg: string) => void,
   ) {
     const reportError = (msg: string) => { if (onError) onError(msg); else alert(msg); };
+    if (runInFlight || useExecutionStore.getState().isRunning) {
+      reportError("A workflow run is already in progress. A stopped run first finishes its in-flight agent calls.");
+      return;
+    }
+    runInFlight = true;
+    // Run status is written onto the nodes; keep it out of the undo history.
+    const history = useWorkflowStore.temporal.getState();
+    history.pause();
+    try {
+      await runWorkflow(config, reportError);
+    } finally {
+      history.resume();
+      runInFlight = false;
+    }
+  }
+
+  async function runWorkflow(config: WorkflowRunConfig, reportError: (msg: string) => void) {
     // ── Resolve provider settings ────────────────────────────────────────────
     const providerDefaults = await invoke<ProviderDefaults>("get_provider_defaults")
       .catch(() => FALLBACK_DEFAULTS);
@@ -211,18 +253,6 @@ export function useWorkflowExecution() {
       return;
     }
 
-    // Health checks
-    const healthResults = await runHealthChecks(
-      openaiApiKey, apiKey, effectiveOllamaUrl, effectiveOllamaModel,
-      ollamaApiKey, ollamaProviderType,
-      // Only probe the custom endpoint when this run will actually use it.
-      effectiveProvider === "openai-compatible" ? customApiUrl : "",
-      customApiKey, customApiModel, addEntry,
-    );
-    const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
-    const ollamaHealth = healthMap.get(ollamaProviderType);
-    const ollamaReady  = Boolean(ollamaHealth?.ok && ollamaHealth.model_available);
-
     const requiredProviders = new Set<RuntimeProvider>();
     for (const node of nodes) {
       if (!isExecutable(node.data.role)) continue;
@@ -232,6 +262,21 @@ export function useWorkflowExecution() {
       });
       requiredProviders.add(sel.provider === "ollama" ? ollamaProviderType : sel.provider);
     }
+
+    // Health checks — never contact a hosted provider this run will not use.
+    // Local Ollama is always probed because it is the billing fallback.
+    const probeOllama = requiredProviders.has(ollamaProviderType) || !isRemoteOllamaUrl(effectiveOllamaUrl);
+    const healthResults = await runHealthChecks(
+      requiredProviders.has("openai") ? openaiApiKey : "",
+      requiredProviders.has("anthropic") ? apiKey : "",
+      probeOllama ? effectiveOllamaUrl : "", effectiveOllamaModel,
+      ollamaApiKey, ollamaProviderType,
+      requiredProviders.has("openai-compatible") ? customApiUrl : "",
+      customApiKey, customApiModel, addEntry,
+    );
+    const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
+    const ollamaHealth = healthMap.get(ollamaProviderType);
+    const ollamaReady  = Boolean(ollamaHealth?.ok && ollamaHealth.model_available);
 
     for (const prov of requiredProviders) {
       if (prov === "ollama" || prov === "ollama-cloud") {
@@ -268,15 +313,20 @@ export function useWorkflowExecution() {
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
 
-    const incomingSet = new Set(edges.filter((e) => !isFeedbackEdge(e)).map((e) => e.target));
-    const isEntryNode = (id: string) => !incomingSet.has(id);
+    const entryIds = entryAgentIds(nodes, edges);
+    const isEntryNode = (id: string) => entryIds.has(id);
 
-    startRun(meta.name);
+    const runId = startRun(meta.name);
+    // Scoped to this run: Stop (or any newer run) ends it.
+    const isRunCancelled = () => {
+      const run = useExecutionStore.getState().currentRun;
+      return !run || run.id !== runId || run.status === "cancelled";
+    };
     for (const n of nodes) updateNodeData(n.id, { status: "idle" });
 
     // ── Per-node async processor (called by parallel scheduler) ──────────────
     async function processNode(nodeId: string): Promise<void> {
-      if (useExecutionStore.getState().currentRun?.status === "cancelled") return;
+      if (isRunCancelled()) return;
 
       const node = nodes.find((n) => n.id === nodeId);
       if (!node) return;
@@ -315,23 +365,42 @@ export function useWorkflowExecution() {
       if (data.role === AgentRole.Hook) {
         updateAgent(nodeId, { agentId: nodeId, agentName: data.name, status: "running" });
         updateNodeData(nodeId, { status: "running" });
-        const wsPath = workspacePath || useWorkflowStore.getState().meta.projectRoot || ".";
         let hookFailed = false;
+        const failHook = (message: string) => {
+          hookFailed = true;
+          updateAgent(nodeId, { status: "error", error: message, finishedAt: Date.now() });
+          addEntry({ id: `${nodeId}-hook-blocked-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "hook_executed", agentId: nodeId, details: message, success: false });
+        };
         if (data.preHook?.path) {
-          if (data.preHook.requireConsent) {
-            const message =
-              "Hook requires explicit manual consent. Open the Hooks tab and run it there.";
-            hookFailed = true;
-            updateAgent(nodeId, { status: "error", error: message, finishedAt: Date.now() });
-            addEntry({ id: `${nodeId}-hook-consent-${Date.now()}`, timestamp: new Date().toISOString(),
-              action: "hook_executed", agentId: nodeId, details: message, success: false });
+          if (!workspacePath) {
+            // Hooks run only inside the open workspace: a loaded or pasted workflow
+            // must not choose the folder code executes in (meta.projectRoot).
+            failHook("Open a workspace to run hooks.");
+          } else if (data.preHook.requireConsent) {
+            failHook("Hook requires explicit manual consent. Open the Hooks tab and run it there.");
           } else {
             try {
-              const result = await invoke<HookResult>("execute_hook", {
-                workspacePath: wsPath, hookPath: data.preHook.path, agentId: nodeId,
-                env: data.preHook.env ?? {}, consentGranted: true,
-              });
+              // Rust enforces the hook's timeout; this race only stops waiting on Stop.
+              const hookTimeout = Math.min(data.timeoutSeconds || 30, 3600);
+              const result = await beforeDeadline(
+                invoke<HookResult>("execute_hook", {
+                  workspacePath, hookPath: data.preHook.path, agentId: nodeId,
+                  env: data.preHook.env ?? {}, consentGranted: true,
+                  timeoutSecs: data.timeoutSeconds || undefined,
+                }),
+                Date.now() + (hookTimeout + 5) * 1000,
+                `Hook ${data.preHook.path} did not finish in ${hookTimeout}s`,
+                isRunCancelled,
+              );
               agentOutputs.set(nodeId, result.stdout);
+              const entry = {
+                id: `${nodeId}-hook-${Date.now()}`, timestamp: new Date().toISOString(),
+                action: "hook_executed" as const, agentId: nodeId,
+                details: `${data.preHook.path} exited ${result.exitCode}`, success: result.exitCode === 0,
+              };
+              addEntry(entry);
+              writeAuditEntry(workspacePath, entry).catch(console.error);
               if (result.exitCode === 0) {
                 updateAgent(nodeId, { status: "done", output: result.stdout, finishedAt: Date.now() });
               } else {
@@ -343,6 +412,12 @@ export function useWorkflowExecution() {
                 });
               }
             } catch (e) {
+              if (isRunCancelled()) {
+                // Stopped while the hook ran; the process ends at its own timeout.
+                updateAgent(nodeId, { status: "skipped", error: "Stopped by user", finishedAt: Date.now() });
+                updateNodeData(nodeId, { status: "idle" });
+                return;
+              }
               hookFailed = true;
               updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
             }
@@ -351,7 +426,9 @@ export function useWorkflowExecution() {
           updateAgent(nodeId, { status: "done", output: "(no hook script)", finishedAt: Date.now() });
         }
         updateNodeData(nodeId, { status: hookFailed ? "error" : "done" });
-        if (hookFailed && !continueOnError) throw new Error("Hook failed — stopping run");
+        // A hook is a gate: its failure stops the run even with continueOnError,
+        // so dependents never run behind a failed or unconsented gate.
+        if (hookFailed) throw new Error("Hook failed — stopping run");
         return;
       }
 
@@ -373,6 +450,10 @@ export function useWorkflowExecution() {
         selProv.provider === "openai"           ? openaiApiKey :
         selProv.provider === "anthropic"        ? apiKey       :
         runtimeProvider === "openai-compatible" ? customApiKey : "";
+      // A key set only in the environment is resolved by the Rust command itself.
+      const envKeyConfigured =
+        (selProv.provider === "openai" && providerDefaults.openai_api_key_configured) ||
+        (selProv.provider === "anthropic" && providerDefaults.anthropic_api_key_configured);
 
       addEntry({
         id: `${nodeId}-start-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -381,10 +462,7 @@ export function useWorkflowExecution() {
       });
 
       try {
-        const promptContent =
-          data.promptSource.type === "inline"
-            ? data.promptSource.content
-            : `[System prompt from file: ${data.promptSource.type === "file" ? data.promptSource.path : "?"}]`;
+        const promptContent = await resolvePromptContent(data.promptSource, workspacePath, readWorkspaceFile);
 
         const toolInstructions = buildToolInstructions(data.tools as string[]);
         const memoryContext    = memory.buildContext(data.memoryRead);
@@ -423,34 +501,43 @@ export function useWorkflowExecution() {
           userMsgParts.push(`Execute your role as ${data.name} in the ${meta.name} workflow.`);
 
         const baseUserMsg = userMsgParts.join("\n\n");
-        const maxTok = Math.min(data.maxTokens || 2048, 4096);
+        const maxTok = data.maxTokens || 2048;
         const effectiveThinkDepth =
           config.thinkDepthOverride !== null ? config.thinkDepthOverride : (data.thinkDepth ?? null);
         const reasoningEffort: string | null =
-          selProv.provider !== "openai" ? null :
+          selProv.provider !== "openai" || !isReasoningModel(selProv.model) ? null :
           effectiveThinkDepth && effectiveThinkDepth !== "none" ? effectiveThinkDepth :
           (REASONING_EFFORT[rawModel] ?? null);
 
         const maxSteps    = data.maxSteps || 5;
+        const timeoutSeconds = data.timeoutSeconds || 300;
+        const deadline    = Date.now() + timeoutSeconds * 1000;
         let currentMsg    = baseUserMsg;
         let finalText     = "";
         let stepsDone     = 0;
         let toolCallCount = 0;
 
         while (stepsDone < maxSteps) {
-          if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
+          if (isRunCancelled()) break;
+          // A tool step may have used up the budget: don't start another paid call.
+          if (Date.now() >= deadline) throw new Error(`${data.name} timed out after ${timeoutSeconds}s`);
 
-          const callResult = await callProvider(
-            {
-              provider: runtimeProvider, model, rawModel,
-              systemMsg, userMsg: currentMsg, maxTokens: maxTok,
-              apiKey: apiKeyForProvider, requiresKey: selProv.requiresKey,
-              ollamaBaseUrl: effectiveOllamaUrl, ollamaModel: effectiveOllamaModel,
-              ollamaApiKey: ollamaApiKey || undefined,
-              customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
-              reasoningEffort,
-            },
-            invoke,
+          const callResult = await beforeDeadline(
+            callProvider(
+              {
+                provider: runtimeProvider, model, rawModel,
+                systemMsg, userMsg: currentMsg, maxTokens: maxTok,
+                apiKey: apiKeyForProvider, requiresKey: selProv.requiresKey && !envKeyConfigured,
+                ollamaBaseUrl: effectiveOllamaUrl, ollamaModel: effectiveOllamaModel,
+                ollamaApiKey: ollamaApiKey || undefined,
+                customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
+                reasoningEffort,
+              },
+              invoke,
+            ),
+            deadline,
+            `${data.name} timed out after ${timeoutSeconds}s`,
+            isRunCancelled,
           );
 
           if (callResult.usedOllamaFallback) {
@@ -467,6 +554,8 @@ export function useWorkflowExecution() {
             break;
           }
 
+          // Stop may have been pressed while the model was answering.
+          if (isRunCancelled()) break;
           toolCallCount++;
           addEntry({ id: `${nodeId}-tool-${toolCallCount}-${Date.now()}`, timestamp: new Date().toISOString(),
             action: "file_read", agentId: nodeId,
@@ -507,7 +596,7 @@ export function useWorkflowExecution() {
         const chunkSize = finalText.length > 2000 ? 120 : 60;
         let accumulated = "";
         for (let i = 0; i < finalText.length; i += chunkSize) {
-          if (useExecutionStore.getState().currentRun?.status === "cancelled") break;
+          if (isRunCancelled()) break;
           await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
           accumulated += finalText.slice(i, i + chunkSize);
           updateAgent(nodeId, { output: accumulated });
@@ -544,10 +633,16 @@ export function useWorkflowExecution() {
           buildContextSnapshot({ node, nodes, edges,
             agentRun: { agentId: nodeId, agentName: data.name, status: "done", output: finalText },
             artifacts: liveArtifacts }),
-          { workspacePath, workflowId: meta.name, runId: currentRun?.id, snapshotStatus: "completed" },
+          { workspacePath, workflowId: meta.name, runId, snapshotStatus: "completed" },
         ).catch(console.error);
 
       } catch (e) {
+        if (isRunCancelled()) {
+          // Stopped while this node was working: not a failure of the node.
+          updateAgent(nodeId, { status: "skipped", error: "Stopped by user", finishedAt: Date.now() });
+          updateNodeData(nodeId, { status: "idle" });
+          return;
+        }
         updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
         updateNodeData(nodeId, { status: "error" });
         addEntry({ id: `${nodeId}-err-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -557,7 +652,7 @@ export function useWorkflowExecution() {
           buildContextSnapshot({ node, nodes, edges,
             agentRun: { agentId: nodeId, agentName: data.name, status: "error", output: "" },
             artifacts: [] }),
-          { workspacePath, workflowId: meta.name, runId: currentRun?.id,
+          { workspacePath, workflowId: meta.name, runId,
             snapshotStatus: "failed", metadata: { error: String(e) } },
         ).catch(console.error);
 
@@ -574,7 +669,7 @@ export function useWorkflowExecution() {
         processNode,
         {
           maxParallel,
-          isCancelled: () => useExecutionStore.getState().currentRun?.status === "cancelled",
+          isCancelled: isRunCancelled,
           onSkipped: (nodeId) => {
             const n = nodes.find((x) => x.id === nodeId);
             updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
@@ -590,8 +685,12 @@ export function useWorkflowExecution() {
       return;
     }
 
-    const finalStatus = useExecutionStore.getState().currentRun?.status;
-    if (finalStatus !== "cancelled") finishRun("done");
+    const finalRun = useExecutionStore.getState().currentRun;
+    if (finalRun?.status === "cancelled") return;
+    // With continueOnError the scheduler completes despite failed agents; the run
+    // must still be reported as failed rather than "done".
+    const anyFailed = Object.values(finalRun?.agents ?? {}).some((a) => a.status === "error");
+    finishRun(anyFailed ? "error" : "done");
   }
 
   return { executeWorkflow, currentRun, isRunning, cancelRun };

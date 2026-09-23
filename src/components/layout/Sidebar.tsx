@@ -1,11 +1,10 @@
 import { useState } from "react";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore } from "@/store/workflowStore";
-import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useWorkspaceStore, openWorkspaceFolder } from "@/store/workspaceStore";
 import { useUIStore } from "@/store/uiStore";
 import { ROLE_META, STATUS_COLORS } from "@/utils/nodeColors";
 import type { FileTreeEntry } from "@/types/filesystem";
-import { listWorkspaceFiles, openWorkspaceDialog } from "@/ipc/tauriCommands";
 import { useWorkflow } from "@/hooks/useWorkflow";
 import { ArtifactSidebar } from "./ArtifactSidebar";
 
@@ -75,9 +74,6 @@ export function Sidebar() {
   const workspacePath  = useWorkspaceStore((s) => s.workspacePath);
   const fileTree       = useWorkspaceStore((s) => s.fileTree);
   const isLoading      = useWorkspaceStore((s) => s.isLoading);
-  const setWorkspace   = useWorkspaceStore((s) => s.setWorkspacePath);
-  const setFileTree    = useWorkspaceStore((s) => s.setFileTree);
-  const setLoading     = useWorkspaceStore((s) => s.setLoading);
   const nodes          = useWorkflowStore((s) => s.nodes);
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode     = useUIStore((s) => s.selectNode);
@@ -89,21 +85,6 @@ export function Sidebar() {
 
   const workspaceName  = workspacePath?.split(/[\\/]/).at(-1) ?? "no workspace";
 
-  const openWorkspace = async () => {
-    const path = await openWorkspaceDialog();
-    if (!path) return;
-    setLoading(true);
-    try {
-      setWorkspace(path);
-      const tree = await listWorkspaceFiles(path);
-      setFileTree(tree);
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   return (
     <div style={{ gridArea: "left" as const, background: "var(--surface)",
       borderRight: "1px solid var(--border)", display: "flex", flexDirection: "column",
@@ -113,7 +94,7 @@ export function Sidebar() {
       <div style={{ padding: "12px 12px 8px", display: "flex", alignItems: "center",
         justifyContent: "space-between", borderBottom: "1px solid var(--border)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}
-          onClick={openWorkspace}>
+          onClick={openWorkspaceFolder}>
           <NodeIcon name="folder" size={13} color="var(--accent)"/>
           <span style={{ fontSize: 12, fontWeight: 500 }}>{workspaceName}</span>
         </div>

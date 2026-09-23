@@ -4,7 +4,7 @@ import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useAuditStore } from "@/store/auditStore";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { Sec } from "../shared";
-import type { HookConfig } from "@/types/agent";
+import { AgentRole, type HookConfig } from "@/types/agent";
 import type { HookResult } from "@/types/filesystem";
 import { executeHook, writeAuditEntry } from "@/ipc/tauriCommands";
 import { makeAuditEntry } from "@/utils/logger";
@@ -201,7 +201,9 @@ export function HooksTab({ nodeId }: { nodeId: string }) {
 
       <Sec title="Pre-execution hook">
         <HookRow
-          label="runs before this node starts"
+          label={node.data.role === AgentRole.Hook
+            ? "runs when this hook node executes in a workflow run"
+            : "manual only — hooks on agent nodes are not run during workflow runs"}
           hook={node.data.preHook}
           onUpdate={(value) => updateNodeData(nodeId, { preHook: value })}
           onRun={() => runHook("pre", "pre-execution hook", node.data.preHook)}
@@ -211,7 +213,7 @@ export function HooksTab({ nodeId }: { nodeId: string }) {
 
       <Sec title="Post-execution hook">
         <HookRow
-          label="runs after this node completes"
+          label="manual only — post hooks are not run during workflow runs"
           hook={node.data.postHook}
           onUpdate={(value) => updateNodeData(nodeId, { postHook: value })}
           onRun={() => runHook("post", "post-execution hook", node.data.postHook)}

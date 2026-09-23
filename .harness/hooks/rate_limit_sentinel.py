@@ -30,9 +30,10 @@ ENV_VAR     = "CLAUDE_RATE_LIMITED"
 
 def load_state() -> dict:
     try:
-        return json.loads(STATE_FILE.read_text())
+        state = json.loads(STATE_FILE.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    return state if isinstance(state, dict) else {}
 
 def save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +49,8 @@ def check_rate_limit(state: dict) -> tuple[bool, str]:
     if reset_at_str:
         try:
             reset_at = datetime.fromisoformat(reset_at_str.replace("Z", "+00:00"))
+            if reset_at.tzinfo is None:
+                reset_at = reset_at.replace(tzinfo=timezone.utc)  # naive timestamps are UTC
             now = datetime.now(timezone.utc)
             if now >= reset_at:
                 # Rate limit has expired — clear it
@@ -63,8 +66,22 @@ def check_rate_limit(state: dict) -> tuple[bool, str]:
     return True, "rate limit active (no reset time)"
 
 def main() -> int:
+    # Hook stdout is a pipe; on Windows it defaults to the ANSI code page (e.g. cp949),
+    # which cannot encode the status symbols printed below.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     state = load_state()
     is_limited, reason = check_rate_limit(state)
+
+    # Write sentinel result for downstream agents
+    sentinel_file = WORKSPACE / ".harness" / "state" / "sentinel_result.json"
+    sentinel_file.parent.mkdir(parents=True, exist_ok=True)
+    sentinel_file.write_text(json.dumps({
+        "limited": is_limited,
+        "reason": reason,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }, indent=2))
 
     if is_limited:
         os.environ[ENV_VAR] = "1"
@@ -75,15 +92,6 @@ def main() -> int:
         os.environ.pop(ENV_VAR, None)
         print(f"✓  No rate limit: {reason}")
         print(f"   Workers will use primary models (Claude)")
-
-    # Write sentinel result for downstream agents
-    sentinel_file = WORKSPACE / ".harness" / "state" / "sentinel_result.json"
-    sentinel_file.parent.mkdir(parents=True, exist_ok=True)
-    sentinel_file.write_text(json.dumps({
-        "limited": is_limited,
-        "reason": reason,
-        "checked_at": datetime.now(timezone.utc).isoformat(),
-    }, indent=2))
 
     return 0  # sentinel always succeeds — it's informational, not a blocker
 

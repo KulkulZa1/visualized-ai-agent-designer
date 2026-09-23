@@ -8,7 +8,7 @@
 winget install Rustlang.Rustup
 # Restart terminal, then:
 rustup default stable
-cargo --version  # must be 1.78+
+cargo --version  # must be 1.86+ (Cargo.lock pins icu_* 2.2 crates, which need 1.86)
 ```
 
 ### 2. Visual C++ Build Tools 2022
@@ -18,7 +18,7 @@ winget install Microsoft.VisualStudio.2022.BuildTools
 # Select: "Desktop development with C++" workload
 ```
 
-### 3. Node.js 22+ and npm
+### 3. Node.js ^20.19.0 or >=22.12.0 (required by Vite 7) and npm
 
 Download from nodejs.org or use:
 ```powershell
@@ -59,7 +59,10 @@ npm run tauri -- build
 
 ## Environment Variables
 
-Copy `.env.example` to `.env.local` and fill in values. Never commit `.env.local`.
+The app does not load `.env` or `.env.local` files. Set these as OS (or
+launching-process) environment variables before starting the app; `.env.example`
+lists the names. In-app Settings values take precedence. Never commit real key
+values.
 
 Provider configuration:
 

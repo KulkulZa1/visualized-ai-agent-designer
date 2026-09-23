@@ -40,7 +40,7 @@ export function StatusBar() {
 
   return (
     <footer style={{
-      gridArea: "bottom" as const,
+      gridArea: "status" as const,
       display: "flex", alignItems: "center", gap: 20, padding: "0 14px",
       background: "var(--surface)", borderTop: "1px solid var(--border)",
       height: 26, flexShrink: 0, fontSize: 11, color: "var(--hint)",

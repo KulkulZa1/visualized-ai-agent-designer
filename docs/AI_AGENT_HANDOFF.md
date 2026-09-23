@@ -7,16 +7,16 @@ running, and inspecting multi-agent workflow definitions. The current goal is to
 make the product strong enough to help develop and debug itself, without hiding
 mocked or incomplete behavior.
 
-## Current Verified Baseline (2026-06-11)
+## Current Verified Baseline (2026-09-24)
 
 Verified in this pass:
 
 - TypeScript: `npx tsc --noEmit` passed.
-- Unit tests: `npx vitest run` passed, 281 tests in 30 files.
-- Rust tests: `cargo test` passed, 30 tests.
+- Unit tests: `npx vitest run` passed, 456 tests in 42 files.
+- Rust tests: `cargo test` passed, 45 tests.
 - Web build: `npm run build` passed with a known large chunk warning.
-- Tauri dev launch: `npm run tauri -- dev` launched the desktop binary and WebView2.
-- Tauri packaging: `npm run tauri -- build` produced MSI and NSIS installers.
+- Tauri dev launch (earlier pass, not re-run): `npm run tauri -- dev` launched the desktop binary and WebView2.
+- Tauri packaging (earlier pass, not re-run): `npm run tauri -- build` produced MSI and NSIS installers.
 - CLI v0: `npm run harness -- project status`, `provider list`, and workflow validation were run.
 - MCP v0: stdio JSON-RPC initialize, tools/list, project_status, validate_workflow, and run_tests were run.
 
@@ -31,7 +31,8 @@ Verified in this pass:
 - Rule-based workflow recommender with 8 templates, including blog automation and Harness Studio self-improvement.
 - Rule-based guide assistant shell. It does not make live AI calls.
 - Read-only CLI v0.
-- Read-only MCP v0 with project status, workflow listing, workflow validation, and test-running tools.
+- Read/test MCP v0 with 8 tools: project status, workflow listing, workflow validation, test runners, provider metadata, artifact file metadata, and recent audit-log entries (best-effort secret redaction).
+- Agent file tools (read, list, grep, `fs.write`, `fs.append`) confined to the open workspace.
 - MCP path-safety checks and safe test-filter validation.
 - Hook execution consent guard in Rust and workflow error handling for hook failures.
 
@@ -44,6 +45,10 @@ Verified in this pass:
 - Context snapshots are useful for inspection but are not a complete durable trace system.
 - OS keychain or Stronghold storage for provider keys is not implemented.
 - MCP write tools are intentionally absent until permissioning and audit are stronger.
+- Agent shell execution (`bash`/`run_command`) is disabled until a per-command consent system exists.
+- Pre/post hooks on agent nodes do not run during workflow runs (manual Hooks-tab runs only); only Hook-role nodes run their pre-hook.
+- Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
+- The VS Code extension is an experimental scaffold; most commands do not work yet.
 - MATLAB execution is not implemented.
 - Gemini/Gemma direct cloud adapter is not implemented; use OpenAI-compatible gateways only when configured.
 - Code signing and installer smoke-install verification are not complete.

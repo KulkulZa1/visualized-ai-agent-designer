@@ -24,11 +24,11 @@ import { WorkflowMetaEditor } from "@/components/palette/WorkflowMetaEditor";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useUIStore } from "@/store/uiStore";
-import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useWorkspaceStore, openWorkspaceFolder } from "@/store/workspaceStore";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useStore } from "zustand";
-import { loadWorkflow } from "@/ipc/tauriCommands";
+import { listWorkspaceFiles, loadWorkflow } from "@/ipc/tauriCommands";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import { EXAMPLES, useExamples } from "@/hooks/useExamples";
 import { ErrorToast } from "@/components/ui/ErrorToast";
@@ -77,7 +77,11 @@ function AppInner() {
   const markClean = useWorkflowStore((s) => s.markClean);
 
   useEffect(() => {
-    if (!workspacePath || !lastHarnessPath) return;
+    if (!workspacePath) return;
+    listWorkspaceFiles(workspacePath)
+      .then((tree) => useWorkspaceStore.getState().setFileTree(tree))
+      .catch((err) => console.warn("[session-restore] file tree failed:", err));
+    if (!lastHarnessPath) return;
     loadWorkflow(workspacePath, lastHarnessPath)
       .then((raw) => {
         const validated = workflowDefSchema.parse(raw);
@@ -115,9 +119,14 @@ function AppInner() {
       setModal((m) => m === "permissions" ? null : "permissions");
     }
     // Ctrl+Shift+E — load EXAMPLES[4] (harness-studio-project) directly
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "e") {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "e" && !isTyping) {
       e.preventDefault();
       loadExample(EXAMPLES[4]);
+    }
+    // Ctrl+Shift+O — open a workspace folder (advertised on the first-run screen)
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "o") {
+      e.preventDefault();
+      void openWorkspaceFolder();
     }
     if ((e.ctrlKey || e.metaKey) && e.key === "/") {
       e.preventDefault();
@@ -128,17 +137,18 @@ function AppInner() {
       e.preventDefault();
       setShowWizard((v) => !v);
     }
-    // Undo / Redo
-    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z") {
+    // Undo / Redo — leave text undo alone while typing in an input or editor
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === "z" && !isTyping) {
       e.preventDefault();
       undo();
     }
-    if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key === "z"))) {
+    // With Shift held, e.key is "Z" — compare case-insensitively
+    if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.shiftKey && e.key.toLowerCase() === "z")) && !isTyping) {
       e.preventDefault();
       redo();
     }
     // Duplicate selected node
-    if ((e.ctrlKey || e.metaKey) && e.key === "d" && selectedNodeId) {
+    if ((e.ctrlKey || e.metaKey) && e.key === "d" && selectedNodeId && !isTyping) {
       e.preventDefault();
       useWorkflowStore.getState().duplicateNode(selectedNodeId);
     }

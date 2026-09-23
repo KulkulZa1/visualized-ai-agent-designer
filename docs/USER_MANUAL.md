@@ -1,6 +1,6 @@
 ﻿# Harness Studio User Manual
 
-Updated: 2026-06-11
+Updated: 2026-09-24
 
 ## What Harness Studio Is
 
@@ -16,6 +16,9 @@ run the workflow against configured providers.
 - Streaming is simulated after the full provider response arrives.
 - Context inspector is useful but not a complete durable trace yet.
 - Artifact viewer still uses mock placeholders during execution.
+- Agents can use workspace file tools (read, list, grep, `fs.write`, `fs.append`); the `bash`/`run_command` tool is disabled and refused.
+- During runs only Hook-role nodes run their pre-hook. Hooks on agent nodes run only when you click **Run hook** in the Hooks tab, and a hook marked "require consent" is not run automatically (the node fails and the run stops).
+- Temperature, per-node fallback model, gateway condition text, prompt `{{variables}}`, and workflow-level timeout/retry settings are saved but not applied at runtime yet.
 - CLI is read-only.
 - MCP is read/test-only.
 
@@ -70,8 +73,11 @@ print secrets.
 npm run mcp
 ```
 
-Available tools: `project_status`, `list_workflows`, `validate_workflow`,
-`run_tests`, `run_cargo_tests`. No write tools and no workflow execution.
+Available tools (8): `project_status`, `list_workflows`, `validate_workflow`,
+`run_tests`, `run_cargo_tests`, `list_providers` (metadata and credential
+references only), `list_artifacts` (file metadata only; empty until runs persist
+artifacts), and `get_recent_logs` (audit-log entries with best-effort, not
+guaranteed, secret redaction). No write tools and no workflow execution.
 
 ## Verification Commands
 
@@ -83,8 +89,9 @@ npm run build
 npm run tauri -- build
 ```
 
-Latest verified baseline: TypeScript passed, Vitest 281 tests passed, Rust 30
-tests passed, frontend build passed, Tauri dev launched, and Tauri package build
-produced MSI/NSIS installers.
+Latest verified baseline (2026-09-24): TypeScript passed, Vitest 456 tests /
+42 files passed, 45 Rust tests passed, and the frontend build passed. Tauri dev
+launch and the MSI/NSIS package build were verified in an earlier pass and not
+re-run.
 
 

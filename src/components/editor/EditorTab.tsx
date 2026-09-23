@@ -24,7 +24,11 @@ export function EditorArea() {
             <span className="max-w-[140px] truncate">{tab.path.split(/[\\/]/).at(-1)}</span>
             {tab.isDirty && <span className="text-blue-500 text-[10px]">●</span>}
             <button
-              onClick={(e) => { e.stopPropagation(); closeEditorFile(tab.path); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (tab.isDirty && !window.confirm(`Discard unsaved changes to ${tab.path}?`)) return;
+                closeEditorFile(tab.path);
+              }}
               className="hover:text-red-500 ml-0.5"
             >
               <X size={11} />
@@ -33,7 +37,8 @@ export function EditorArea() {
         ))}
       </div>
       <div className="flex-1 overflow-hidden">
-        {activeEditorPath && <MarkdownEditor path={activeEditorPath} />}
+        {/* key: one editor instance per file — its Ctrl+S binding captures the path */}
+        {activeEditorPath && <MarkdownEditor key={activeEditorPath} path={activeEditorPath} />}
       </div>
     </div>
   );

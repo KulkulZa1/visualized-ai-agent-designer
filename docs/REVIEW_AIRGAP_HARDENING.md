@@ -76,14 +76,14 @@ use /v1)"*. Covered by a new Rust mock-server test.
 `vitest` swept up test copies under `.claude/worktrees/…` that import modules
 absent from this repo, reporting 3 failed files on every run. Excluded
 `**/.claude/**` (and `src-tauri`) in the vitest config. Current real suite:
-30 files, 281 tests.
+30 files, 284 tests.
 
 ---
 
 ## Verification
 
 - `npx tsc --noEmit` — 0 errors
-- `npx vitest run` — 281/281 pass (30 files)
+- `npx vitest run` — 284/284 pass (30 files)
 - `cargo test` — 30/30 pass (incl. new 404-hint test)
 - `npm run build` — production bundle builds; Monaco + workers emitted locally;
   bundle scan shows no live CDN reference

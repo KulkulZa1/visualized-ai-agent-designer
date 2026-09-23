@@ -5,7 +5,8 @@
 # Called as a pre-hook before Visual Inspector and Code Critic.
 set -euo pipefail
 
-WORKSPACE="${WORKSPACE:-D:\\toy_project\\AI_agent}"
+# Default to the repository root (this script lives in <root>/.harness/hooks/).
+WORKSPACE="${WORKSPACE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 PASS=0
 FAIL=0
 

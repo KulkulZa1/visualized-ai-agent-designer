@@ -83,9 +83,12 @@ export function GeneratePanel({ onClose }: GeneratePanelProps) {
     setLoading(item.id);
     setWritten(null);
     try {
-      const result = await generate(item.id, { hookTemplate });
+      const result = await generate(item.id, {
+        hookTemplate,
+        confirmOverwrite: (path) => window.confirm(`${path} already exists and differs. Overwrite it?`),
+      });
       setPreview({ content: result.content, path: result.path, label: item.label });
-      if (hasWorkspace) setWritten(result.path);
+      if (result.written) setWritten(result.path);
     } catch (e) {
       console.error(e);
     } finally {

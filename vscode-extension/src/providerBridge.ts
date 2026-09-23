@@ -78,6 +78,18 @@ export async function callOllamaApi(args: {
 
 // ── OpenAI ───────────────────────────────────────────────────────────────────
 
+const OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1";
+
+/**
+ * True when the request goes to OpenAI itself (no base URL, or exactly the default).
+ * Anything else is a custom OpenAI-compatible endpoint: it must never receive the
+ * stored OpenAI key, and it keeps the widely supported `max_tokens`.
+ */
+export function isOfficialOpenAIEndpoint(baseUrl: string | null): boolean {
+  const base = (baseUrl ?? "").trim().replace(/\/+$/, "");
+  return base === "" || base === OPENAI_DEFAULT_BASE_URL;
+}
+
 export async function callOpenAIApi(args: {
   model: string;
   system: string;
@@ -89,9 +101,9 @@ export async function callOpenAIApi(args: {
 }): Promise<string> {
   const { model, system, userMessage, apiKey, maxTokens, baseUrl, reasoningEffort } = args;
 
-  const endpoint = baseUrl
-    ? `${baseUrl.replace(/\/+$/, "")}/chat/completions`
-    : "https://api.openai.com/v1/chat/completions";
+  const official = isOfficialOpenAIEndpoint(baseUrl);
+  const base = official ? OPENAI_DEFAULT_BASE_URL : (baseUrl ?? "").trim().replace(/\/+$/, "");
+  const endpoint = `${base}/chat/completions`;
 
   const body: Record<string, unknown> = {
     model,
@@ -99,16 +111,18 @@ export async function callOpenAIApi(args: {
       { role: "system", content: system },
       { role: "user",   content: userMessage },
     ],
-    max_tokens: maxTokens,
   };
+  // The official API takes `max_completion_tokens` (reasoning models reject
+  // `max_tokens`); custom OpenAI-compatible servers keep `max_tokens`.
+  body[official ? "max_completion_tokens" : "max_tokens"] = maxTokens;
   if (reasoningEffort) body["reasoning_effort"] = reasoningEffort;
+
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
 
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`,
-    },
+    headers,
     body: JSON.stringify(body),
   });
 
@@ -135,6 +149,11 @@ export async function callClaudeApi(args: {
 }): Promise<string> {
   const { model, system, userMessage, apiKey, maxTokens } = args;
 
+  // Workflows use dotted display versions ("claude-sonnet-4.6"); the Anthropic API
+  // only accepts hyphenated IDs ("claude-sonnet-4-6"). Mirrors toAnthropicModelId().
+  const id = model.trim();
+  const modelId = id.startsWith("claude-") ? id.replace(/\./g, "-") : id;
+
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -143,7 +162,7 @@ export async function callClaudeApi(args: {
       "anthropic-version": "2023-06-01",
     },
     body: JSON.stringify({
-      model,
+      model: modelId,
       max_tokens: maxTokens,
       system,
       messages: [{ role: "user", content: userMessage }],

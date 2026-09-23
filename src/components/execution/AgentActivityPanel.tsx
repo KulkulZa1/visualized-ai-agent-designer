@@ -114,6 +114,15 @@ export function AgentActivityPanel({
   const edges      = useWorkflowStore((s) => s.edges);
   const currentRun = useExecutionStore((s) => s.currentRun);
   const agentRun   = useNodeExecutionData(nodeId);
+  const output     = agentRun?.output ?? "";
+
+  // All hooks must run before the early return below: the node can disappear
+  // while the panel is open (undo, delete, loading another workflow).
+  const handleCopy = useCallback(() => {
+    copyText(output);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [output]);
 
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) return null;
@@ -152,7 +161,6 @@ export function AgentActivityPanel({
   });
 
   const status  = agentRun?.status ?? "idle";
-  const output  = agentRun?.output ?? "";
   const hasRun  = status !== "idle" && status !== "waiting";
   const tokens  = agentRun?.tokenEstimate ?? 0;
   const budget  = data.tokens?.budget ?? 0;
@@ -161,12 +169,6 @@ export function AgentActivityPanel({
   const promptContent = data.promptSource.type === "inline"
     ? data.promptSource.content
     : `[From file: ${data.promptSource.type === "file" ? data.promptSource.path : "unknown"}]`;
-
-  const handleCopy = useCallback(() => {
-    copyText(output);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }, [output]);
 
   return (
     <div style={{

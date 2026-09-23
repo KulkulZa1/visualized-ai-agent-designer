@@ -34,17 +34,18 @@ describe("permission matrix", () => {
     expect(rows[0].ungatedHighRiskTools).toEqual([ToolPermission.Bash]);
   });
 
-  it("treats pre or post hooks as a gate for high-risk tools", () => {
+  it("does not count a pre/post hook on an agent node as a gate: runs never execute it", () => {
     const rows = buildPermissionMatrix([
       agent({
         tools: [ToolPermission.SubagentDispatch],
         preHook: { path: ".harness/hooks/destructive_guard.sh", requireConsent: false },
+        postHook: { path: ".harness/hooks/test_gate.sh", requireConsent: false },
       }),
     ]);
 
     expect(rows[0].requiresHookGate).toBe(true);
-    expect(rows[0].hasHookGate).toBe(true);
-    expect(rows[0].ungatedHighRiskTools).toEqual([]);
+    expect(rows[0].hasHookGate).toBe(false);
+    expect(rows[0].ungatedHighRiskTools).toEqual([ToolPermission.SubagentDispatch]);
   });
 
   it("summarizes granted permissions and ungated high-risk nodes", () => {

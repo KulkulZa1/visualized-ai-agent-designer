@@ -18,7 +18,13 @@ const DEFAULT_OLLAMA_CLOUD_MODEL: &str = "gemma4:31b-cloud";
 enum ApiErrorKind {
     Billing,
     RateLimit,
+    /// Overloaded (529) or server-side (5xx) failure: worth retrying.
+    Transient,
     Other,
+}
+
+fn is_transient_status(status: u16) -> bool {
+    status == 529 || (500..=599).contains(&status)
 }
 
 struct NormalizedProviderError {
@@ -96,6 +102,12 @@ fn mask_key(key: &str) -> String {
     format!("{}****{}", &key[..4], &key[key.len() - 4..])
 }
 
+/// A custom endpoint URL may carry a key in its query string (`?api-key=…`);
+/// never echo that part in error messages, which reach the UI and audit log.
+fn without_query(url: &str) -> &str {
+    url.split('?').next().unwrap_or(url)
+}
+
 fn resolve_api_key(provided: &str, env_name: &str) -> Result<String, String> {
     let trimmed = provided.trim();
     if !trimmed.is_empty() {
@@ -134,6 +146,9 @@ fn classify_openai_error(status: u16, body: &str) -> ApiErrorKind {
             return ApiErrorKind::Billing;
         }
     }
+    if is_transient_status(status) {
+        return ApiErrorKind::Transient;
+    }
     ApiErrorKind::Other
 }
 
@@ -149,6 +164,9 @@ fn classify_anthropic_error(status: u16, body: &str) -> ApiErrorKind {
     }
     if status == 429 {
         return ApiErrorKind::RateLimit;
+    }
+    if is_transient_status(status) {
+        return ApiErrorKind::Transient;
     }
     ApiErrorKind::Other
 }
@@ -191,6 +209,16 @@ fn normalize_provider_error(provider: &str, status: u16, body: &str) -> Normaliz
             retryable: true,
             billing_related: false,
         },
+        ("openai", ApiErrorKind::Transient) => NormalizedProviderError {
+            message: format!("OpenAI {status} (temporary server error): {}", openai_message_from_body(body)),
+            retryable: true,
+            billing_related: false,
+        },
+        ("anthropic", ApiErrorKind::Transient) => NormalizedProviderError {
+            message: format!("Anthropic {status} (temporary server error): {}", anthropic_message_from_body(body)),
+            retryable: true,
+            billing_related: false,
+        },
         ("openai", ApiErrorKind::Other) => NormalizedProviderError {
             message: format!("OpenAI {status}: {}", openai_message_from_body(body)),
             retryable: false,
@@ -227,6 +255,32 @@ fn redact_secret(text: &str, secret: Option<&str>) -> String {
     text.replace(secret, "[redacted]")
 }
 
+/// Chat Completions request body. The official API takes `max_completion_tokens`
+/// (reasoning models reject `max_tokens`) and `reasoning_effort`; custom
+/// OpenAI-compatible servers keep the widely supported `max_tokens`.
+fn openai_chat_body(
+    model: &str,
+    system: &str,
+    user_message: &str,
+    max_tokens: u32,
+    reasoning_effort: Option<&str>,
+    custom_endpoint: bool,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message}
+        ],
+    });
+    let max_tokens_field = if custom_endpoint { "max_tokens" } else { "max_completion_tokens" };
+    body[max_tokens_field] = serde_json::json!(max_tokens);
+    if let Some(effort) = reasoning_effort {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    }
+    body
+}
+
 #[tauri::command]
 pub async fn call_openai_api(
     model: String,
@@ -261,18 +315,14 @@ pub async fn call_openai_api(
         resolve_api_key(&api_key, "OPENAI_API_KEY")?
     };
 
-    let mut body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_message}
-        ],
-        "max_tokens": max_tokens,
-    });
-
-    if let Some(ref effort) = reasoning_effort {
-        body["reasoning"] = serde_json::json!({"effort": effort});
-    }
+    let body = openai_chat_body(
+        &model,
+        &system,
+        &user_message,
+        max_tokens,
+        reasoning_effort.as_deref(),
+        is_custom,
+    );
 
     let delays = [1u64, 2, 4];
     let mut last_err = String::new();
@@ -292,7 +342,7 @@ pub async fn call_openai_api(
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Network error: {e}"))?;
+            .map_err(|e| format!("Network error: {}", e.without_url()))?;
 
         let status = response.status().as_u16();
 
@@ -300,7 +350,7 @@ pub async fn call_openai_api(
             let parsed: OpenAIResponse = response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse OpenAI response: {e}"))?;
+                .map_err(|e| format!("Failed to parse OpenAI response: {}", e.without_url()))?;
             return parsed
                 .choices
                 .into_iter()
@@ -369,7 +419,7 @@ async fn anthropic_call_inner(
 ) -> Result<String, String> {
     let api_key = resolve_api_key(api_key, "ANTHROPIC_API_KEY")?;
     let body = ClaudeRequest {
-        model: model.to_string(),
+        model: normalize_anthropic_model(model),
         max_tokens,
         system: system.to_string(),
         messages: vec![ClaudeMessage {
@@ -536,7 +586,9 @@ pub async fn call_ollama_api(
                 "Ollama endpoint returned {status}. If this is Ollama Cloud or an authenticated remote endpoint, set OLLAMA_API_KEY or OLLAMA_REMOTE_API_KEY."
             ));
         }
-        if text.to_lowercase().contains("model") {
+        // Ollama answers a missing model with 404 / "model '…' not found". Other
+        // errors that merely mention "model" (e.g. out of memory) are reported as-is.
+        if status.as_u16() == 404 || text.to_lowercase().contains("not found") {
             return Err(format!(
                 "Ollama model {model} is not installed. Run: ollama pull {model}"
             ));
@@ -637,6 +689,40 @@ fn ollama_api_endpoint(base_url: &str, path: &str) -> String {
     }
 }
 
+/// Known model IDs, used only when the key may not list models (403/404). Any other
+/// failure (e.g. 401 for a bad key) is reported, not masked as a successful list.
+fn anthropic_models_fallback(status: u16) -> Option<Vec<String>> {
+    if !matches!(status, 403 | 404) {
+        return None;
+    }
+    Some(
+        [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-4-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+        ]
+        .iter()
+        .map(|id| id.to_string())
+        .collect(),
+    )
+}
+
+/// Workflows use dotted display versions ("claude-sonnet-4.6"); the Anthropic API
+/// only accepts hyphenated IDs ("claude-sonnet-4-6") and 404s on the dotted form.
+/// Mirrors toAnthropicModelId() in providerAdapter.ts.
+fn normalize_anthropic_model(model: &str) -> String {
+    let model = model.trim();
+    if model.starts_with("claude-") {
+        model.replace('.', "-")
+    } else {
+        model.to_string()
+    }
+}
+
 fn normalize_ollama_model(model: &str) -> String {
     match model.trim() {
         "gemma4-31b:cloud" => "gemma4:31b-cloud".to_string(),
@@ -672,14 +758,15 @@ fn resolve_ollama_api_key_for_endpoint(
 }
 
 fn ollama_has_model(tags: &OllamaTagsResponse, model: &str) -> bool {
-    // Bare name (no tag): "deepseek-coder-v2" matches "deepseek-coder-v2:latest"
-    let model_bare = model.split(':').next().unwrap_or(model);
-    tags.models.iter().any(|m| {
-        let installed_bare = m.name.split(':').next().unwrap_or(&m.name);
-        m.name == model                                   // exact
-            || m.name.starts_with(&format!("{model}:"))  // model matches with any tag
-            || installed_bare == model_bare // bare name match
-    })
+    // Ollama resolves an untagged name to ":latest" ("deepseek-coder-v2" means
+    // "deepseek-coder-v2:latest"); a tagged name must match exactly — another tag
+    // of the same model (llama3.1:8b vs llama3.1:70b) is a different model.
+    let wanted = if model.contains(':') {
+        model.to_string()
+    } else {
+        format!("{model}:latest")
+    };
+    tags.models.iter().any(|m| m.name == wanted || m.name == model)
 }
 
 // ── Model listing ─────────────────────────────────────────────────────────────
@@ -786,7 +873,7 @@ pub async fn list_provider_models(
             let tags: OllamaTagsResponse = resp
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse model list: {e}"))?;
+                .map_err(|e| format!("Failed to parse model list: {}", e.without_url()))?;
             let mut models: Vec<String> = tags.models.into_iter().map(|m| m.name).collect();
             models.sort();
             Ok(models)
@@ -837,17 +924,14 @@ pub async fn list_provider_models(
                 models.sort_by(|a, b| b.cmp(a)); // newest first
                 Ok(models)
             } else {
-                // Anthropic may not expose models to all keys; return known list
-                Ok(vec![
-                    "claude-opus-4-5".to_string(),
-                    "claude-sonnet-4-5".to_string(),
-                    "claude-haiku-4-5".to_string(),
-                    "claude-opus-4".to_string(),
-                    "claude-sonnet-4".to_string(),
-                    "claude-3-5-sonnet-20241022".to_string(),
-                    "claude-3-5-haiku-20241022".to_string(),
-                    "claude-3-opus-20240229".to_string(),
-                ])
+                let status = resp.status().as_u16();
+                match anthropic_models_fallback(status) {
+                    Some(models) => Ok(models),
+                    None => {
+                        let text = resp.text().await.unwrap_or_default();
+                        Err(normalize_provider_error("anthropic", status, &text).message)
+                    }
+                }
             }
         }
 
@@ -866,7 +950,7 @@ pub async fn list_provider_models(
             let resp = req
                 .send()
                 .await
-                .map_err(|e| format!("Cannot reach {effective_base}: {e}"))?;
+                .map_err(|e| format!("Cannot reach {}: {}", without_query(&effective_base), e.without_url()))?;
             if !resp.status().is_success() {
                 let status = resp.status().as_u16();
                 if status == 401 || status == 403 {
@@ -877,7 +961,7 @@ pub async fn list_provider_models(
             let data: OpenAIModelsResponse = resp
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse model list: {e}"))?;
+                .map_err(|e| format!("Failed to parse model list: {}", e.without_url()))?;
             let mut models: Vec<String> = data.data.into_iter().map(|m| m.id).collect();
             models.sort();
             Ok(models)
@@ -1252,7 +1336,7 @@ pub async fn check_provider_health(
                     ok: false,
                     provider: "openai-compatible".into(),
                     latency_ms,
-                    message: format!("Cannot reach {}: {e}", base_url.trim()),
+                    message: format!("Cannot reach {}: {}", without_query(base_url.trim()), e.without_url()),
                     model_available: false,
                     pull_command: None,
                 }),
@@ -1393,6 +1477,17 @@ mod tests {
 
         assert!(ollama_has_model(&tags, "llama3.1:8b"));
         assert!(!ollama_has_model(&tags, "qwen2.5-coder:7b"));
+        // A different tag of the same model is not installed (preflight would pass,
+        // then every node would fail).
+        assert!(!ollama_has_model(&tags, "llama3.1:70b"));
+        // Ollama resolves an untagged name to ":latest".
+        assert!(!ollama_has_model(&tags, "llama3.1"));
+        let latest = OllamaTagsResponse {
+            models: vec![OllamaModel {
+                name: "deepseek-coder-v2:latest".to_string(),
+            }],
+        };
+        assert!(ollama_has_model(&latest, "deepseek-coder-v2"));
     }
 
     #[test]
@@ -1444,6 +1539,56 @@ mod tests {
             normalize_ollama_model("gemma4:31b-cloud"),
             "gemma4:31b-cloud"
         );
+    }
+
+    #[test]
+    fn official_openai_body_uses_chat_completions_parameter_names() {
+        // Chat Completions takes `reasoning_effort` (not the Responses-API `reasoning`
+        // object) and reasoning models reject `max_tokens` in favour of
+        // `max_completion_tokens`.
+        let body = openai_chat_body("gpt-5.5", "sys", "hi", 1000, Some("high"), false);
+        assert_eq!(body["max_completion_tokens"], 1000);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn custom_openai_compatible_body_keeps_max_tokens() {
+        // Local OpenAI-compatible servers (llama.cpp, vLLM, LM Studio) expect max_tokens.
+        let body = openai_chat_body("local-model", "sys", "hi", 128, None, true);
+        assert_eq!(body["max_tokens"], 128);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn overloaded_and_server_errors_are_retryable() {
+        let overloaded = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert!(normalize_provider_error("anthropic", 529, overloaded).retryable);
+        assert!(normalize_provider_error("anthropic", 503, "").retryable);
+        assert!(normalize_provider_error("openai", 502, "").retryable);
+        // Client errors are not retried.
+        assert!(!normalize_provider_error("anthropic", 400, r#"{"error":{"message":"bad"}}"#).retryable);
+    }
+
+    #[test]
+    fn anthropic_model_list_falls_back_only_when_listing_is_not_permitted() {
+        // A bad key (401) must surface as an error, not as a "successful" list.
+        assert!(anthropic_models_fallback(401).is_none());
+        assert!(anthropic_models_fallback(500).is_none());
+        let fallback = anthropic_models_fallback(403).unwrap();
+        assert!(anthropic_models_fallback(404).is_some());
+        // Only current, valid API IDs (hyphenated, no retired Claude 3.x models).
+        assert!(fallback.contains(&"claude-sonnet-4-6".to_string()));
+        assert!(fallback.iter().all(|id| !id.contains('.') && !id.starts_with("claude-3")));
+    }
+
+    #[test]
+    fn anthropic_dotted_display_model_ids_are_sent_hyphenated() {
+        assert_eq!(normalize_anthropic_model("claude-sonnet-4.6"), "claude-sonnet-4-6");
+        assert_eq!(normalize_anthropic_model(" claude-haiku-4.5 "), "claude-haiku-4-5");
+        assert_eq!(normalize_anthropic_model("claude-opus-4-6"), "claude-opus-4-6");
     }
 
     #[test]
@@ -1524,6 +1669,58 @@ mod tests {
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(text, "local ok");
         assert!(!request.to_lowercase().contains("authorization:"));
+    }
+
+    #[tokio::test]
+    async fn network_errors_do_not_echo_credentials_embedded_in_the_endpoint_url() {
+        // Some gateways take the key as a query parameter. reqwest's error text
+        // includes the full request URL; port 9 (discard) refuses immediately.
+        let error = call_openai_api(
+            "local-model".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            String::new(),
+            16,
+            None,
+            Some("http://127.0.0.1:9/v1?api-key=hunter2-secret".to_string()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!error.contains("hunter2-secret"), "{error}");
+
+        let health = check_provider_health(
+            "openai-compatible".to_string(),
+            String::new(),
+            "http://127.0.0.1:9/v1?api-key=hunter2-secret".to_string(),
+            "local-model".to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(!health.message.contains("hunter2-secret"), "{}", health.message);
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_reports_the_real_error_when_the_model_is_installed() {
+        // An out-of-memory error mentions "model" but is not "model not installed".
+        let (base_url, _request_rx) = spawn_mock_ollama_server(
+            500,
+            r#"{"error":"model requires more system memory (8.0 GiB) than is available (4.0 GiB)"}"#,
+        );
+
+        let error = call_ollama_api(
+            "llama3.1:8b".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            None,
+            128,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!error.contains("not installed"), "{error}");
+        assert!(error.contains("more system memory"), "{error}");
     }
 
     #[tokio::test]
