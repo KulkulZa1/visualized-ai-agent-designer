@@ -43,11 +43,60 @@ struct OpenAIResponse {
 #[derive(Debug, Deserialize)]
 struct OpenAIChoice {
     message: OpenAIMessageOut,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OpenAIMessageOut {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    // Servers that parse the model's tool intent themselves (e.g. gpt-oss behind
+    // vLLM) return it here, with no `content`, even though no `tools` were sent.
+    #[serde(default)]
+    tool_calls: Option<Vec<OpenAIToolCall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIToolCall {
+    function: OpenAIFunctionCall,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAIFunctionCall {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// The reply as text. A native tool call is rendered in the run loop's
+/// `<tool_call>` text protocol (first call only: the loop runs one tool per step).
+fn openai_reply_text(choice: OpenAIChoice) -> Result<String, String> {
+    let content = choice.message.content.unwrap_or_default();
+    let Some(call) = choice.message.tool_calls.and_then(|calls| calls.into_iter().next()) else {
+        if content.trim().is_empty() {
+            return Err(format!(
+                "The model returned no text (finish_reason: {}). If it is \"length\", raise Max tokens.",
+                choice.finish_reason.as_deref().unwrap_or("unknown")
+            ));
+        }
+        return Ok(content);
+    };
+    // `arguments` is a JSON string per the OpenAI spec; some servers send an object.
+    let args = match call.function.arguments {
+        serde_json::Value::String(raw) => serde_json::from_str(&raw).unwrap_or_default(),
+        other => other,
+    };
+    let args = if args.is_object() { args } else { serde_json::json!({}) };
+    let tag = format!(
+        "<tool_call>{}</tool_call>",
+        serde_json::json!({ "name": call.function.name, "args": args })
+    );
+    Ok(if content.trim().is_empty() {
+        tag
+    } else {
+        format!("{}\n{tag}", content.trim_end())
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -355,8 +404,8 @@ pub async fn call_openai_api(
                 .choices
                 .into_iter()
                 .next()
-                .map(|c| c.message.content)
-                .ok_or_else(|| "No content in OpenAI response".to_string());
+                .ok_or_else(|| "No content in OpenAI response".to_string())
+                .and_then(openai_reply_text);
         }
 
         let text = response.text().await.unwrap_or_default();
@@ -1828,6 +1877,76 @@ mod tests {
         assert!(request.starts_with("POST /chat/completions "));
         assert!(!request.to_lowercase().contains("authorization:"));
         assert!(request.contains(r#""model":"local-model""#));
+    }
+
+    async fn custom_endpoint_reply(body: &'static str) -> Result<String, String> {
+        let (base_url, _request_rx) = spawn_mock_ollama_server(200, body);
+        call_openai_api(
+            "openai".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            String::new(),
+            128,
+            None,
+            Some(base_url),
+        )
+        .await
+    }
+
+    fn tool_call_json(text: &str) -> serde_json::Value {
+        let inner = text
+            .strip_prefix("<tool_call>")
+            .and_then(|t| t.strip_suffix("</tool_call>"))
+            .unwrap_or_else(|| panic!("not a <tool_call> tag: {text}"));
+        serde_json::from_str(inner).unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_tool_call_reply_is_rendered_as_a_run_loop_tool_call() {
+        // Reply captured from a keyless OpenAI-compatible endpoint serving gpt-oss:
+        // the server parses the model's tool intent into `tool_calls`, no `content`.
+        let text = custom_endpoint_reply(
+            r#"{"choices":[{"index":0,"message":{"role":"assistant","reasoning":"Use read_file tool.","tool_calls":[{"id":"chatcmpl-tool-1","type":"function","function":{"name":"read_file","arguments":"{\"path\": \".harness/inputs/requirements.yaml\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tool_call_json(&text),
+            serde_json::json!({ "name": "read_file", "args": { "path": ".harness/inputs/requirements.yaml" } })
+        );
+    }
+
+    #[tokio::test]
+    async fn text_before_a_native_tool_call_is_kept() {
+        let text = custom_endpoint_reply(
+            r#"{"choices":[{"message":{"content":"Reading the file.","tool_calls":[{"function":{"name":"fs.read","arguments":"{\"path\":\"a.md\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .await
+        .unwrap();
+
+        let (before, tag) = text.split_once('\n').unwrap();
+        assert_eq!(before, "Reading the file.");
+        assert_eq!(tool_call_json(tag)["name"], "fs.read");
+    }
+
+    #[tokio::test]
+    async fn reply_without_text_says_so_instead_of_a_parse_error() {
+        for body in [
+            r#"{"choices":[{"message":{"content":null,"tool_calls":null},"finish_reason":"length"}]}"#,
+            r#"{"choices":[{"message":{"content":""},"finish_reason":"length"}]}"#,
+        ] {
+            let error = custom_endpoint_reply(body).await.unwrap_err();
+            assert!(error.contains("no text") && error.contains("length"), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn null_tool_calls_with_text_is_a_plain_reply() {
+        let text = custom_endpoint_reply(r#"{"choices":[{"message":{"content":"hi","tool_calls":null}}]}"#)
+            .await
+            .unwrap();
+        assert_eq!(text, "hi");
     }
 
     #[tokio::test]

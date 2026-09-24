@@ -74,7 +74,8 @@ Partial/mock:
 - Rust file paths must go through `resolve_safe_path()`, which resolves the
   deepest existing ancestor for new files (no symlink/junction escape).
 - Hook execution goes through `execute_hook`, requires an explicit consent flag,
-  and has a fixed 30 s timeout. Hook processes do not inherit provider API keys.
+  and times out after the Hook node's `timeoutSeconds` (default 30 s, max 1 h;
+  30 s for manual runs from the Hooks tab). Hook processes do not inherit provider API keys.
   During workflow runs only Hook-role nodes run their pre-hook.
 - Agents have no shell tool: `bash`/`run_command` calls are refused and the
   `execute_inline_command` IPC command was removed. Agent file tools (read, list,

@@ -1,5 +1,12 @@
 ﻿# Development Log
 
+## 2026-09-24 - Live Check Against a Free Cloud Model
+
+- Ran the Purchasing Decision example headlessly through the real run loop and the Rust `call_openai_api` (temporary localhost bridge in place of Tauri IPC) against the keyless endpoint `https://text.pollinations.ai/openai` (model `openai`, gpt-oss-20b), synthetic inputs only. A click-through run in the desktop window was not done.
+- Found and fixed (test-first): native `tool_calls` replies with no `content` failed every agent; `openai_reply_text` renders them as the run loop's `<tool_call>`. After the fix, tools ran (file read, `ranking.md` written) and the evaluator's scores matched the rubric; the run still ended `error` because the Report Writer's third ~30 s call passed the example's 90 s node timeout.
+- Doc truth fixes: the demo plan's expected ranking and artifact paths, the example's decision-log claim, and "fixed 30 s" hook timeout wording.
+- Verification: `npx tsc --noEmit` passed; `npx vitest run` 456 tests / 42 files; `cargo test --manifest-path src-tauri/Cargo.toml` 49 tests; `cargo check` clean.
+
 ## 2026-09-24 - Full Defect-Fix Pass and Documentation Truth Pass
 
 - Whole-repo defect review and fix pass; the review record, including the items left unfixed, is `docs/REVIEW_FULL_AUDIT_2026-09.md`.

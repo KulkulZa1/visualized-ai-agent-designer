@@ -128,7 +128,7 @@ Checkboxes for all 17 tool permissions. Each shows a **risk level** (low / mediu
 
 Pre and post execution scripts. During workflow runs only **Hook**-role nodes run their pre-hook; hooks on other nodes run only when you click **Run hook** here, and post-hooks never run during runs. Each hook:
 - Must be a path within your workspace root (enforced by Rust path validation)
-- Runs with a **30-second timeout**
+- Runs with a **30-second timeout** from this tab; during a workflow run a Hook node uses its own **Timeout** (max 1 hour)
 - Is logged to `.harness/audit.log.jsonl`
 - Can require **user consent** (a confirmation dialog when run from this tab; during a workflow run such a hook is not run and the run stops)
 

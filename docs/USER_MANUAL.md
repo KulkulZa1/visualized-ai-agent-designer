@@ -90,7 +90,7 @@ npm run tauri -- build
 ```
 
 Latest verified baseline (2026-09-24): TypeScript passed, Vitest 456 tests /
-42 files passed, 45 Rust tests passed, and the frontend build passed. Tauri dev
+42 files passed, 49 Rust tests passed, and the frontend build passed. Tauri dev
 launch and the MSI/NSIS package build were verified in an earlier pass and not
 re-run.
 

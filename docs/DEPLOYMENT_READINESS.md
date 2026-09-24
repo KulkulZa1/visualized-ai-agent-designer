@@ -22,7 +22,7 @@ rows come from earlier passes and were not re-run.
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
 | Frontend tests | `npx vitest run` | Passed, 456 tests / 42 files (2026-09-24) |
-| Rust tests | `npm run test:rust` | Passed, 45 Rust tests (2026-09-24) |
+| Rust tests | `npm run test:rust` | Passed, 49 Rust tests (2026-09-24) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |

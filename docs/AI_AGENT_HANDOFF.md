@@ -13,7 +13,7 @@ Verified in this pass:
 
 - TypeScript: `npx tsc --noEmit` passed.
 - Unit tests: `npx vitest run` passed, 456 tests in 42 files.
-- Rust tests: `cargo test` passed, 45 tests.
+- Rust tests: `cargo test` passed, 49 tests.
 - Web build: `npm run build` passed with a known large chunk warning.
 - Tauri dev launch (earlier pass, not re-run): `npm run tauri -- dev` launched the desktop binary and WebView2.
 - Tauri packaging (earlier pass, not re-run): `npm run tauri -- build` produced MSI and NSIS installers.

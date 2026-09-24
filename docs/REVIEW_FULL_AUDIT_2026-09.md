@@ -16,12 +16,25 @@ and repository-hygiene changes were not.
 |---|---|
 | `npx tsc --noEmit` | 0 errors |
 | `npx vitest run` | 456 tests / 42 files pass (was 288 / 30) |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | 45 tests pass (was 30) |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 49 tests pass (was 30) |
 | `npm run build` | Passes (existing chunk-size warnings only) |
 | `cargo check --release` | Passes without the `devtools` feature |
 
-Not verified here: live provider calls (no network/keys), a real Tauri window,
-and installer smoke tests on a clean machine.
+Live check (2026-09-24, free keyless OpenAI-compatible endpoint
+`https://text.pollinations.ai/openai`, model `openai` = gpt-oss-20b, synthetic
+data only): the Rust `check_provider_health` / `call_openai_api` custom-endpoint
+path passed; then the Purchasing Decision example ran headlessly through the real
+run loop (`useWorkflowExecution` → scheduler → provider adapter → Rust
+`call_openai_api` over a temporary localhost bridge; only the Tauri IPC transport
+and workspace file access were substituted). This found the native `tool_calls`
+defect below. After the fix, agents read files and wrote
+`.harness/artifacts/ranking.md` through tools, and the evaluator's scores matched
+the rubric exactly (SUP-A 92.0 > SUP-B 89.5 > SUP-C 43.5). The run still ended
+`error`: at ~30 s per call on the free tier, the Report Writer's third step went
+past the example's 90 s node timeout.
+
+Not verified here: a click-through run in the Tauri window (screen-control access
+was declined) and installer smoke tests on a clean machine.
 
 ## Fixed — critical / high
 
@@ -29,6 +42,7 @@ and installer smoke tests on a clean machine.
 |---|---|---|
 | Providers | Dotted Claude IDs (`claude-sonnet-4.6`, used across the app) were sent verbatim → Anthropic 404 on every call, while preflight (hyphenated ID) passed | Normalized to API IDs in `providerAdapter.ts` and in Rust (`normalize_anthropic_model`) |
 | Providers | OpenAI requests sent `reasoning: {effort}` and `max_tokens` → 400 on GPT-5.x / o-series | `openai_chat_body`: `max_completion_tokens` + `reasoning_effort` for OpenAI; custom endpoints keep `max_tokens` |
+| Providers | (found live) OpenAI-compatible servers that parse the model's tool intent (gpt-oss behind vLLM, Pollinations) reply with native `tool_calls` and no `content` → every agent failed "Failed to parse OpenAI response" at its first tool call; a tool call next to text was silently dropped | `openai_reply_text` renders the first native call in the run loop's `<tool_call>` protocol; an empty reply reports its `finish_reason` |
 | Security | Model-issued `bash` commands ran through PowerShell with a hard-coded `consentGranted: true` (prompt injection → arbitrary commands) | **User decision:** agent shell execution blocked; `execute_inline_command` IPC removed |
 | Data | Save → reload rewired or dropped edges for canvas-built workflows (node IDs vs positional `agent-<i>`) | `toWorkflowDef` writes positional IDs, drops dangling edges |
 | Data | Undo after loading a workflow resurrected the previous graph under the new file name; Ctrl+S then overwrote it | Undo history cleared on load/reset; no-op writes not recorded |
@@ -56,6 +70,7 @@ and installer smoke tests on a clean machine.
 - CLI `--workspace` parsing; VS Code host path containment and OpenAI key exfiltration.
 - UI: first-run "Open Workspace" button + Ctrl+Shift+O; Ctrl+L / Ctrl+. / Ctrl+Shift+Z; shortcuts ignored while typing; real valid/invalid badge; working command-palette actions; Ctrl+S validates; session restore; Generate asks before overwriting; Context tab no longer writes mock snapshots; status bar overlap; stale Claude pricing.
 - Repo: build artifacts and personal settings untracked; `outputs/` ignored; `.gitattributes`; generated root `CLAUDE.md` moved to `examples/`.
+- Found by the live check: `docs/E2E_DEMO_PLAN.md` listed an expected ranking that contradicts its own rubric (SUP-B ≈ 96.0 first; the rubric gives SUP-A 92.0 > SUP-B 89.5 > SUP-C 43.5) and artifact paths the code does not use; the purchasing example claimed its memory node appends to `.harness/decision-log.jsonl`, which the runtime never writes; several docs still said workflow hooks have a fixed 30 s timeout (they use the Hook node's `timeoutSeconds`; 30 s is the default and the Hooks-tab timeout).
 - Found by a second (regression) review of this pass and fixed: LangGraph feedback edges are emitted as a conditional-edge template (an unconditional back edge looped until `GraphRecursionError`); Stop now releases the run promptly instead of blocking new runs until an in-flight provider call times out; a paid provider call is no longer started after the node's deadline; hook nodes run with their own `timeoutSeconds` (was a fixed 30 s); text typed during an editor save stays unsaved; Ctrl+L / Ctrl+. no longer fire while typing. A final review found that the longer hook timeout would have frozen the window: `execute_hook` (and `list_workspace_files`) were plain sync Tauri commands, which run on the main thread. Both now use `#[tauri::command(async)]` (thread pool), and Stop no longer waits for a running hook to finish.
 
 ## User decisions (2026-09-24)

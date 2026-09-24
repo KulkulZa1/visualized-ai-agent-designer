@@ -152,9 +152,9 @@ score = 100
 
 Applied to the inputs above the expected ranking is:
 
-1. **SUP-B** ≈ 96.0 (best on quality, lead time, has cert; region penalty)
-2. **SUP-A** ≈ 92.0 (cheapest qualified APAC supplier)
-3. **SUP-C** ≈ 56.6 (cheap but no cert, slow, defects high)
+1. **SUP-A** = 92.0 (price −1.0, quality −12.0, APAC region bonus +5)
+2. **SUP-B** = 89.5 (price −2.5, quality −8.0; best quality and lead time, but no region bonus)
+3. **SUP-C** = 43.5 (late −7.5, missing ISO9001 −30, quality −24.0, region bonus +5)
 
 Verification test should compare the agent-produced ranking against the
 deterministic computation within ±2 points. This protects against model
@@ -167,10 +167,10 @@ non-determinism while still catching obviously wrong agent reasoning.
 | Item | Path | Source |
 |---|---|---|
 | Spec parse | audit `info` entries × 1 | agent-0 |
-| Score table | snapshot `agent-1/<id>.json` | agent-1 |
-| Risk verdict | snapshot `agent-2/<id>.json` | agent-2 |
-| Ranking report | `.harness/artifacts/<runId>/ranking.md` | agent-3 |
-| Decision log entry | `.harness/decision-log.jsonl` (appended) | agent-4 |
+| Score table | snapshot `.harness/snapshots/<id>.json` (indexed per node in `index.json`) | agent-1 |
+| Risk verdict | snapshot `.harness/snapshots/<id>.json` | agent-2 |
+| Ranking report | `.harness/artifacts/ranking.md` (only if the model calls `fs.write`) | agent-3 |
+| Decision log | memory key `decision-log`, current run only (not written to disk) | agent-4 |
 
 ---
 
