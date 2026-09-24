@@ -261,6 +261,14 @@ fn str_of(value: &Value) -> String {
     value.as_str().unwrap_or_default().to_string()
 }
 
+/// gpt-oss behind some servers leaks template tokens into the name
+/// ("read_file<|channel|>commentary") or keeps its namespace ("functions.read_file").
+fn clean_tool_name(raw: &Value) -> String {
+    let raw = raw.as_str().unwrap_or_default();
+    let name = raw.split("<|").next().unwrap_or(raw).trim();
+    name.strip_prefix("functions.").unwrap_or(name).to_string()
+}
+
 fn parse_anthropic(value: &Value) -> Result<ChatReply, String> {
     let blocks = value["content"].as_array().map(Vec::as_slice).unwrap_or_default();
     let text = blocks
@@ -289,7 +297,7 @@ fn parse_openai(value: &Value) -> Result<ChatReply, String> {
         .iter()
         .map(|c| ToolCall {
             id: c["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string).unwrap_or_else(generated_id),
-            name: str_of(&c["function"]["name"]),
+            name: clean_tool_name(&c["function"]["name"]),
             args: args_from_wire(&c["function"]["arguments"]),
         })
         .collect();
@@ -305,7 +313,7 @@ fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
         .iter()
         .map(|c| ToolCall {
             id: c["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string).unwrap_or_else(generated_id),
-            name: str_of(&c["function"]["name"]),
+            name: clean_tool_name(&c["function"]["name"]),
             args: args_from_wire(&c["function"]["arguments"]),
         })
         .collect();
@@ -531,6 +539,24 @@ mod tests {
         assert_eq!(reply.tool_calls[1].name, "fs_write");
         assert!(!reply.tool_calls[1].id.is_empty());
         assert_eq!(reply.tool_calls[1].args, json!({}));
+    }
+
+    #[test]
+    fn strips_leaked_template_tokens_and_namespace_from_tool_names() {
+        // Seen live from gpt-oss behind an OpenAI-compatible server.
+        let reply = parse_openai(&json!({"choices": [{"message": {"tool_calls": [
+            {"id": "a", "function": {"name": "read_file<|channel|>commentary", "arguments": "{}"}},
+            {"id": "b", "function": {"name": "functions.fs_write", "arguments": "{}"}}
+        ]}, "finish_reason": "tool_calls"}]}))
+        .unwrap();
+        let names: Vec<&str> = reply.tool_calls.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["read_file", "fs_write"]);
+
+        let reply = parse_ollama(&json!({"message": {"content": "", "tool_calls": [
+            {"function": {"name": "grep<|channel|>commentary", "arguments": {}}}
+        ]}}))
+        .unwrap();
+        assert_eq!(reply.tool_calls[0].name, "grep");
     }
 
     #[test]
