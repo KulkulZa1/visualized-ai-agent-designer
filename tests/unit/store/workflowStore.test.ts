@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
 import { AgentRole } from "@/types/agent";
+import { workflowDefSchema } from "@/schemas/workflowSchema";
 import type { Edge } from "@xyflow/react";
 
 beforeEach(() => {
@@ -134,6 +135,18 @@ describe("workflowStore", () => {
     const { nodes, edges } = useWorkflowStore.getState();
     const nameOf = (id: string) => nodes.find((n) => n.id === id)?.data.name;
     expect(edges.map((e) => `${nameOf(e.source)}->${nameOf(e.target)}`)).toEqual(["Worker->Critic"]);
+  });
+
+  it("saves a node stopped by the run as idle, so the file still validates", () => {
+    const store = useWorkflowStore.getState();
+    store.addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
+    store.updateNodeData("n1", { status: "stopped" });
+
+    const def = useWorkflowStore.getState().toWorkflowDef();
+
+    expect(useWorkflowStore.getState().nodes[0].data.status).toBe("stopped"); // canvas keeps it
+    expect(def.agents[0].status).toBe("idle");
+    expect(workflowDefSchema.safeParse(def).success).toBe(true);
   });
 
   it("toWorkflowDef serializes label and kind from edge data", () => {

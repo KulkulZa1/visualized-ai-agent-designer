@@ -35,4 +35,5 @@ export const STATUS_COLORS = {
   waiting: { dot: "#e5a142", label: "waiting" },
   done:    { dot: "#7c9eff", label: "done"    },
   error:   { dot: "#e07575", label: "error"   },
+  stopped: { dot: "#9097a3", label: "stopped" },
 } as const;

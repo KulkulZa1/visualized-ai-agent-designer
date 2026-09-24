@@ -38,6 +38,7 @@ export const BaseAgentNode = memo(function BaseAgentNode({ data, selected }: Nod
         borderLeft: d.status === "running" ? `3px solid ${ACCENT}` :
                     d.status === "done"    ? `3px solid ${GREEN}` :
                     d.status === "error"   ? `3px solid ${RED}` :
+                    d.status === "stopped" ? `3px solid ${MUTED}` :
                     `1px solid ${selected ? ACCENT : BORDER}`,
         boxShadow: selected
           ? `0 0 0 3px rgba(229,161,66,0.18), 0 12px 32px rgba(0,0,0,0.5)`

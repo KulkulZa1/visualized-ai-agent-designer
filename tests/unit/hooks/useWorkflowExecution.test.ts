@@ -236,6 +236,8 @@ describe("useWorkflowExecution", () => {
 
     expect(run?.agents.A.status).toBe("stopped");
     expect(run?.agents.A.error).toBeUndefined();
+    // The canvas node shows it too.
+    expect(useWorkflowStore.getState().nodes[0].data.status).toBe("stopped");
   });
 
   it("marks a hook node stopped when the run is stopped while its hook runs", async () => {
@@ -249,6 +251,7 @@ describe("useWorkflowExecution", () => {
 
     expect(run?.agents.Gate.status).toBe("stopped");
     expect(run?.agents.Gate.error).toBeUndefined();
+    expect(useWorkflowStore.getState().nodes[0].data.status).toBe("stopped");
   });
 
   it("shows a helper as stopped when the run is stopped while it works", async () => {

@@ -114,6 +114,7 @@ export function WorkflowCanvas() {
               if (data.status === "running") return "rgba(229,161,66,0.8)";
               if (data.status === "done")    return "rgba(95,191,127,0.7)";
               if (data.status === "error")   return "rgba(224,117,117,0.7)";
+              if (data.status === "stopped") return "rgba(144,151,163,0.6)";
               return MINIMAP_COLORS[data.role] ?? "#5d6473";
             }}
             nodeStrokeWidth={0}

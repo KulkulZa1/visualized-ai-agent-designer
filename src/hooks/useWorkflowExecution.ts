@@ -408,7 +408,7 @@ export function useWorkflowExecution() {
               if (isRunCancelled()) {
                 // Stopped while the hook ran; the process ends at its own timeout.
                 updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
-                updateNodeData(nodeId, { status: "idle" });
+                updateNodeData(nodeId, { status: "stopped" });
                 return;
               }
               hookFailed = true;
@@ -660,7 +660,7 @@ export function useWorkflowExecution() {
         if (isRunCancelled()) {
           // Stopped while this node was working: not a failure of the node.
           updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
-          updateNodeData(nodeId, { status: "idle" });
+          updateNodeData(nodeId, { status: "stopped" });
           return;
         }
         updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
