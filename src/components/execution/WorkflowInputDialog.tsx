@@ -10,6 +10,7 @@
 import { useState, useRef, useCallback } from "react";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
+import { entryAgentIds } from "@/services/execution/entryNodes";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { ROLE_META } from "@/utils/nodeColors";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
@@ -113,13 +114,18 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
   const meta     = useWorkflowStore((s) => s.meta);
   const nodes    = useWorkflowStore((s) => s.nodes);
   const edges    = useWorkflowStore((s) => s.edges);
+  const executionSettings = useWorkflowStore((s) => s.executionSettings);
   const llmProvider = useExecutionStore((s) => s.llmProvider);
   const continueOnError = useExecutionStore((s) => s.continueOnError);
   const setContinueOnError = useExecutionStore((s) => s.setContinueOnError);
 
-  // Detect entry-point nodes (no incoming edges)
-  const incomingSet = new Set(edges.map((e) => e.target));
-  const entryNodes  = nodes.filter((n) => !incomingSet.has(n.id));
+  // Entry agents receive the prompt (same rule as the run loop)
+  const entryIds    = entryAgentIds(nodes, edges);
+  const entryNodes  = nodes.filter((n) => entryIds.has(n.id));
+  const executionModeLabel =
+    executionSettings.maxParallel <= 1
+      ? "sequential (maxParallel 1)"
+      : `bounded parallel up to ${executionSettings.maxParallel}`;
 
   const [userInput,        setUserInput]        = useState("");
   const [filePaths,        setFilePaths]        = useState<string[]>([]);
@@ -407,7 +413,7 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
           background: "var(--surface)",
         }}>
           <span style={{ flex: 1, fontSize: 10, color: "var(--hint)" }}>
-            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · sequential topological order · streaming simulated
+            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · {executionModeLabel} · streaming simulated
           </span>
           <button onClick={onCancel} style={{
             padding: "7px 16px", border: "1px solid var(--border-md)", borderRadius: 5,

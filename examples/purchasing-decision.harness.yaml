@@ -163,12 +163,13 @@ agents:
     maxSteps: 1
     timeoutSeconds: 30
     description: >
-      Appends one JSONL line to .harness/decision-log.jsonl per workflow run:
-      { runId, timestamp, topSupplierId, verdict, reportPath }.
+      Collects the scoring, verdict and report outputs under the decision-log
+      memory key for this run. No model call; nothing is written to disk.
     promptSource:
       type: inline
       content: |
-        Memory node — no model call. The runtime appends a JSONL line per run.
+        Memory node — no model call. The runtime stores the upstream outputs
+        under the decision-log memory key for this run (not on disk).
     tools:
       - fs.append
       - fs.read

@@ -75,15 +75,15 @@ use /v1)"*. Covered by a new Rust mock-server test.
 ### 5. LOW — stale agent-worktree tests polluted the suite
 `vitest` swept up test copies under `.claude/worktrees/…` that import modules
 absent from this repo, reporting 3 failed files on every run. Excluded
-`**/.claude/**` (and `src-tauri`) in the vitest config. Real suite: 28 files,
-272 tests.
+`**/.claude/**` (and `src-tauri`) in the vitest config. Current real suite:
+30 files, 284 tests.
 
 ---
 
 ## Verification
 
 - `npx tsc --noEmit` — 0 errors
-- `npx vitest run` — 272/272 pass (28 files)
+- `npx vitest run` — 284/284 pass (30 files)
 - `cargo test` — 30/30 pass (incl. new 404-hint test)
 - `npm run build` — production bundle builds; Monaco + workers emitted locally;
   bundle scan shows no live CDN reference

@@ -11,6 +11,12 @@ const NODE_HEIGHT = 160;  // approximate node height with token bar
 const RANK_SEP    = 80;   // vertical gap between layers
 const NODE_SEP    = 40;   // horizontal gap between nodes in same layer
 
+type EdgeData = { edgeKind?: string };
+
+function isFeedbackEdge(edge: Edge): boolean {
+  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
+}
+
 export function applyDagreLayout(
   nodes: AgentNode[],
   edges: Edge[],
@@ -25,7 +31,7 @@ export function applyDagreLayout(
   nodes.forEach((n) => g.setNode(n.id, { width: NODE_WIDTH, height: NODE_HEIGHT }));
   edges.forEach((e) => {
     // feedback edges are reversed for layout purposes to avoid upward arrows
-    if (e.type === "feedback") g.setEdge(e.target, e.source);
+    if (isFeedbackEdge(e)) g.setEdge(e.target, e.source);
     else g.setEdge(e.source, e.target);
   });
 

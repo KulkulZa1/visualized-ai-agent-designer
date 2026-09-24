@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
 import { AgentRole } from "@/types/agent";
+import type { Edge } from "@xyflow/react";
 
 beforeEach(() => {
   useWorkflowStore.getState().reset();
@@ -70,12 +71,121 @@ describe("workflowStore", () => {
     expect(isDirty).toBe(false);
   });
 
+  it("loadWorkflow preserves connection label and kind in edge data", () => {
+    useWorkflowStore.getState().loadWorkflow({
+      meta: { name: "Loaded", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+      agents: [
+        makeDefaultAgentNode("a", AgentRole.Gateway, { x: 0, y: 0 }).data,
+        makeDefaultAgentNode("b", AgentRole.Worker, { x: 200, y: 0 }).data,
+      ],
+      connections: [{
+        id: "edge-1",
+        sourceAgentId: "agent-0",
+        targetAgentId: "agent-1",
+        label: "approved",
+        edgeKind: "control",
+      }],
+      executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+      nodePositions: {},
+    });
+
+    const edge = useWorkflowStore.getState().edges[0];
+    expect(edge.label).toBe("approved");
+    expect(edge.type).toBe("control");
+    expect(edge.data).toEqual({ label: "approved", edgeKind: "control" });
+  });
+
   it("toWorkflowDef serializes current state", () => {
     const store = useWorkflowStore.getState();
     store.addNode(makeDefaultAgentNode("n1", AgentRole.Orchestrator, { x: 10, y: 20 }));
     const def = store.toWorkflowDef();
     expect(def.agents).toHaveLength(1);
-    expect(def.nodePositions["n1"]).toEqual({ x: 10, y: 20 });
+    // Saved agents are identified by list position, matching loadWorkflow.
+    expect(def.nodePositions["agent-0"]).toEqual({ x: 10, y: 20 });
+  });
+
+  it("round-trips a canvas-built workflow without dropping or rewiring edges", () => {
+    const store = useWorkflowStore.getState();
+    store.addNode(makeDefaultAgentNode("node-a", AgentRole.Orchestrator, { x: 10, y: 20 }));
+    store.addNode(makeDefaultAgentNode("node-b", AgentRole.Worker, { x: 300, y: 40 }));
+    store.addNode(makeDefaultAgentNode("node-c", AgentRole.Critic, { x: 600, y: 60 }));
+    store.onConnect({ source: "node-c", target: "node-b", sourceHandle: null, targetHandle: null });
+
+    const def = useWorkflowStore.getState().toWorkflowDef();
+    useWorkflowStore.getState().loadWorkflow(def);
+
+    const { nodes, edges } = useWorkflowStore.getState();
+    const nameOf = (id: string) => nodes.find((n) => n.id === id)?.data.name;
+    expect(edges.map((e) => `${nameOf(e.source)}->${nameOf(e.target)}`)).toEqual(["Critic->Worker"]);
+    expect(nodes.map((n) => n.position)).toEqual([{ x: 10, y: 20 }, { x: 300, y: 40 }, { x: 600, y: 60 }]);
+  });
+
+  it("keeps edges attached to the same agents after deleting a middle node and reloading", () => {
+    const store = useWorkflowStore.getState();
+    store.addNode(makeDefaultAgentNode("agent-0", AgentRole.Orchestrator, { x: 0, y: 0 }));
+    store.addNode(makeDefaultAgentNode("agent-1", AgentRole.Gateway, { x: 200, y: 0 }));
+    store.addNode(makeDefaultAgentNode("agent-2", AgentRole.Worker, { x: 400, y: 0 }));
+    store.addNode(makeDefaultAgentNode("agent-3", AgentRole.Critic, { x: 600, y: 0 }));
+    store.onConnect({ source: "agent-2", target: "agent-3", sourceHandle: null, targetHandle: null });
+    useWorkflowStore.getState().removeNode("agent-1");
+
+    useWorkflowStore.getState().loadWorkflow(useWorkflowStore.getState().toWorkflowDef());
+
+    const { nodes, edges } = useWorkflowStore.getState();
+    const nameOf = (id: string) => nodes.find((n) => n.id === id)?.data.name;
+    expect(edges.map((e) => `${nameOf(e.source)}->${nameOf(e.target)}`)).toEqual(["Worker->Critic"]);
+  });
+
+  it("toWorkflowDef serializes label and kind from edge data", () => {
+    const store = useWorkflowStore.getState();
+    store.addNode(makeDefaultAgentNode("n1", AgentRole.Gateway, { x: 0, y: 0 }));
+    store.addNode(makeDefaultAgentNode("n2", AgentRole.Worker, { x: 200, y: 0 }));
+    useWorkflowStore.setState({
+      edges: [{
+        id: "edge-1",
+        source: "n1",
+        target: "n2",
+        data: { label: "approved", edgeKind: "feedback" },
+      } as Edge],
+    });
+
+    const def = useWorkflowStore.getState().toWorkflowDef();
+
+    expect(def.connections[0]).toMatchObject({
+      id: "edge-1",
+      sourceAgentId: "agent-0",
+      targetAgentId: "agent-1",
+      label: "approved",
+      edgeKind: "feedback",
+    });
+  });
+
+  describe("undo history", () => {
+    it("loadWorkflow starts a fresh history so undo cannot resurrect the previous workflow", () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("a1", AgentRole.Orchestrator, { x: 0, y: 0 }));
+      store.addNode(makeDefaultAgentNode("a2", AgentRole.Worker, { x: 200, y: 0 }));
+      const other = useWorkflowStore.getState().toWorkflowDef();
+      useWorkflowStore.getState().reset();
+      useWorkflowStore.getState().addNode(makeDefaultAgentNode("b1", AgentRole.Critic, { x: 0, y: 0 }));
+
+      useWorkflowStore.getState().loadWorkflow(other);
+      useWorkflowStore.temporal.getState().undo();
+      useWorkflowStore.temporal.getState().undo();
+
+      expect(useWorkflowStore.getState().nodes.map((n) => n.data.name)).toEqual(["Orchestrator", "Worker"]);
+      expect(useWorkflowStore.temporal.getState().pastStates).toHaveLength(0);
+    });
+
+    it("does not record history entries for writes that leave nodes and edges unchanged", () => {
+      useWorkflowStore.getState().addNode(makeDefaultAgentNode("a1", AgentRole.Worker, { x: 0, y: 0 }));
+      const before = useWorkflowStore.temporal.getState().pastStates.length;
+
+      useWorkflowStore.getState().markClean("flow.harness.yaml");
+      useWorkflowStore.getState().updateMeta({ description: "changed" });
+
+      expect(useWorkflowStore.temporal.getState().pastStates).toHaveLength(before);
+    });
   });
 
   describe("updateEdgeLabel", () => {

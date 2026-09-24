@@ -4,27 +4,28 @@ Harness Studio is a local-first Tauri desktop app for designing, validating,
 running, and inspecting multi-agent AI workflows.
 
 The current app is not just a mockup: the canvas, workflow YAML load/save,
-provider adapters, read-only CLI, read/test MCP server, Tauri desktop launch,
-and installer build have all been exercised locally. Some important surfaces
-are still intentionally partial, especially true parallel scheduling, real
-provider streaming, durable run artifacts, and OS keychain storage.
+provider adapters, bounded parallel scheduling, read-only CLI, read/test MCP
+server, Tauri desktop launch, and installer build have all been exercised
+locally. Some important surfaces are still intentionally partial, especially
+real provider streaming, durable run artifacts, process isolation, and OS
+keychain storage.
 
 ## Current Status
 
 Source of truth: [docs/DEPLOYMENT_READINESS.md](docs/DEPLOYMENT_READINESS.md)
 
-Verified on 2026-05-18:
+Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an earlier pass and were not re-run):
 
 | Area | Result |
 |---|---|
 | TypeScript | `npx tsc --noEmit` passed |
-| Frontend/unit tests | `npx vitest run` passed, 229 tests / 26 files |
-| Rust tests | `cargo test` passed, 25 tests |
+| Frontend/unit tests | `npx vitest run` passed, 456 tests / 42 files |
+| Rust tests | `cargo test` passed, 50 tests |
 | Frontend build | `npm run build` passed |
 | Tauri dev app | `npm run tauri -- dev` launched `agent-workflow-builder.exe` and WebView2 |
 | Tauri package | `npm run tauri -- build` produced MSI and NSIS installers |
 | CLI | `project status`, `provider list`, valid and missing workflow cases tested |
-| MCP | stdio initialize, `tools/list`, `project_status`, `validate_workflow`, path rejection, and `run_tests` tested |
+| MCP | stdio initialize, `tools/list` (8 tools), `project_status`, `validate_workflow`, path rejection, and `run_tests` tested |
 
 ## Real vs Mock
 
@@ -32,17 +33,21 @@ Verified on 2026-05-18:
 |---|---|
 | Visual workflow editor | Implemented |
 | YAML examples and validation | Implemented |
-| Agent execution | Implemented sequentially in topological order |
+| Agent execution | Implemented with dependency-aware bounded parallel scheduling |
 | Agent independence | Logical per-node prompt/model/output/log state, not process isolation |
-| True parallel scheduling | Not implemented |
+| Parallel scheduling | Independent forward-edge branches run up to `executionSettings.maxParallel`; feedback edges are excluded |
+| Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`) confined to the open workspace; `bash`/`run_command` are disabled and refused |
+| Hooks during runs | Only Hook-role nodes run their pre-hook; hooks on agent nodes run only manually from the Hooks tab |
 | Provider calls | Implemented for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints |
 | Gemini direct adapter | Planned/catalog only |
 | Streaming | Simulated UI chunks after full provider response |
+| Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` | Saved and shown in the UI (labeled), not applied at runtime |
 | Context inspector | Useful preview plus partial run data; not a complete durable trace |
 | Artifact viewer | Mock placeholders; real persistence service exists but execution is not wired to it |
 | API key storage | localStorage/env development path; OS keychain not implemented |
 | CLI | Read-only v0 |
-| MCP | Read/test v0, no writes, no workflow execution |
+| MCP | Read/test v0 (8 tools), no writes, no workflow execution |
+| VS Code extension | Experimental scaffold; most commands do not work yet |
 
 ## Run Locally
 
@@ -70,14 +75,18 @@ npm run mcp
 - Remote Ollama gateways: treat as cloud/hosted; use explicit base URL and, if needed, `OLLAMA_REMOTE_API_KEY`.
 - OpenAI/Anthropic: require API keys and send prompts/context to cloud providers.
 
-Do not commit secrets. The CLI and MCP print credential references only.
+Do not commit secrets. The CLI and MCP print credential references only; MCP
+`get_recent_logs` returns audit-log entries with best-effort (not guaranteed)
+secret redaction.
 
 ## Documentation
 
 - [Quick Start](docs/QUICK_START.md)
 - [Installation](docs/INSTALLATION.md)
+- [Air-Gapped Deployment](docs/AIRGAPPED.md)
 - [MCP Usage](docs/MCP_USAGE.md)
 - [Security](docs/SECURITY.md)
 - [Project Status](docs/PROJECT_STATUS.md)
 - [Deployment Readiness](docs/DEPLOYMENT_READINESS.md)
+
 

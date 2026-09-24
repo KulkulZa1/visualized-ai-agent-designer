@@ -34,7 +34,8 @@ npm run dev
 5. Click `Load this workflow`.
 
 Verified behavior: this creates a 7-node / 8-edge workflow and the run dialog
-states `sequential topological order` and `streaming simulated`.
+shows the current execution mode, for example `bounded parallel up to 4`, plus
+`streaming simulated`.
 
 ## Provider Setup
 
@@ -72,9 +73,10 @@ Do not hard-code keys or commit them.
 
 Click `Run`, provide the initial prompt, and start the workflow.
 
-Current execution mode is sequential. Independent branches do not run
-concurrently yet. Outputs are tracked per node, and AuditStrip shows events by
-kind and agent.
+Current execution mode is dependency-aware bounded parallel scheduling.
+Independent forward-edge branches can run concurrently up to the workflow's
+`maxParallel` setting. Outputs are tracked per node, and AuditStrip shows events
+by kind and agent.
 
 ## What Is Real vs Preview
 

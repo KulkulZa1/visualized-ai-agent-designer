@@ -18,6 +18,7 @@ import {
   matchGoal, recommendProvider, GOAL_TEMPLATES,
   type GoalTemplate, type ProviderCategory, type MatchResult,
 } from "@/services/wizard/goalTemplates";
+import { buildRecommendationBrief } from "@/services/wizard/recommendationBrief";
 import { templateToWorkflowDef } from "@/services/wizard/templateToWorkflow";
 import { ROLE_META } from "@/utils/nodeColors";
 
@@ -51,14 +52,12 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
   const openaiKey    = useExecutionStore((s) => s.openaiApiKey);
   const ollamaKey    = useExecutionStore((s) => s.ollamaApiKey);
   const customUrl    = useExecutionStore((s) => s.customApiUrl);
-  const ollamaUrl    = useExecutionStore((s) => s.ollamaBaseUrl);
-  const llmProvider  = useExecutionStore((s) => s.llmProvider);
-
   const avail = {
     hasOpenAIKey:      Boolean(openaiKey),
     hasAnthropicKey:   Boolean(apiKey),
-    // We don't ping Ollama here — we just check if a URL is set and provider is configured.
-    ollamaReady:       Boolean(ollamaUrl) && (llmProvider === "ollama" || llmProvider === "auto"),
+    // This wizard does not ping providers. A configured/default Ollama URL is
+    // setup data, not proof that the local server is running.
+    ollamaReady:       false,
     hasOllamaCloudKey: Boolean(ollamaKey),
     hasCustomEndpoint: Boolean(customUrl),
   };
@@ -92,6 +91,10 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
   // ── If a template is selected, show detail view ────────────────────────────
   if (selected) {
     const rec = recommendProvider(selected, avail);
+    const selectedMatch =
+      matches.find((match) => match.template.id === selected.id) ??
+      { template: selected, score: 0, matchedTriggers: [] };
+    const brief = buildRecommendationBrief(selectedMatch, rec);
     const provLabel = PROVIDER_LABELS[rec.category];
     const diff = DIFFICULTY_BADGE[selected.difficulty];
 
@@ -114,6 +117,21 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
             <p style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginTop: 0 }}>
               {selected.description}
             </p>
+
+            <Section title="Why this recommendation">
+              <div style={{
+                fontSize: 11, color: "var(--text)", lineHeight: 1.5,
+                padding: "7px 10px", background: "var(--surface-3)",
+                border: "1px solid var(--border)", borderRadius: 5, marginBottom: 7,
+              }}>
+                {brief.headline}
+              </div>
+              <ul style={listStyle}>
+                {brief.why.map((item, i) => (
+                  <li key={i} style={liStyle}>{item}</li>
+                ))}
+              </ul>
+            </Section>
 
             {/* Recommended provider card */}
             <div style={{
@@ -180,7 +198,7 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
             {/* Expected artifacts */}
             <Section title="Expected artifacts">
               <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
-                {selected.expectedArtifacts.map((a) => (
+                {brief.evidenceArtifacts.map((a) => (
                   <span key={a} style={{
                     fontSize: 11, fontFamily: MONO, padding: "2px 7px", borderRadius: 4,
                     background: "var(--surface-3)", color: "var(--muted)",
@@ -192,8 +210,16 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
             {/* Verification */}
             <Section title="How to verify success">
               <p style={{ fontSize: 11, color: "var(--muted)", lineHeight: 1.6, margin: 0 }}>
-                {selected.verificationMethod}
+                {brief.verification}
               </p>
+            </Section>
+
+            <Section title="Next steps">
+              <ol style={listStyle}>
+                {brief.nextSteps.map((step, i) => (
+                  <li key={i} style={liStyle}>{step}</li>
+                ))}
+              </ol>
             </Section>
 
             {/* Privacy + safety */}
@@ -202,11 +228,11 @@ export function WorkflowWizard({ onClose }: WorkflowWizardProps) {
                 fontSize: 11, color: "var(--muted)", lineHeight: 1.6,
                 padding: "6px 10px", background: "var(--surface-3)", borderRadius: 5,
               }}>
-                {selected.privacyNotes}
+                {brief.privacy}
               </div>
-              {selected.safetyWarnings.length > 0 && (
+              {brief.safetyWarnings.length > 0 && (
                 <ul style={{ ...listStyle, marginTop: 6 }}>
-                  {selected.safetyWarnings.map((w, i) => (
+                  {brief.safetyWarnings.map((w, i) => (
                     <li key={i} style={{ ...liStyle, color: "#f59e0b" }}>⚠ {w}</li>
                   ))}
                 </ul>

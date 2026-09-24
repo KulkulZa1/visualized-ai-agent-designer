@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   GOAL_TEMPLATES, matchGoal, recommendProvider,
 } from "@/services/wizard/goalTemplates";
+import { buildRecommendationBrief } from "@/services/wizard/recommendationBrief";
 import { templateToWorkflowDef } from "@/services/wizard/templateToWorkflow";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 
@@ -147,6 +148,52 @@ describe("recommendProvider()", () => {
     });
     expect(rec.ready).toBe(false);
     expect(rec.setupSteps.length).toBeGreaterThan(0);
+  });
+
+  it("prefers local setup for local-friendly templates when no provider is ready", () => {
+    const rec = recommendProvider(template, {
+      hasOpenAIKey: false, hasAnthropicKey: false,
+      ollamaReady: false, hasOllamaCloudKey: false, hasCustomEndpoint: false,
+    });
+
+    expect(rec.ready).toBe(false);
+    expect(rec.category).toBe("local");
+    expect(rec.reason).toContain("Ollama");
+  });
+});
+
+describe("buildRecommendationBrief()", () => {
+  it("explains why a matched template was recommended", () => {
+    const match = matchGoal("automate blog writing")[0];
+    const provider = recommendProvider(match.template, {
+      hasOpenAIKey: false, hasAnthropicKey: false,
+      ollamaReady: true, hasOllamaCloudKey: false, hasCustomEndpoint: false,
+    });
+
+    const brief = buildRecommendationBrief(match, provider);
+
+    expect(brief.templateId).toBe("blog-automation");
+    expect(brief.confidence).toBe("strong");
+    expect(brief.why.join(" ")).toContain("blog");
+    expect(brief.why.join(" ")).toContain("Workflow shape");
+    expect(brief.provider.ready).toBe(true);
+    expect(brief.evidenceArtifacts).toEqual(match.template.expectedArtifacts);
+    expect(brief.nextSteps.join(" ")).toContain("verify");
+  });
+
+  it("includes provider setup steps when the provider is not ready", () => {
+    const match = matchGoal("improve harness studio itself")[0];
+    const provider = recommendProvider(match.template, {
+      hasOpenAIKey: false, hasAnthropicKey: false,
+      ollamaReady: false, hasOllamaCloudKey: false, hasCustomEndpoint: false,
+    });
+
+    const brief = buildRecommendationBrief(match, provider);
+
+    expect(brief.provider.ready).toBe(false);
+    expect(brief.nextSteps.length).toBeGreaterThan(0);
+    expect(brief.nextSteps.join(" ")).toMatch(/Install|Open Settings|Create an API key|Return/);
+    expect(brief.privacy).toBe(match.template.privacyNotes);
   });
 });
 

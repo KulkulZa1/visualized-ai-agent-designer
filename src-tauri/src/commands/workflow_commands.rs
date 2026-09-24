@@ -1,4 +1,4 @@
-use crate::commands::fs_commands::resolve_safe_path;
+use crate::commands::fs_commands::{atomic_write, resolve_safe_path};
 use crate::error::{AppError, AppResult};
 use crate::models::workflow::WorkflowDef;
 use std::fs;
@@ -10,14 +10,8 @@ pub fn save_workflow(
     workflow: WorkflowDef,
 ) -> AppResult<()> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
-    if let Some(parent) = safe.parent() {
-        fs::create_dir_all(parent)?;
-    }
     let yaml = serde_yaml::to_string(&workflow)?;
-    let tmp = safe.with_extension("tmp");
-    fs::write(&tmp, &yaml)?;
-    fs::rename(&tmp, &safe)?;
-    Ok(())
+    atomic_write(&safe, yaml.as_bytes())
 }
 
 #[tauri::command]

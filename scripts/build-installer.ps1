@@ -113,34 +113,33 @@ if ($Offline) { Write-Warn "Offline mode: embedding full WebView2 installer (~15
 $conf.bundle.windows.webviewInstallMode.type = $targetWv2
 Write-Utf8NoBom -Path $tauriConf -Text ($conf | ConvertTo-Json -Depth 20)
 
-# ── Install JS dependencies ───────────────────────────────────────────────────
+# Everything that can fail runs inside try/finally so tauri.conf.json is restored
+# on success, failure, `exit` and Ctrl+C alike. Native commands are not redirected
+# with 2>&1: under $ErrorActionPreference = "Stop" in PowerShell 5.1 that turns the
+# first stderr line (e.g. an npm warning) into a terminating error.
+try {
+    # ── Install JS dependencies ───────────────────────────────────────────────
 
-Write-Step "Installing Node dependencies..."
-npm ci --prefer-offline 2>&1 | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" }
-if ($LASTEXITCODE -ne 0) {
-    # Restore config before failing
+    Write-Step "Installing Node dependencies..."
+    npm ci --prefer-offline | Select-Object -Last 3 | ForEach-Object { Write-Host "    $_" }
+    if ($LASTEXITCODE -ne 0) { Write-Fail "npm ci failed"; exit 1 }
+    Write-Ok "Node dependencies ready"
+
+    # ── Build ─────────────────────────────────────────────────────────────────
+
+    $buildArgs = if ($Dev) { @("run", "tauri", "--", "build", "--debug") } `
+                 else      { @("run", "tauri", "--", "build") }
+
+    Write-Step "Compiling ($BuildLabel, this takes 5-15 min on first run)..."
+    Write-Host ""
+
+    & npm @buildArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Build failed. Check errors above."
+        exit 1
+    }
+} finally {
     Write-Utf8NoBom -Path $tauriConf -Text $confText
-    Write-Fail "npm ci failed"; exit 1
-}
-Write-Ok "Node dependencies ready"
-
-# ── Build ─────────────────────────────────────────────────────────────────────
-
-$buildArgs = if ($Dev) { @("run", "tauri", "--", "build", "--debug") } `
-             else      { @("run", "tauri", "--", "build") }
-
-Write-Step "Compiling ($BuildLabel, this takes 5-15 min on first run)..."
-Write-Host ""
-
-& npm @buildArgs 2>&1
-$buildExit = $LASTEXITCODE
-
-# Restore tauri.conf.json regardless of outcome
-Write-Utf8NoBom -Path $tauriConf -Text $confText
-
-if ($buildExit -ne 0) {
-    Write-Fail "Build failed. Check errors above."
-    exit 1
 }
 
 Write-Host ""

@@ -411,7 +411,14 @@ function cmdProviderList() {
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
-const [cmd, sub, arg] = args.filter((a) => !a.startsWith("--"));
+// Flags that take a value: the argument after them is that value, not a positional.
+const VALUE_FLAGS = new Set(["--workspace"]);
+const positionals = [];
+for (let i = 0; i < args.length; i++) {
+  if (VALUE_FLAGS.has(args[i])) i++;
+  else if (!args[i].startsWith("--")) positionals.push(args[i]);
+}
+const [cmd, sub, arg] = positionals;
 
 if (cmd === "project" && sub === "status") {
   cmdProjectStatus();

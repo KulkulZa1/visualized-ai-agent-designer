@@ -916,7 +916,7 @@ agents:
     maxTokens: 0
     maxSteps: 1
     timeoutSeconds: 30
-    description: Appends a JSONL line per workflow run to .harness/decision-log.jsonl.
+    description: Collects the scoring, verdict and report outputs under the decision-log memory key for this run. No model call; nothing is written to disk.
     promptSource: { type: inline, content: "" }
     tools: [fs.append, fs.read]
     memoryRead: [scored-suppliers, risk-verdict, report-path]

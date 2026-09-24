@@ -5,7 +5,7 @@
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useAuditStore } from "@/store/auditStore";
-import { writeWorkspaceFile } from "@/ipc/tauriCommands";
+import { readWorkspaceFile, writeWorkspaceFile } from "@/ipc/tauriCommands";
 import { makeAuditEntry } from "@/utils/logger";
 import {
   generateClaudeMd,
@@ -20,6 +20,9 @@ export type GenerateTarget = "claude_md" | "agents_md" | "langgraph" | "crewai" 
 interface GenerateOptions {
   hookTemplate?: HookTemplate;
   customPath?: string;
+  /** Asked before replacing an existing file whose content differs. Without it,
+   *  existing files are never overwritten. */
+  confirmOverwrite?: (relativePath: string) => boolean | Promise<boolean>;
 }
 
 const DEFAULT_PATHS: Record<GenerateTarget, string> = {
@@ -38,7 +41,7 @@ export function useGenerator() {
   async function generate(
     target: GenerateTarget,
     opts: GenerateOptions = {}
-  ): Promise<{ content: string; path: string }> {
+  ): Promise<{ content: string; path: string; written: boolean }> {
     const def = toWorkflowDef();
 
     let content: string;
@@ -70,16 +73,21 @@ export function useGenerator() {
         throw new Error(`Unknown generate target: ${target}`);
     }
 
-    // Write to disk if workspace is open
-    if (workspacePath) {
-      await writeWorkspaceFile(workspacePath, relativePath, content);
-      addAuditEntry(makeAuditEntry("file_write", true, {
-        path: relativePath,
-        details: `Generated ${target}: ${(content.length / 1024).toFixed(1)} KB`,
-      }));
+    // Write to disk if workspace is open — but never silently replace a file the
+    // user may have edited (e.g. a hand-written CLAUDE.md or customized hook).
+    if (!workspacePath) return { content, path: relativePath, written: false };
+    const existing = await readWorkspaceFile(workspacePath, relativePath).catch(() => null);
+    if (existing !== null && existing !== content) {
+      const confirmed = opts.confirmOverwrite ? await opts.confirmOverwrite(relativePath) : false;
+      if (!confirmed) return { content, path: relativePath, written: false };
     }
+    await writeWorkspaceFile(workspacePath, relativePath, content);
+    addAuditEntry(makeAuditEntry("file_write", true, {
+      path: relativePath,
+      details: `Generated ${target}: ${(content.length / 1024).toFixed(1)} KB`,
+    }));
 
-    return { content, path: relativePath };
+    return { content, path: relativePath, written: true };
   }
 
   return { generate, hasWorkspace: !!workspacePath };

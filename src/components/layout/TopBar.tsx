@@ -1,11 +1,13 @@
+import { useMemo } from "react";
 import { useStore } from "zustand";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
-import { useWorkflow } from "@/hooks/useWorkflow";
+import { defaultWorkflowFileName, useWorkflow } from "@/hooks/useWorkflow";
 import { useExecutionStore } from "@/store/executionStore";
 import { useUIStore } from "@/store/uiStore";
 import type { AgentRun } from "@/types/execution";
+import { validateWorkflow } from "@/utils/validateWorkflow";
 
 interface TopBarProps {
   onOpenGenerate: () => void;
@@ -53,8 +55,11 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
   const meta      = useWorkflowStore((s) => s.meta);
   const isDirty   = useWorkflowStore((s) => s.isDirty);
   const filePath  = useWorkflowStore((s) => s.filePath);
-  const nodeCount = useWorkflowStore((s) => s.nodes.length);
-  const edgeCount = useWorkflowStore((s) => s.edges.length);
+  const nodes     = useWorkflowStore((s) => s.nodes);
+  const edges     = useWorkflowStore((s) => s.edges);
+  const nodeCount = nodes.length;
+  const edgeCount = edges.length;
+  const isValid   = useMemo(() => validateWorkflow(nodes, edges).valid, [nodes, edges]);
   const workspace = useWorkspaceStore((s) => s.workspacePath);
   const { save }  = useWorkflow();
   const isRunning   = useExecutionStore((s) => s.isRunning);
@@ -88,7 +93,7 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
 
   const handleSave = () => {
     if (!workspace) return;
-    const name = relPath ?? `${meta.name.toLowerCase().replace(/\s+/g, "-")}.harness.yaml`;
+    const name = relPath ?? defaultWorkflowFileName(meta.name);
     save(name).catch(console.error);
   };
 
@@ -163,7 +168,7 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
           <>
             <span><b style={{ color: "var(--text)" }}>{nodeCount}</b> nodes</span>
             <span><b style={{ color: "var(--text)" }}>{edgeCount}</b> edges</span>
-            <span style={{ color: "var(--green)" }}>● valid</span>
+            <span style={{ color: isValid ? "var(--green)" : "var(--red)" }}>● {isValid ? "valid" : "invalid"}</span>
           </>
         )}
         <Sep/>

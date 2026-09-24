@@ -20,6 +20,17 @@ const MAX_SNAPSHOTS_PER_NODE = 20;
 /** Maps nodeId → array of snapshotIds (insertion order preserved). */
 type SnapshotIndex = Record<string, string[]>;
 
+/** Index updates are read-modify-write. Serialize them per workspace so agents
+ *  finishing in parallel don't overwrite each other's index entries. */
+const indexQueues = new Map<string, Promise<unknown>>();
+
+function withIndexLock<T>(workspacePath: string, update: () => Promise<T>): Promise<T> {
+  const previous = indexQueues.get(workspacePath) ?? Promise.resolve();
+  const next = previous.then(update, update);
+  indexQueues.set(workspacePath, next.catch(() => undefined));
+  return next;
+}
+
 export class FileSnapshotRepository {
   constructor(private workspacePath: string) {}
 
@@ -64,13 +75,15 @@ export class FileSnapshotRepository {
   ): Promise<PersistedSnapshot> {
     const snap = snapshotRepo.create(input);
     await this.writeOne(snap);
-    const index = await this.readIndex();
-    index[snap.nodeId] = [...(index[snap.nodeId] ?? []), snap.id];
-    if (index[snap.nodeId].length > MAX_SNAPSHOTS_PER_NODE) {
-      // Keep the newest MAX_SNAPSHOTS_PER_NODE entries (last N of sorted array)
-      index[snap.nodeId] = index[snap.nodeId].slice(-MAX_SNAPSHOTS_PER_NODE);
-    }
-    await this.writeIndex(index);
+    await withIndexLock(this.workspacePath, async () => {
+      const index = await this.readIndex();
+      index[snap.nodeId] = [...(index[snap.nodeId] ?? []), snap.id];
+      if (index[snap.nodeId].length > MAX_SNAPSHOTS_PER_NODE) {
+        // Keep the newest MAX_SNAPSHOTS_PER_NODE entries (last N of sorted array)
+        index[snap.nodeId] = index[snap.nodeId].slice(-MAX_SNAPSHOTS_PER_NODE);
+      }
+      await this.writeIndex(index);
+    });
     return snap;
   }
 

@@ -154,7 +154,7 @@ export function EmptyCanvasHero() {
               <Step n={3} title="Configure your AI provider"
                 body="Open ⚙ Settings (top-right) to add an Anthropic or OpenAI key, or point Harness to a local Ollama server — no key required for local."/>
               <Step n={4} title="Run the workflow"
-                body="Press ▶ Run. Each agent executes in order; outputs chain automatically to downstream agents and memory nodes."/>
+                body="Press Run. Independent forward branches can run concurrently up to maxParallel; outputs still chain to downstream agents and memory nodes."/>
             </div>
 
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "center" }}>

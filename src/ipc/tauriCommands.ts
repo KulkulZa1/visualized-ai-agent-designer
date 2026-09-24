@@ -38,17 +38,10 @@ export async function executeHook(
   hookPath: string,
   agentId: string,
   env: Record<string, string>,
-  consentGranted: boolean
-): Promise<HookResult> {
-  return invoke<HookResult>("execute_hook", { workspacePath, hookPath, agentId, env, consentGranted });
-}
-
-export async function executeInlineCommand(
-  workspacePath: string,
-  command: string,
   consentGranted: boolean,
+  timeoutSecs?: number,
 ): Promise<HookResult> {
-  return invoke<HookResult>("execute_inline_command", { workspacePath, command, consentGranted });
+  return invoke<HookResult>("execute_hook", { workspacePath, hookPath, agentId, env, consentGranted, timeoutSecs });
 }
 
 export async function writeAuditEntry(workspacePath: string, entry: AuditEntry): Promise<void> {

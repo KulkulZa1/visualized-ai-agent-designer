@@ -496,8 +496,12 @@ export function recommendProvider(
     }
   }
 
-  // Nothing is ready — recommend the most user-friendly setup
-  const firstPreference = template.recommendedProviders[0];
+  // Nothing is ready. Prefer local setup for local-friendly templates, even
+  // when a cloud provider is the quality preference, so the first path remains
+  // private and does not imply a hidden cloud requirement.
+  const firstPreference = template.localFriendly && template.recommendedProviders.includes("local")
+    ? "local"
+    : template.recommendedProviders[0];
   if (firstPreference === "local") {
     return {
       category: "local",

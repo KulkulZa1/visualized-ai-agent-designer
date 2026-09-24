@@ -57,11 +57,46 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.handleInvoke = handleInvoke;
 const vscode = __importStar(require("vscode"));
+const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const providerBridge_1 = require("./providerBridge");
 // Workspace file helpers
+/**
+ * Resolves a webview-supplied relative path inside the host's workspace folder and
+ * returns its real path. The webview is untrusted: `..`, absolute paths and
+ * symlinks/junctions that lead outside the workspace are rejected.
+ */
+function resolveInsideWorkspace(workspacePath, relativePath) {
+    if (!workspacePath)
+        throw new Error("[HarnessVscode] No workspace folder is open.");
+    const root = fs.realpathSync(path.resolve(workspacePath));
+    const target = path.resolve(root, relativePath);
+    // Resolve links on the deepest part of the path that exists. lstat does not follow
+    // links, so a dangling link is realpath'd too (and fails) instead of being skipped.
+    let existing = target;
+    const tail = [];
+    for (;;) {
+        try {
+            fs.lstatSync(existing);
+            break;
+        }
+        catch { /* not created yet */ }
+        const parent = path.dirname(existing);
+        if (parent === existing)
+            break;
+        tail.unshift(path.basename(existing));
+        existing = parent;
+    }
+    const real = path.join(fs.realpathSync(existing), ...tail);
+    const norm = (p) => (process.platform === "win32" ? p.toLowerCase() : p);
+    const rootPrefix = root.endsWith(path.sep) ? root : root + path.sep;
+    if (norm(real) !== norm(root) && !norm(real).startsWith(norm(rootPrefix))) {
+        throw new Error(`[HarnessVscode] Path is outside the workspace: ${relativePath}`);
+    }
+    return real;
+}
 async function readWorkspaceFile(workspacePath, relativePath) {
-    const abs = vscode.Uri.file(path.join(workspacePath, relativePath));
+    const abs = vscode.Uri.file(resolveInsideWorkspace(workspacePath, relativePath));
     const bytes = await vscode.workspace.fs.readFile(abs);
     return Buffer.from(bytes).toString("utf-8");
 }
@@ -102,14 +137,19 @@ async function handleInvoke(command, args, credentials, workspacePath) {
             });
         }
         case "call_openai_api": {
-            const openaiKey = await credentials.getApiKey("openai");
+            const baseUrl = args.baseUrl != null ? String(args.baseUrl) : null;
+            // The stored OpenAI key only ever goes to OpenAI itself. A custom baseUrl (chosen
+            // by the webview) gets just the key the request carried, which may be empty.
+            const openaiKey = (0, providerBridge_1.isOfficialOpenAIEndpoint)(baseUrl)
+                ? await credentials.getApiKey("openai")
+                : undefined;
             return (0, providerBridge_1.callOpenAIApi)({
                 model: String(args.model ?? "gpt-4o-mini"),
                 system: String(args.system ?? ""),
                 userMessage: String(args.userMessage ?? ""),
                 apiKey: openaiKey ?? String(args.apiKey ?? ""),
                 maxTokens: Number(args.maxTokens ?? 2048),
-                baseUrl: args.baseUrl != null ? String(args.baseUrl) : null,
+                baseUrl,
                 reasoningEffort: args.reasoningEffort != null ? String(args.reasoningEffort) : null,
             });
         }
@@ -137,27 +177,24 @@ async function handleInvoke(command, args, credentials, workspacePath) {
             // For other providers, return a simple health stub
             return { ok: false, message: `${provider} health check not implemented in VS Code extension`, model_available: false, pull_command: null };
         }
+        // File commands always use the host's workspace folder; a webview-supplied
+        // args.workspacePath is ignored.
         case "read_workspace_file": {
-            const ws = String(args.workspacePath ?? workspacePath);
             const rel = String(args.relativePath ?? "");
-            return readWorkspaceFile(ws, rel);
+            return readWorkspaceFile(workspacePath, rel);
         }
-        case "list_workspace_files": {
-            const ws = String(args.workspacePath ?? workspacePath);
-            return listWorkspaceFiles(ws);
-        }
+        case "list_workspace_files":
+            return listWorkspaceFiles(resolveInsideWorkspace(workspacePath, ""));
         case "get_workspace_path":
             return workspacePath;
         case "load_workflow_file": {
-            const ws = String(args.workspacePath ?? workspacePath);
             const rel = String(args.relativePath ?? "");
-            return readWorkspaceFile(ws, rel);
+            return readWorkspaceFile(workspacePath, rel);
         }
         case "save_workflow_file": {
-            const ws = String(args.workspacePath ?? workspacePath);
             const rel = String(args.relativePath ?? "");
             const content = String(args.content ?? "");
-            const abs = vscode.Uri.file(path.join(ws, rel));
+            const abs = vscode.Uri.file(resolveInsideWorkspace(workspacePath, rel));
             await vscode.workspace.fs.writeFile(abs, Buffer.from(content, "utf-8"));
             return null;
         }

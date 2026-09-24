@@ -1,6 +1,9 @@
 # VS Code Extension Readiness Plan
 
-> **Status:** Architecture readiness only. No extension code exists.
+> **Status:** Experimental scaffold in `vscode-extension/` (extension host, webview
+> panel, credential service, provider bridge). Most commands do not work yet: the
+> command names do not match the webview. The host confines file access to the open
+> workspace folder and sends the stored OpenAI key only to api.openai.com.
 > **Goal:** Document the boundaries that must hold so a future VS Code extension
 > can reuse Harness Studio's workflow, provider, context, and artifact logic
 > without forking the codebase.
@@ -26,8 +29,10 @@
 
 1. Extract `FileService` interface. Today direct `@/ipc/tauriCommands`
    imports leak into snapshot/artifact services.
-2. Extract `ProviderAdapter` interface. Today `useWorkflowExecution` calls
-   `invoke("call_openai_api", ...)` directly.
+2. Extract `ProviderAdapter` interface. Largely done: `useWorkflowExecution`
+   calls `callProvider()` (`src/services/model-providers/providerAdapter.ts`),
+   which takes `invoke` as a parameter; the Rust provider commands are still
+   the only transport.
 3. Extract `CredentialService`. Today the renderer reads `localStorage`
    directly for keys.
 4. Extract `AuditService`. Today audit writes go via Tauri command.
@@ -115,7 +120,8 @@ The VS Code extension, when it exists, should support:
    layer behind a common contract.
 3. Once 1 and 2 land, extract `workflowEngine` from `useWorkflowExecution`.
 4. Only after the engine extraction is stable, create
-   `apps/vscode-extension/` and start the webview shell.
+   `apps/vscode-extension/` and start the webview shell. (An experimental
+   scaffold already exists at `vscode-extension/`; see Status above.)
 
 Estimated total effort to reach "extension is unblocked": **3–5 sessions**.
 Estimated effort to ship a usable extension after that: **another 3–5 sessions**.

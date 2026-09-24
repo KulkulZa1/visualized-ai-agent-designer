@@ -156,7 +156,17 @@ describe("callProvider — anthropic success path", () => {
       spy as unknown as InvokeFn,
     );
     expect(res.text).toBe("Claude response");
-    expect(spy).toHaveBeenCalledWith("call_claude_api", expect.objectContaining({ model: "claude-haiku-4.5" }));
+    // The UI/YAML use dotted display versions; the Anthropic API only accepts hyphenated IDs.
+    expect(spy).toHaveBeenCalledWith("call_claude_api", expect.objectContaining({ model: "claude-haiku-4-5" }));
+  });
+
+  it("sends already-valid Anthropic model IDs unchanged", async () => {
+    const spy = vi.fn().mockResolvedValue("Claude response");
+    await callProvider(
+      makeParams({ provider: "anthropic", model: "claude-sonnet-4-6" }),
+      spy as unknown as InvokeFn,
+    );
+    expect(spy).toHaveBeenCalledWith("call_claude_api", expect.objectContaining({ model: "claude-sonnet-4-6" }));
   });
 });
 
@@ -211,6 +221,14 @@ describe("callProvider — billing fallback", () => {
     const err = new Error("Network timeout");
     const spy = vi.fn().mockRejectedValue(err);
     await expect(callProvider(makeParams(), spy as unknown as InvokeFn)).rejects.toThrow("Network timeout");
+  });
+
+  it("never silently re-sends the prompt to a remote/cloud Ollama endpoint", async () => {
+    const spy = vi.fn().mockRejectedValue(new Error("billing: insufficient quota"));
+    await expect(
+      callProvider(makeParams({ ollamaBaseUrl: "https://ollama.com/api" }), spy as unknown as InvokeFn),
+    ).rejects.toThrow("insufficient quota");
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 

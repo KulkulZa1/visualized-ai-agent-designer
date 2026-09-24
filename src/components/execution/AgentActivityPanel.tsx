@@ -49,6 +49,18 @@ function edgeKindColor(kind: string | undefined): string {
     : "var(--blue)";
 }
 
+type EdgeData = { label?: string; edgeKind?: string };
+
+function getEdgeLabel(edge: { label?: unknown; data?: unknown }): string | undefined {
+  const dataLabel = (edge.data as EdgeData | undefined)?.label;
+  if (typeof dataLabel === "string") return dataLabel;
+  return typeof edge.label === "string" ? edge.label : undefined;
+}
+
+function getEdgeKind(edge: { type?: string; data?: unknown }): string | undefined {
+  return (edge.data as EdgeData | undefined)?.edgeKind ?? edge.type;
+}
+
 function copyText(text: string) {
   navigator.clipboard.writeText(text).catch(() => {/* ignore */});
 }
@@ -102,6 +114,15 @@ export function AgentActivityPanel({
   const edges      = useWorkflowStore((s) => s.edges);
   const currentRun = useExecutionStore((s) => s.currentRun);
   const agentRun   = useNodeExecutionData(nodeId);
+  const output     = agentRun?.output ?? "";
+
+  // All hooks must run before the early return below: the node can disappear
+  // while the panel is open (undo, delete, loading another workflow).
+  const handleCopy = useCallback(() => {
+    copyText(output);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }, [output]);
 
   const node = nodes.find((n) => n.id === nodeId);
   if (!node) return null;
@@ -110,14 +131,12 @@ export function AgentActivityPanel({
   const roleMeta = ROLE_META[data.role as keyof typeof ROLE_META] ?? { glyph: "●", tint: "var(--muted)" };
 
   // Connections
-  type EdgeData = { label?: string; edgeKind?: string };
-
   const upstream = edges
     .filter((e) => e.target === nodeId)
     .map((e) => ({
       id: e.id, source: e.source, target: e.target,
-      label: (e.data as EdgeData | undefined)?.label,
-      kind: (e.data as EdgeData | undefined)?.edgeKind,
+      label: getEdgeLabel(e),
+      kind: getEdgeKind(e),
       sourceName: nodes.find((n) => n.id === e.source)?.data.name ?? e.source,
     }));
 
@@ -125,8 +144,8 @@ export function AgentActivityPanel({
     .filter((e) => e.source === nodeId)
     .map((e) => ({
       id: e.id, source: e.source, target: e.target,
-      label: (e.data as EdgeData | undefined)?.label,
-      kind: (e.data as EdgeData | undefined)?.edgeKind,
+      label: getEdgeLabel(e),
+      kind: getEdgeKind(e),
       targetName: nodes.find((n) => n.id === e.target)?.data.name ?? e.target,
     }));
 
@@ -142,7 +161,6 @@ export function AgentActivityPanel({
   });
 
   const status  = agentRun?.status ?? "idle";
-  const output  = agentRun?.output ?? "";
   const hasRun  = status !== "idle" && status !== "waiting";
   const tokens  = agentRun?.tokenEstimate ?? 0;
   const budget  = data.tokens?.budget ?? 0;
@@ -151,12 +169,6 @@ export function AgentActivityPanel({
   const promptContent = data.promptSource.type === "inline"
     ? data.promptSource.content
     : `[From file: ${data.promptSource.type === "file" ? data.promptSource.path : "unknown"}]`;
-
-  const handleCopy = useCallback(() => {
-    copyText(output);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  }, [output]);
 
   return (
     <div style={{

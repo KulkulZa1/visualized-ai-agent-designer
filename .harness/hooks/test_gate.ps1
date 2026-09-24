@@ -3,7 +3,8 @@
 # Blocks the pipeline if any check fails.
 # Called as a pre-hook before Visual Inspector and Code Critic.
 
-$WORKSPACE = if ($env:WORKSPACE) { $env:WORKSPACE } else { "D:\toy_project\AI_agent" }
+# Default to the repository root (this script lives in <root>\.harness\hooks\).
+$WORKSPACE = if ($env:WORKSPACE) { $env:WORKSPACE } else { Split-Path (Split-Path $PSScriptRoot -Parent) -Parent }
 $PASS = 0
 $FAIL = 0
 

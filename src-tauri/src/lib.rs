@@ -11,7 +11,7 @@ use commands::{
     fs_commands::{
         list_workspace_files, open_workspace_dialog, read_workspace_file, write_workspace_file,
     },
-    process_commands::{execute_hook, execute_inline_command},
+    process_commands::execute_hook,
     workflow_commands::{load_workflow, save_workflow},
 };
 
@@ -31,13 +31,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_log::Builder::default().level(log_level).build())
-        .setup(|app| {
+        .setup(|_app| {
             // In debug builds: mark the window title and open DevTools automatically
             // so any frontend error or console.error is immediately visible.
             #[cfg(debug_assertions)]
             {
                 use tauri::Manager;
-                if let Some(window) = app.get_webview_window("main") {
+                if let Some(window) = _app.get_webview_window("main") {
                     let _ = window.set_title("Harness Studio [DEV]");
                     window.open_devtools();
                 }
@@ -53,7 +53,6 @@ pub fn run() {
             load_workflow,
             write_audit_entry,
             execute_hook,
-            execute_inline_command,
             call_claude_api,
             call_anthropic_api,
             call_openai_api,

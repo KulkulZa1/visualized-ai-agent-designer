@@ -1,5 +1,33 @@
 ﻿# Development Log
 
+## 2026-09-24 - Live Check Against a Free Cloud Model
+
+- Ran the Purchasing Decision example headlessly through the real run loop and the Rust `call_openai_api` (temporary localhost bridge in place of Tauri IPC) against the keyless endpoint `https://text.pollinations.ai/openai` (model `openai`, gpt-oss-20b), synthetic inputs only. A click-through run in the desktop window was not done.
+- Found and fixed (test-first): native `tool_calls` replies with no `content` failed every agent; `openai_reply_text` renders them as the run loop's `<tool_call>`. After the fix, tools ran (file read, `ranking.md` written) and the evaluator's scores matched the rubric; the run still ended `error` because the Report Writer's third ~30 s call passed the example's 90 s node timeout.
+- Doc truth fixes: the demo plan's expected ranking and artifact paths, the example's decision-log claim, and "fixed 30 s" hook timeout wording.
+- Verification: `npx tsc --noEmit` passed; `npx vitest run` 456 tests / 42 files; `cargo test --manifest-path src-tauri/Cargo.toml` 50 tests; `cargo check` clean.
+
+## 2026-09-24 - Full Defect-Fix Pass and Documentation Truth Pass
+
+- Whole-repo defect review and fix pass; the review record, including the items left unfixed, is `docs/REVIEW_FULL_AUDIT_2026-09.md`.
+- Security: agent shell execution disabled (`bash`/`run_command` refused, `execute_inline_command` removed); hooks no longer inherit provider API keys and need an open workspace; release builds no longer enable DevTools; `resolve_safe_path` blocks symlink/junction escapes for new files; atomic writes use unique temp names.
+- Hooks: only Hook-role nodes run during workflows; consent-required or failed hooks stop the run; Windows `.bat`/`.ps1`/`.sh` hooks run and large output no longer deadlocks; workflow hook runs are audited.
+- Providers: Claude IDs normalized; OpenAI uses `max_completion_tokens`/`reasoning_effort`; env-only keys work; preflight only contacts providers the run uses; billing fallback only to local Ollama; 5xx/529 retried.
+- Execution: file prompts read from the workspace; per-node timeouts enforced; no hidden 4096 max-token cap; failed runs end as `error`; single-run guard; gateway join and unmatched-route fixes; the task reaches entry agents behind hook/memory nodes.
+- UI/editor: per-tab unsaved buffers, binary-file guard, validated Ctrl+S, working Ctrl+Shift+O / Ctrl+L / Ctrl+. / Ctrl+Shift+Z, fresh undo history on load, session restore, command-palette actions, edge-preserving save.
+- MCP: 8 tools documented; notification and JSON-RPC error-code handling, `isError` results, `-`-prefixed filters rejected, `npx --no-install`. CLI accepts `--workspace` before the command. CrewAI/LangGraph exports parse as valid Python for all 7 examples.
+- Docs and in-app help (GuidePanel, QuickStartGuide) updated to match the code; settings that are still not applied (temperature, per-node fallback, gateway condition, prompt variables, workflow timeout/retries) are labeled.
+- Verification: `npx tsc --noEmit` passed; `npx vitest run` 456 tests / 42 files; `cargo test --manifest-path src-tauri/Cargo.toml` 45 tests; `npm run build` passed with Vite chunk warnings only.
+
+## 2026-06-11 - Hard Review: Scheduler, Feedback Validation, Parallel Wording
+
+- Ran baseline verification before edits: `npx tsc --noEmit`, `npx vitest run`, and `cargo test --manifest-path src-tauri/Cargo.toml` all passed.
+- Found a validator bug: feedback loops were checked through `edge.type`, but the app stores semantic feedback status in `edge.data.edgeKind`. Added `tests/unit/utils/validateWorkflow.test.ts` and fixed `validateWorkflow()`.
+- Found the same feedback-edge field bug in auto-layout. Added `tests/unit/utils/autoLayout.test.ts` and fixed feedback-edge reversal in `applyDagreLayout()`.
+- Found a scheduler bug: gateway skip logic only skipped direct unmatched successors, so descendants that depended solely on a skipped branch could still run. Added a regression test and fixed `runParallel()` to propagate branch-only skips while allowing shared joins to run.
+- Added scheduler protection for pure forward cycles so the runner rejects blocked graphs instead of silently finishing without executing anything.
+- Fixed stale user-facing execution wording in the run dialog, guide assistant, example picker, generated CLAUDE.md output, and current status docs.
+- Focused verification passed after the fixes: scheduler tests, workflow validation tests, auto-layout tests, generator tests, and `npx tsc --noEmit`.
 ## 2026-05-18 - Execution Verification, MCP Hardening, Templates, Packaging
 
 - Ran real verification: `npx tsc --noEmit`, `npx vitest run` (229 tests / 26 files), `cargo test` (25 tests), `npm run build`, `npm run tauri -- dev`, and `npm run tauri -- build`.
@@ -175,7 +203,7 @@ provider behaviour, or secret-handling code was modified.
 - Created `docs/UX_REVIEW.md` ??P0?밣3 pain points, beginner-vs-expert
   capability matrix, recommended UX priorities.
 - Created `docs/CLI_MCP_PLAN.md` ??read-only CLI v0 surface (3 commands),
-  full read-only MCP tool surface, write-tool deferral, safety constraints.
+  read/test MCP tool surface, write-tool deferral, safety constraints.
 - Created `docs/VS_CODE_EXTENSION_PLAN.md` ??reusable layers, 5 blockers,
   target monorepo architecture, capability matrix, security constraints.
 - Created `docs/MATLAB_INTEGRATION_PLAN.md` ??5 integration options ranked
@@ -600,4 +628,5 @@ The prototype uses `.design/` as the authoritative source. Key values confirmed:
 - Zustand 5 + zundo for undo/redo
 - YAML for workflow files (human-readable, diffable)
 - `std::fs` in Rust commands (not `tauri_plugin_fs`) for centralized path validation
+
 

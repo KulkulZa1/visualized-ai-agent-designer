@@ -38,12 +38,6 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
     updateNodeData(nodeId, { tools });
   };
 
-  const addGuard = (nodeId: string) => {
-    updateNodeData(nodeId, {
-      preHook: { path: ".harness/hooks/destructive_guard.sh", requireConsent: false },
-    });
-  };
-
   return (
     <div style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.62)",
@@ -87,7 +81,7 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
         </div>
 
         {(() => {
-          const bashNodes = nodes.filter((n) => n.data.tools.includes(ToolPermission.Bash) && !n.data.preHook?.path);
+          const bashNodes = nodes.filter((n) => n.data.tools.includes(ToolPermission.Bash));
           if (bashNodes.length === 0) return null;
           return (
             <div style={{ margin: "8px 12px 0", padding: "7px 10px", borderRadius: 6,
@@ -95,9 +89,9 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
               fontSize: 11, color: "var(--red)", display: "flex", gap: 6, alignItems: "flex-start" }}>
               <NodeIcon name="alert-triangle" size={13} color="var(--red)" />
               <span>
-                <strong>{bashNodes.length} node{bashNodes.length > 1 ? "s have" : " has"} bash enabled without a hook gate:</strong>{" "}
+                <strong>{bashNodes.length} node{bashNodes.length > 1 ? "s list" : " lists"} the bash tool:</strong>{" "}
                 {bashNodes.map((n) => n.data.name).join(", ")}.
-                Bash lets agents run arbitrary shell commands — add a destructive_guard hook or remove the permission.
+                Agent-issued shell commands are disabled at runtime, so these calls will fail — remove the permission.
               </span>
             </div>
           );
@@ -149,13 +143,12 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
                       </td>
                       <td style={bodyCell({ left: 230, minWidth: 126 })}>
                         {needsGate ? (
-                          <button onClick={() => addGuard(node.id)} style={{
-                            border: "1px solid rgba(224,117,117,0.45)", borderRadius: 5,
-                            background: "rgba(224,117,117,0.09)", color: "var(--red)",
-                            fontSize: 10, fontFamily: "inherit", cursor: "pointer", padding: "4px 7px",
-                          }}>
-                            Add guard
-                          </button>
+                          // Hooks on agent nodes are not run during workflow runs, so no
+                          // hook can gate these tools; only removing the permission helps.
+                          <span style={{ fontSize: 10, color: "var(--red)" }}
+                            title="Hooks on agent nodes are not run during workflow runs; remove the permission to reduce risk.">
+                            no runtime gate
+                          </span>
                         ) : (
                           <span style={{ fontSize: 10, color: row.hasHookGate ? "var(--green)" : "var(--hint)" }}>
                             {row.hasHookGate ? "gated" : "not needed"}

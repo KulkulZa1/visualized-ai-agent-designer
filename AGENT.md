@@ -17,14 +17,15 @@ provider/model choices, CLI/MCP access, and safety boundaries.
 
 ## Current Verified Baseline
 
-Last execution pass: 2026-05-18.
+Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
+`npm run tauri -- build` rows come from an earlier pass and were not re-run).
 
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 229 tests / 26 files |
-| `cargo test` | Passed, 25 tests |
-| `npm run build` | Passed; Vite large chunk and empty `vendor-react` warnings remain |
+| `npx vitest run` | Passed, 456 tests / 42 files |
+| `cargo test` | Passed, 50 tests |
+| `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
 | CLI | Read-only commands tested |
@@ -48,6 +49,7 @@ Last execution pass: 2026-05-18.
 - Rule-based Workflow Wizard / Create from Goal, including blog automation and Harness Studio self-improvement templates.
 - Rule-based Guide Assistant. It makes no live AI calls.
 - Provider settings and adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
+- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`), confined to the open workspace.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
 - Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
 - CLI v0:
@@ -60,6 +62,9 @@ Last execution pass: 2026-05-18.
   - `validate_workflow`
   - `run_tests`
   - `run_cargo_tests`
+  - `list_providers` (metadata and credential references only)
+  - `list_artifacts` (file metadata only; empty until runs persist artifacts)
+  - `get_recent_logs` (`.harness/audit.log.jsonl` entries with best-effort secret redaction, not a guarantee)
 - Tauri package build for Windows MSI and NSIS installer.
 
 ## Honest Limitations
@@ -68,17 +73,21 @@ Last execution pass: 2026-05-18.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is simulated in the UI after a full provider response is received.
 - Context snapshots are partial and not a complete durable provider request trace.
-- Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop.
+- Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
+- Agent shell execution is disabled: `bash`/`run_command` calls are refused and not advertised to the model. Re-enabling needs a per-command consent system.
+- During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. Hooks marked `requireConsent` are not run automatically (the node fails and the run stops).
+- Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
+- The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).
 
 ## Development Rules
 
 1. Do not create `AGEND.md`; use `AGENT.md`.
 2. Do not claim mock/partial features are production-ready.
 3. Do not commit secrets or print raw API key values.
-4. Keep CLI/MCP read-only unless a permission and audit system exists.
+4. Keep CLI read-only and MCP limited to read/test tools unless a permission and audit system exists.
 5. Do not add hidden cloud calls or background provider checks.
 6. Do not add arbitrary command execution.
 7. Use `resolve_safe_path()` for Rust file paths.
@@ -110,4 +119,5 @@ Last execution pass: 2026-05-18.
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
 4. Add installer smoke tests on a clean Windows user profile.
 5. Wire real GitHub Actions CI (tsc + vitest + cargo test on every push).
+
 

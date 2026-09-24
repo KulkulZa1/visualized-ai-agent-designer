@@ -35,7 +35,7 @@ export function generateClaudeMd(def: WorkflowDef): string {
   lines.push("## Project context");
   lines.push("");
   lines.push(`This project uses a multi-agent harness with **${agents.length}** agents.`);
-  lines.push(`The workflow is defined in \`.harness/${meta.name.toLowerCase().replace(/\s+/g, "-")}.harness.yaml\`.`);
+  lines.push(`The workflow is defined in \`${meta.name.toLowerCase().replace(/\s+/g, "-")}.harness.yaml\`.`);
   lines.push(`All config files live under \`.harness/\`. All edits should be reflected there.`);
   lines.push("");
 
@@ -100,15 +100,15 @@ export function generateClaudeMd(def: WorkflowDef): string {
       lines.push(`- **${a.name}**: \`${risky.join(", ")}\``);
     });
     lines.push("");
-    lines.push("All hook executions require user consent and are logged to `.harness/audit.log.jsonl`.");
+    lines.push("Hook scripts run when a Hook node executes; hooks with `requireConsent: true` are not run automatically — run them manually from the Hooks tab.");
     lines.push("");
   }
 
   // ── Execution notes ──────────────────────────────────────────────────────
   lines.push("## Execution settings");
   lines.push("");
-  lines.push(`- Configured max parallel agents: **${def.executionSettings.maxParallel}**`);
-  lines.push("- Runtime note: Harness Studio currently runs nodes sequentially in topological order. Parallel scheduling is planned.");
+  lines.push(`- Max parallel agents: **${def.executionSettings.maxParallel}**`);
+  lines.push("- Runtime note: Harness Studio runs independent forward-edge branches concurrently up to this limit. Feedback edges do not create scheduling dependencies.");
   lines.push(`- Workflow timeout: **${def.executionSettings.timeoutSeconds}s**`);
   lines.push(`- Retry on failure: **${def.executionSettings.retryOnFailure}**`);
   lines.push("");

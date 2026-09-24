@@ -71,7 +71,7 @@ agents:
   - name: My Agent           # required
     role: worker             # required ??see Role enum
     model: claude-sonnet-4.6 # required (empty string "" for hook/memory)
-    temperature: 0.7         # required, 0.0 ??2.0
+    temperature: 0.7         # required, 0.0-2.0; saved but not yet sent to providers
     maxTokens: 4096          # required, 0 ??200000
     maxSteps: 20             # required, 1 ??1000
     timeoutSeconds: 300      # required, 1 ??86400
@@ -89,11 +89,11 @@ agents:
     status: idle             # required ??starting state
     # ?? Optional fields ????????????????????????????????
     description: "..."       # human-readable purpose
-    condition: "..."         # gateway nodes only ??routing condition text
-    preHook:                 # runs before the node executes
+    condition: "..."         # gateway nodes only - shown as a badge; not sent to the model at runtime
+    preHook:                 # hook nodes: runs when the run reaches the node; agent nodes: manual only (Hooks tab)
       path: .harness/hooks/my-hook.sh
-      requireConsent: true
-    postHook:                # runs after the node executes
+      requireConsent: true   # true: never run automatically - the node fails and the run stops
+    postHook:                # manual only (Hooks tab); never run during workflow runs
       path: .harness/hooks/post.sh
       requireConsent: false
 ```
@@ -162,8 +162,13 @@ Grant only the tools each agent actually needs.
 | `fs.write` | medium | Write/overwrite a file |
 | `test` | medium | Run a test suite |
 | `puppeteer` | medium | Browser automation |
-| `bash` | high | Execute shell commands |
+| `bash` | high | Execute shell commands (disabled: refused at runtime) |
 | `subagent_dispatch` | high | Spawn sub-agents |
+
+At runtime only `read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, and
+`fs.append` execute, all confined to the open workspace. `bash` is refused until
+a per-command consent system exists; the other values currently have no executor
+(a call returns an error).
 
 ### tokens
 
@@ -216,15 +221,15 @@ If `edgeKind` is omitted, it defaults to `dataflow`.
 
 ```yaml
 executionSettings:
-  maxParallel: 4      # 1-32, schema/reserved today (runtime is sequential)
-  timeoutSeconds: 300 # 1??600 ??hard timeout for the whole workflow
-  retryOnFailure: false
-  maxRetries: 0       # 0??0
+  maxParallel: 4      # 1-32, active bounded-parallel scheduler limit
+  timeoutSeconds: 300 # 1-3600; saved but not yet enforced
+  retryOnFailure: false # saved but not yet enforced
+  maxRetries: 0       # 0-10; saved but not yet enforced
 ```
 
 ---
 
-Runtime note, verified 2026-05-18: Harness Studio currently ignores `maxParallel` during execution. The React runner executes nodes one at a time in topological order. This field is kept for future parallel scheduling and workflow portability.
+Runtime note, verified 2026-06-11: Harness Studio uses `maxParallel` during execution. Independent forward-edge branches can run concurrently up to this limit. Feedback edges are excluded from dependency scheduling, and gateway routes can skip unmatched branches. As of 2026-09-24, `timeoutSeconds`, `retryOnFailure`, and `maxRetries` here are saved but not enforced; each agent's own `timeoutSeconds` is enforced.
 
 ---
 

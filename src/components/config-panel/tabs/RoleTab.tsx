@@ -5,6 +5,7 @@ import type { AgentNodeData } from "@/types/agent";
 import { ROLE_META } from "@/utils/nodeColors";
 import { ModelPicker } from "@/components/config-panel/ModelPicker";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
+import { isReasoningModel } from "@/services/model-providers/providerAdapter";
 import { Sec, Fld, Input, Select } from "../shared";
 
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
@@ -220,7 +221,7 @@ function FallbackModelSection({ nodeId, data }: { nodeId: string; data: AgentNod
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: hasFallback ? 10 : 0 }}>
           <div style={{ fontSize: 11, color: "var(--hint)", display: "flex", alignItems: "center", gap: 5 }}>
             <NodeIcon name="history" size={11} color="var(--blue)"/>
-            Auto-switch when primary fails
+            Auto-switch when primary fails (not yet applied during runs)
           </div>
           <button
             onClick={hasFallback ? disable : enable}
@@ -297,11 +298,6 @@ function FallbackModelSection({ nodeId, data }: { nodeId: string; data: AgentNod
 
 type ThinkDepth = "none" | "low" | "medium" | "high";
 const THINK_DEPTHS: ThinkDepth[] = ["none", "low", "medium", "high"];
-
-function isReasoningModel(model: string): boolean {
-  return model.startsWith("gpt-5.5") || model.startsWith("o3") ||
-         model.startsWith("o4") || model.startsWith("o1");
-}
 
 function ThinkDepthSelector({ nodeId, data }: { nodeId: string; data: AgentNodeData }) {
   const upd = useWorkflowStore((s) => s.updateNodeData);
@@ -438,6 +434,9 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
             fontSize: 9, color: "var(--hint)", marginTop: 2 }}>
             <span>precise</span><span>balanced</span><span>creative</span>
           </div>
+          <div style={{ fontSize: 10, color: "var(--hint)", marginTop: 3 }}>
+            Saved and exported, but not yet sent to providers during runs.
+          </div>
         </Fld>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <Fld label="Max steps">
@@ -460,7 +459,7 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
             placeholder='e.g. "confidence >= 0.6" or "issues > 0 and iter < 3"'
             mono/>
           <div style={{ fontSize: 10, color: "var(--hint)", marginTop: 4 }}>
-            Shown as a badge on the canvas node. Evaluated at runtime by the gateway's prompt logic.
+            Shown as a badge on the canvas node. Not sent to the model at runtime — put routing rules in the gateway's prompt.
           </div>
         </Sec>
       )}

@@ -13,7 +13,11 @@ ALLOWED_DOMAINS = [
 def check_url(url: str) -> bool:
     from urllib.parse import urlparse
     try:
-        domain = urlparse(url).netloc.lower().lstrip("www.")
+        parsed = urlparse(url)
+        # A backslash ends the host for browsers and fetchers, but not for urlparse.
+        if parsed.scheme not in ("http", "https") or "\\" in parsed.netloc:
+            return False
+        domain = (parsed.hostname or "").removeprefix("www.")
         return any(domain == d or domain.endswith("." + d) for d in ALLOWED_DOMAINS)
     except Exception:
         return False

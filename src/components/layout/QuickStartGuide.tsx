@@ -139,7 +139,7 @@ function TabStartHere() {
         body="Click ⚙ Settings in the top-right corner. Add an API key for Anthropic or OpenAI, or point the app to your local Ollama server. Ollama works without any API key."
       />
       <Step n={4} title="Run the workflow"
-        body="Press the ▶ Run button. A dialog will ask for a workflow topic/input. Fill it in and click Start. Agents execute in order — each one sends its output downstream to the next."
+        body="Press the Run button. A dialog will ask for a workflow topic/input. Fill it in and click Start. Independent forward branches can run concurrently up to maxParallel; downstream agents wait for required inputs."
       />
 
       <Alert type="info">
@@ -151,7 +151,7 @@ function TabStartHere() {
       <Alert type="warn">
         API keys entered in Settings are stored in browser localStorage only. They are
         never written to workflow files or sent anywhere other than the selected provider.
-        See Settings → Security for details.
+        See the storage note under each key field in ⚙ Settings.
       </Alert>
     </div>
   );
@@ -163,8 +163,9 @@ function TabConcepts() {
       <H2>Workflow concepts</H2>
       <P>
         A workflow is a directed graph of nodes (agents) and edges (data channels).
-        Nodes run in topological order. Each agent receives context from upstream nodes
-        and sends its output downstream.
+        Nodes run when their forward-edge dependencies are satisfied. Independent
+        branches can run concurrently up to maxParallel, while downstream agents wait
+        for required upstream outputs.
       </P>
 
       <div style={{ marginBottom: 16 }}>
@@ -176,9 +177,9 @@ function TabConcepts() {
         <Concept glyph="●" color="#5fbf7f" name="Worker" desc="Executes a specific task (coding, research, writing, etc.)." />
         <Concept glyph="◐" color="#e07575" name="Critic" desc="Reviews previous output and provides feedback or a pass/revise verdict." />
         <Concept glyph="▣" color="#b88bd9" name="Memory" desc="Stores key/value pairs that other agents can read across the run." />
-        <Concept glyph="✕" color="#d97757" name="Hook" desc="Runs a script at a defined point (pre/post agent). Requires consent." />
+        <Concept glyph="✕" color="#d97757" name="Hook" desc="Runs its pre-execution hook script when the run reaches it. Hooks marked 'require consent' are not run automatically; the run stops there." />
         <Concept glyph="⊕" color="#5fbf7f" name="Aggregator" desc="Collects outputs from multiple upstream agents and combines them." />
-        <Concept glyph="⬡" color="#7c9eff" name="Tool Caller" desc="Calls external tools (search, file read, bash) as part of a chain." />
+        <Concept glyph="⬡" color="#7c9eff" name="Tool Caller" desc="Calls workspace file tools (read, list, grep, write) as part of a chain. Shell commands (bash) are disabled." />
       </div>
 
       <div style={{ marginBottom: 14 }}>
@@ -205,7 +206,7 @@ function TabConcepts() {
         {[
           { name: "Canvas (center)", desc: "Main editing area. Drag nodes, draw edges, auto-layout with Ctrl+L." },
           { name: "Sidebar (left)", desc: "File tree for your workspace, plus a node list with filter chips." },
-          { name: "Config Panel (right)", desc: "5-tab inspector when a node is selected: Role / Prompt / Tools / Hooks / Memory." },
+          { name: "Config Panel (right)", desc: "6-tab inspector when a node is selected: Role / Prompt / Tools / Hooks / Memory / Context." },
           { name: "Audit Strip (bottom)", desc: "Real-time event log for the current session. Filter by agent or event kind." },
           { name: "Status Bar (very bottom)", desc: "Active agent indicator, provider mode, and quick status." },
         ].map(({ name, desc }) => (
@@ -225,8 +226,10 @@ function TabProviders() {
       <H2>Setting up AI providers</H2>
       <P>
         Harness Studio supports multiple AI providers. Open ⚙ Settings to configure them.
-        Only one provider is active at a time; it is used for all agents in the workflow
-        unless a fallback is configured per-node.
+        A fixed provider mode (e.g. Ollama, Anthropic, or Custom) is used for every agent.
+        In Auto mode the provider is chosen per node from its model name (gpt-*/o* → OpenAI,
+        claude-* → Anthropic, anything else → Ollama), falling back to Ollama when that
+        provider has no key.
       </P>
 
       {[
@@ -305,9 +308,9 @@ function TabProviders() {
       ))}
 
       <Alert type="info">
-        The per-node <strong>Model</strong> tab lets you set a primary model and an optional
-        fallback (e.g. fall back to Ollama if the primary hits a rate limit). Open the config
-        panel for any node and click the Role tab.
+        Each node's model is set in the config panel's <strong>Role</strong> tab. The optional
+        per-node fallback model there is saved with the workflow but is not applied during
+        runs yet.
       </Alert>
     </div>
   );
@@ -320,6 +323,7 @@ function TabShortcuts() {
       rows: [
         { keys: "Ctrl+E",         desc: "Open Example Picker" },
         { keys: "Ctrl+Shift+E",   desc: "Load Active Project harness instantly" },
+        { keys: "Ctrl+Shift+O",   desc: "Open workspace folder" },
         { keys: "Ctrl+K",         desc: "Command Palette" },
         { keys: "Ctrl+G",         desc: "Generate CLAUDE.md / agents / hooks" },
         { keys: "Ctrl+L",         desc: "Auto-layout canvas (Dagre LR)" },
@@ -334,6 +338,7 @@ function TabShortcuts() {
       rows: [
         { keys: "Ctrl+Z",         desc: "Undo" },
         { keys: "Ctrl+Y",         desc: "Redo" },
+        { keys: "Ctrl+Shift+Z",   desc: "Redo" },
         { keys: "Ctrl+D",         desc: "Duplicate selected node" },
         { keys: "Delete",         desc: "Remove selected node" },
       ],
@@ -393,12 +398,12 @@ function TabTroubleshoot() {
     },
     {
       q: "OpenAI quota exceeded / billing error",
-      a: "Check your usage at platform.openai.com/usage. If you've exhausted your free tier, add a payment method. The app will automatically fall back to Ollama if you have it configured.",
+      a: "Check your usage at platform.openai.com/usage. If you've exhausted your free tier, add a payment method. The app falls back to a local Ollama server (never Ollama Cloud or a remote gateway) if one is running with your Ollama model.",
       type: "warn",
     },
     {
       q: "Anthropic insufficient credits",
-      a: "Add credits at console.anthropic.com → Plans & Billing. The app will fall back to Ollama if configured.",
+      a: "Add credits at console.anthropic.com → Plans & Billing. The app falls back to a local Ollama server if one is running with your Ollama model.",
       type: "warn",
     },
     {
@@ -413,17 +418,17 @@ function TabTroubleshoot() {
     },
     {
       q: "Settings changes don't persist between launches",
-      a: "API keys and provider settings are stored in browser localStorage. They persist as long as you don't clear browser data. If you need permanent storage, use a .env.local file in your workspace.",
+      a: "API keys and provider settings are stored in browser localStorage. They persist as long as you don't clear browser data. Keys can also come from OS environment variables (OPENAI_API_KEY, ANTHROPIC_API_KEY, OLLAMA_API_KEY) set before launching the app; .env files are not read.",
       type: "info",
     },
     {
       q: "Hook execution blocked or shows 'consent required'",
-      a: "This is intentional. Hooks run arbitrary scripts. The consent dialog is shown before each hook execution. Review the hook path and approve it explicitly.",
+      a: "This is intentional: hooks run arbitrary scripts. Only the Hooks tab asks for consent, when you click Run hook there. In a workflow run, a hook node marked 'require consent' is not run automatically — the node fails and the run stops. Run it from the Hooks tab instead, or turn off 'require consent' after reviewing the script. Hooks attached to agent nodes never run during workflow runs.",
       type: "warn",
     },
     {
       q: "MCP server not connecting to Claude Code / Cursor",
-      a: "Run `npm run mcp` to start the server (stdio transport). In your MCP client config, point to `node mcp/server.mjs` from the project root. The server exposes read-only tools: run_tests, validate_workflow, project_status, list_workflows.",
+      a: "Run `npm run mcp` to start the server (stdio transport). In your MCP client config, point to `node mcp/server.mjs` from the project root. The server exposes 8 read/test tools: run_tests, run_cargo_tests, validate_workflow, project_status, list_workflows, list_providers (credential names only), list_artifacts (empty until runs persist artifacts), and get_recent_logs (audit entries, best-effort secret redaction). It has no write tools or workflow execution.",
       type: "info",
     },
   ];

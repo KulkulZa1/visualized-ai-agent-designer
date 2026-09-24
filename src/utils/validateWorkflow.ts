@@ -5,6 +5,12 @@ import type { AgentNode, ValidationResult, ValidationError, ValidationWarning } 
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
 
+type EdgeData = { edgeKind?: string };
+
+function isFeedbackEdge(edge: Edge): boolean {
+  return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
+}
+
 export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationResult {
   const errors:   ValidationError[]   = [];
   const warnings: ValidationWarning[] = [];
@@ -23,7 +29,7 @@ export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationR
   const adj = new Map<string, string[]>();
   nodes.forEach((n) => adj.set(n.id, []));
   edges.forEach((e) => {
-    if (e.type !== "feedback") adj.get(e.source)?.push(e.target);
+    if (!isFeedbackEdge(e)) adj.get(e.source)?.push(e.target);
   });
 
   const visited = new Set<string>();
@@ -76,10 +82,11 @@ export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationR
         message: `"${d.name}" has ${d.tools.length} tools — consider restricting to what's needed.` });
     }
 
-    // Bash without hooks (security warning)
-    if (d.tools.includes(ToolPermission.Bash) && !d.preHook && !d.postHook) {
+    // Bash: agent-issued shell commands are refused at runtime (no consent system yet),
+    // and hooks on agent nodes are not run during workflows, so they are no gate.
+    if (d.tools.includes(ToolPermission.Bash)) {
       warnings.push({ nodeId: n.id, kind: "no_hooks_on_bash",
-        message: `"${d.name}" can execute bash but has no hook gate. Consider adding a pre-execution hook.` });
+        message: `"${d.name}" lists the bash tool, but agent shell commands are disabled — those calls will fail.` });
     }
   });
 

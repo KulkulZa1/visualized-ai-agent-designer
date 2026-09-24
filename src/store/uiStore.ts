@@ -3,6 +3,8 @@ import { create } from "zustand";
 interface EditorTab {
   path: string;
   isDirty: boolean;
+  /** Edited text not yet saved; survives switching tabs. */
+  unsaved?: string;
 }
 
 interface UIState {
@@ -20,7 +22,9 @@ interface UIActions {
   setActivePanelTab: (tab: string) => void;
   openEditorFile: (path: string) => void;
   closeEditorFile: (path: string) => void;
-  markEditorDirty: (path: string, dirty: boolean) => void;
+  setEditorBuffer: (path: string, content: string) => void;
+  /** After `savedContent` was written: clean, unless the text changed meanwhile. */
+  markEditorSaved: (path: string, savedContent: string) => void;
   setActiveEditorPath: (path: string | null) => void;
   toggleConfigPanel: () => void;
   toggleSidebar: () => void;
@@ -60,11 +64,21 @@ export const useUIStore = create<UIState & UIActions>()((set) => ({
       return { openEditorTabs: remaining, activeEditorPath: nextActive };
     }),
 
-  markEditorDirty: (path, dirty) =>
+  setEditorBuffer: (path, content) =>
     set((state) => ({
       openEditorTabs: state.openEditorTabs.map((t) =>
-        t.path === path ? { ...t, isDirty: dirty } : t
+        t.path === path ? { ...t, isDirty: true, unsaved: content } : t
       ),
+    })),
+
+  markEditorSaved: (path, savedContent) =>
+    set((state) => ({
+      openEditorTabs: state.openEditorTabs.map((t) => {
+        if (t.path !== path) return t;
+        // Text typed while the save was in flight is still unsaved.
+        if (t.unsaved !== undefined && t.unsaved !== savedContent) return t;
+        return { path: t.path, isDirty: false };
+      }),
     })),
 
   setActiveEditorPath: (path) => set({ activeEditorPath: path }),

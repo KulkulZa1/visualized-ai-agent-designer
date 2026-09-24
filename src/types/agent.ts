@@ -66,8 +66,9 @@ export interface TokenBudget {
 }
 
 /**
- * FallbackPolicy — when the primary model hits a rate limit or error,
- * the runtime switches to fallbackModel automatically.
+ * FallbackPolicy — intended: when the primary model hits a rate limit or error,
+ * switch to fallback.model. NOT yet applied by the run loop (the only runtime
+ * fallback is the billing-error → local Ollama retry in providerAdapter).
  * Displayed as a secondary badge on the canvas node card.
  */
 export interface FallbackPolicy {

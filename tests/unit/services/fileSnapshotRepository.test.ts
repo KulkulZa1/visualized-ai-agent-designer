@@ -180,3 +180,28 @@ describe("FileSnapshotRepository", () => {
     expect(content["node-R"]).toEqual([]);
   });
 });
+
+describe("FileSnapshotRepository — concurrent creates", () => {
+  it("keeps every snapshot in the index when parallel agents finish together", async () => {
+    // In-memory disk with async I/O, so index read-modify-write calls interleave.
+    const disk = new Map<string, string>();
+    mockInvoke.mockImplementation(async (cmd: string, rawArgs?: unknown) => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      const args = rawArgs as { relativePath?: string; content?: string } | undefined;
+      const path = String(args?.relativePath);
+      if (cmd === "write_workspace_file") { disk.set(path, String(args?.content)); return undefined; }
+      if (cmd === "read_workspace_file") {
+        if (!disk.has(path)) throw new Error("not found");
+        return disk.get(path);
+      }
+      throw new Error(`unexpected ${cmd}`);
+    });
+    const repo = new FileSnapshotRepository(WORKSPACE);
+
+    await Promise.all(["a", "b", "c"].map((nodeId) => repo.create({ ...makeInput(), nodeId })));
+
+    for (const nodeId of ["a", "b", "c"]) {
+      expect(await repo.listByNodeId(nodeId)).toHaveLength(1);
+    }
+  });
+});
