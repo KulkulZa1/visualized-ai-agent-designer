@@ -10,6 +10,7 @@ import type { SubAgentRecord } from "@/types/execution";
 function setup(
   runLoop?: (child: SubAgentRun) => Promise<AgentLoopResult>,
   onUpdate?: (record: SubAgentRecord) => void,
+  isCancelled?: () => boolean,
 ) {
   const loop = vi.fn(runLoop ?? (async (child: SubAgentRun): Promise<AgentLoopResult> => ({
     text: `did: ${child.userMessage}`, toolCalls: 0, mode: "native", nativeRefused: false, tokenEstimate: 10,
@@ -22,6 +23,7 @@ function setup(
     runLoop: loop,
     onEvent: (message) => events.push(message),
     onUpdate,
+    isCancelled,
   });
   return { subAgents, loop, events };
 }
@@ -99,5 +101,22 @@ describe("createSubAgentRunner", () => {
     });
     expect(updates[1].finishedAt).toBeGreaterThanOrEqual(updates[1].startedAt);
     expect(updates[3]).toMatchObject({ error: "Error: boom" });
+  });
+
+  it("marks a helper stopped, not failed, when the run is stopped", async () => {
+    const updates: SubAgentRecord[] = [];
+    let stopped = false;
+    const { subAgents, events } = setup(async () => {
+      stopped = true; // Stop pressed while the helper worked
+      throw new Error("Run stopped");
+    }, (record) => updates.push(record), () => stopped);
+
+    const out = await subAgents.dispatch({ task: "t", name: "H" });
+
+    expect(updates.map((u) => u.status)).toEqual(["running", "stopped"]);
+    expect(updates[1].error).toBeUndefined();
+    expect(updates[1].finishedAt).toBeGreaterThanOrEqual(updates[1].startedAt);
+    expect(out).toBe("[error] Sub-agent H was stopped.");
+    expect(events[1]).toMatch(/stopped/);
   });
 });

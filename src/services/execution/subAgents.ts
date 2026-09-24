@@ -33,6 +33,8 @@ export interface SubAgentRunnerOptions {
   onEvent?: (message: string, success: boolean) => void;
   /** Each helper's state when it starts and when it finishes (activity panel). */
   onUpdate?: (record: SubAgentRecord) => void;
+  /** True once the run is stopped: a helper ending then is "stopped", not failed. */
+  isCancelled?: () => boolean;
 }
 
 const HELPER_INSTRUCTIONS =
@@ -83,6 +85,11 @@ export function createSubAgentRunner(opts: SubAgentRunnerOptions) {
       opts.onEvent?.(`✓ Sub-agent "${name}" reported (${result.text.length} chars)`, true);
       return `Report from ${name}:\n${result.text}`;
     } catch (e) {
+      if (opts.isCancelled?.()) {
+        opts.onUpdate?.({ ...record, status: "stopped", finishedAt: Date.now() });
+        opts.onEvent?.(`■ Sub-agent "${name}" stopped`, true);
+        return `[error] Sub-agent ${name} was stopped.`;
+      }
       opts.onUpdate?.({ ...record, status: "error", error: String(e), finishedAt: Date.now() });
       opts.onEvent?.(`✗ Sub-agent "${name}" failed: ${String(e)}`, false);
       return `[error] Sub-agent ${name} failed: ${String(e)}`;

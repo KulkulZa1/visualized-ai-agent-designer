@@ -6,7 +6,8 @@ export interface SubAgentRecord {
   name: string;
   task: string;
   tools: string[];
-  status: "running" | "done" | "error";
+  /** "stopped": the run was stopped while the helper worked. */
+  status: "running" | "done" | "error" | "stopped";
   startedAt: number;
   finishedAt?: number;
   /** The helper's final report. */

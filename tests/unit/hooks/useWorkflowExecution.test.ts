@@ -217,6 +217,34 @@ describe("useWorkflowExecution", () => {
     expect(useExecutionStore.getState().currentRun?.agents.Lead?.subAgents).toBeUndefined();
   });
 
+  it("shows a helper as stopped when the run is stopped while it works", async () => {
+    const lead = makeNode("Lead");
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    let helperCalled = false;
+    mockInvokeHandler("chat_turn", (args) => {
+      if ((args as { system: string }).system.startsWith("You are Lead,")) {
+        return { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: "d1", name: "subagent_dispatch", args: { task: "t", name: "H" } }] };
+      }
+      helperCalled = true;
+      return new Promise(() => {}); // still working when Stop is pressed
+    });
+    const { result } = renderHook(() => useWorkflowExecution());
+
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      while (!helperCalled) await new Promise((resolve) => setTimeout(resolve, 10));
+      useExecutionStore.getState().cancelRun();
+      await first;
+    });
+
+    const run = useExecutionStore.getState().currentRun;
+    expect(run?.status).toBe("cancelled");
+    expect(run?.agents.Lead.subAgents).toEqual([expect.objectContaining({ name: "H", status: "stopped" })]);
+  });
+
   it("refuses to start a second run while one is already starting or running", async () => {
     useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
     let providerCalls = 0;

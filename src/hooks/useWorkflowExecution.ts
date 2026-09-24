@@ -549,6 +549,7 @@ export function useWorkflowExecution() {
           parentName: data.name,
           workflowName: meta.name,
           parentTools: data.tools as string[],
+          isCancelled: isRunCancelled,
           runLoop: (child) => runAgentLoop({
             ...shared,
             system: child.system,

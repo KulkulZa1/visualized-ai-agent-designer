@@ -56,6 +56,29 @@ describe("AgentActivityPanel", () => {
     expect(text).toContain("Error: timed out");
   });
 
+  it("shows a stopped helper in grey, without an error box", () => {
+    useWorkflowStore.getState().addNode(makeDefaultAgentNode("n1", AgentRole.Orchestrator, { x: 0, y: 0 }));
+    const now = Date.now();
+    useExecutionStore.setState({
+      currentRun: {
+        id: "r", workflowName: "W", startedAt: now, status: "cancelled",
+        agents: {
+          n1: {
+            agentId: "n1", agentName: "Lead", status: "skipped", startedAt: now,
+            subAgents: [{ id: "sub-1", name: "H", task: "t", tools: [], status: "stopped",
+              startedAt: now, finishedAt: now + 500 }],
+          },
+        },
+      },
+      isRunning: false,
+    });
+
+    const { getByText, container } = render(<AgentActivityPanel nodeId="n1" onClose={() => {}} />);
+
+    expect(getByText("stopped").style.color).toBe("var(--hint)");
+    expect(container.querySelectorAll("pre")).toHaveLength(0);
+  });
+
   it("shows no sub-agent section for a node without helpers", () => {
     useWorkflowStore.getState().addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
     useExecutionStore.setState({
