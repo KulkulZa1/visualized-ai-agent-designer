@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runAgentLoop, type AgentLoopOptions } from "@/services/execution/agentLoop";
+import { beforeDeadline, runAgentLoop, type AgentLoopOptions } from "@/services/execution/agentLoop";
 import type { ChatReply } from "@/services/model-providers/providerAdapter";
 
 const reply = (over: Partial<ChatReply> = {}): ChatReply => ({
@@ -7,12 +7,13 @@ const reply = (over: Partial<ChatReply> = {}): ChatReply => ({
 });
 
 function options(over: Partial<AgentLoopOptions> = {}): AgentLoopOptions {
+  const deadline = Date.now() + 60_000;
   return {
     system: "You are A.",
     userMessage: "Do the task.",
     tools: ["read_file", "fs.write"],
     maxSteps: 5,
-    deadline: Date.now() + 60_000,
+    deadline: () => deadline,
     timeoutMessage: "A timed out after 60s",
     isCancelled: () => false,
     callTurn: vi.fn(async () => reply({ text: "done" })),
@@ -135,7 +136,24 @@ describe("runAgentLoop — text protocol", () => {
 
 describe("runAgentLoop — deadline and Stop", () => {
   it("throws the timeout message once the deadline has passed", async () => {
-    await expect(runAgentLoop(options({ deadline: Date.now() - 1 }))).rejects.toThrow("A timed out after 60s");
+    const passed = Date.now() - 1;
+    await expect(runAgentLoop(options({ deadline: () => passed }))).rejects.toThrow("A timed out after 60s");
+  });
+
+  it("does not time out an agent whose tool moved the deadline later (time spent waiting for the user)", async () => {
+    let deadline = Date.now() + 40;
+    const callTurn = vi.fn()
+      .mockResolvedValueOnce(reply({ toolCalls: [{ id: "a", name: "read_file", args: { path: "x" } }] }))
+      .mockResolvedValueOnce(reply({ text: "done" }));
+    const runTool = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      deadline += 80;
+      return "ok";
+    });
+
+    const result = await runAgentLoop(options({ deadline: () => deadline, callTurn, runTool }));
+
+    expect(result.text).toBe("done");
   });
 
   it("runs no tool after Stop", async () => {
@@ -149,6 +167,20 @@ describe("runAgentLoop — deadline and Stop", () => {
     });
     await expect(runAgentLoop(opts)).rejects.toThrow("Run stopped");
     expect(opts.runTool).not.toHaveBeenCalled();
+  });
+});
+
+describe("beforeDeadline", () => {
+  it("keeps waiting when the deadline moves later while the work runs", async () => {
+    let deadline = Date.now() + 40;
+    setTimeout(() => { deadline += 200; }, 10);
+    const work = new Promise((resolve) => setTimeout(() => resolve("finished"), 100));
+
+    await expect(beforeDeadline(work, () => deadline, "late", () => false)).resolves.toBe("finished");
+  });
+
+  it("rejects at a fixed deadline", async () => {
+    await expect(beforeDeadline(new Promise(() => {}), Date.now() + 20, "late", () => false)).rejects.toThrow("late");
   });
 });
 

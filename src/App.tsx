@@ -11,6 +11,7 @@ import { AuditStrip }     from "@/components/layout/AuditStrip";
 import { GeneratePanel }  from "@/components/generate/GeneratePanel";
 import { AgentActivityPanel }  from "@/components/execution/AgentActivityPanel";
 import { WorkflowInputDialog }  from "@/components/execution/WorkflowInputDialog";
+import { CommandConsentDialog } from "@/components/execution/CommandConsentDialog";
 import { CommandPalette } from "@/components/palette/CommandPalette";
 import { ExamplePicker }  from "@/components/palette/ExamplePicker";
 import { PermissionMatrix } from "@/components/permissions/PermissionMatrix";
@@ -246,6 +247,9 @@ function AppInner() {
 
       {/* Run panel (slides in from right) */}
       {showRunPanel && <RunPanel onClose={() => setShowRunPanel(false)}/>}
+
+      {/* An agent's shell command waiting for approval */}
+      <CommandConsentDialog />
 
       {/* Settings modal */}
       {showSettings && <SettingsPanel onClose={() => setShowSettings(false)}/>}

@@ -12,7 +12,7 @@ use commands::{
     fs_commands::{
         list_workspace_files, open_workspace_dialog, read_workspace_file, write_workspace_file,
     },
-    process_commands::execute_hook,
+    process_commands::{execute_command, execute_hook},
     workflow_commands::{load_workflow, save_workflow},
 };
 
@@ -54,6 +54,7 @@ pub fn run() {
             load_workflow,
             write_audit_entry,
             execute_hook,
+            execute_command,
             call_claude_api,
             call_anthropic_api,
             call_openai_api,

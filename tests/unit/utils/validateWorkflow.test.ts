@@ -37,9 +37,9 @@ function edge(source: string, target: string, edgeKind: "dataflow" | "feedback" 
 }
 
 describe("validateWorkflow", () => {
-  it("warns that bash is disabled at runtime even when a hook is attached to the node", () => {
-    // Agent-issued shell commands are refused, and pre/post hooks on agent
-    // nodes are never run during workflow runs, so a hook is not a gate.
+  it("warns that each bash command waits for the user's approval, even when a hook is attached", () => {
+    // Pre/post hooks on agent nodes are never run during workflow runs, so a
+    // hook is not a gate: the approval prompt is.
     const shell = node("shell");
     shell.data.tools = [ToolPermission.Bash];
     shell.data.preHook = { path: ".harness/hooks/destructive_guard.sh", requireConsent: false };
@@ -47,7 +47,7 @@ describe("validateWorkflow", () => {
     const { warnings } = validateWorkflow([shell], []);
 
     const warning = warnings.find((w) => w.kind === "no_hooks_on_bash");
-    expect(warning?.message).toMatch(/disabled/);
+    expect(warning?.message).toMatch(/approval/);
   });
 
   it("does not report a cycle for feedback edges stored in edge data", () => {

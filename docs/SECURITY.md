@@ -1,13 +1,16 @@
 # Security
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 ## Current Boundary
 
 Harness Studio is a local desktop app with optional cloud provider calls. It
 can execute local hook scripts only through the audited Rust command path.
-Agents have no shell tool: model-issued `bash`/`run_command` calls are refused
-and the `execute_inline_command` IPC command was removed. Model-issued
+A model-issued `bash`/`run_command` call runs only after the user approves that
+exact command in a dialog. It then runs in the open workspace folder (cmd.exe on
+Windows, sh elsewhere) with the user's privileges: it is **not sandboxed** and
+can reach outside the workspace. The approval is the only barrier. The
+`execute_inline_command` IPC command stays removed. Model-issued
 `fs.write`/`fs.append` calls do write files, confined to the open workspace.
 CLI is read-only. MCP is read/test-only.
 
@@ -21,7 +24,8 @@ CLI is read-only. MCP is read/test-only.
 | Frontend shell access | `shell:allow-execute` and `shell:allow-kill` removed from default Tauri capabilities | Remove unused shell plugin dependency later if no feature needs it |
 | Debug tooling | DevTools are not enabled in release builds (tauri `devtools` feature removed); debug builds still open them | None |
 | Hidden cloud calls | No hidden provider calls added; health checks are explicit run/setup actions and a run's preflight contacts only providers that run will use; the billing-error fallback only goes to a local Ollama server | Show exact payload previews before remote calls |
-| Prompt injection | Agent shell execution is disabled, so model output never runs as a command. Model-issued `fs.write`/`fs.append` calls (for nodes granted those tools) do write files inside the open workspace | Add prompt-injection warnings and redaction for persisted traces; per-command consent before re-enabling shell execution |
+| Prompt injection | Model output runs as a command only after the user approves that exact command (no blanket approval). Model-issued `fs.write`/`fs.append` calls (for nodes granted those tools) do write files inside the open workspace | Add prompt-injection warnings and redaction for persisted traces |
+| Agent shell commands | Approval dialog per command: it shows the agent, the command and the folder; Deny has the focus, Esc denies, and a click outside does nothing. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token). The command runs in the workspace folder without provider API keys or input, and is stopped at the node's remaining time. A network-share workspace is refused on Windows, because cmd.exe would run the command in `C:\Windows`. Sub-agents never get `bash`; Stop, or the end of the run, denies pending approvals. Approvals, denials and results are audited | No sandbox or allowlist: an approved command has the user's privileges. Stop does not kill a command that is already running. The macOS/Linux `sh` path is untested |
 | MCP command injection | `run_tests.filter` validates characters and rejects traversal before spawning | Keep MCP test tools bounded |
 | Tool and sub-agent escalation | An agent runs only the tools offered to it (read tools included); the system prompt names only those. `subagent_dispatch` helpers get a subset of their parent's tools, cannot start helpers themselves, share the parent's deadline and Stop, and are capped at 5 per node run (3 at a time) | A single helper cannot be stopped on its own (Stop ends the whole run) |
 
@@ -79,7 +83,8 @@ Current audit path is:
 ```
 
 Hook runs inside workflows and manual runs from the Hooks tab are appended to it
-when a workspace is open. The old `.agent-audit/` path is deprecated and should
+when a workspace is open, and so is every agent shell command: approved and run
+(with its exit code), denied, or failed to start (`command_executed`). The old `.agent-audit/` path is deprecated and should
 not be used in new docs or code. `.harness/snapshots/` and `.harness/artifacts/`
 are ignored by git.
 
@@ -96,4 +101,5 @@ persistence.
    runs `npm audit` or `cargo audit` until that workflow exists.
 5. Redaction pass for persisted snapshots/artifacts before enabling durable run
    traces by default.
-6. Per-command consent system before re-enabling agent shell execution.
+6. Agent shell commands run unsandboxed once approved: decide on a sandbox or an
+   allowlist, and kill a running command on Stop.

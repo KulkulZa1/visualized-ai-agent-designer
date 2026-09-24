@@ -37,7 +37,8 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Agent independence | Logical per-node prompt/model/output/log state, not process isolation |
 | Parallel scheduling | Independent forward-edge branches run up to `executionSettings.maxParallel`; feedback edges are not dependencies |
 | Revision loops | A node with a feedback edge acts as a reviewer: a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds; downstream nodes wait for the outcome |
-| Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`) confined to the open workspace, called with the provider's native tool calling (text-protocol fallback for models without it); `bash`/`run_command` are disabled and refused |
+| Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`) confined to the open workspace, called with the provider's native tool calling (text-protocol fallback for models without it) |
+| Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog; not sandboxed, no input, no provider keys, stopped at the agent's time limit; helpers never get it |
 | Sub-agents | `subagent_dispatch` starts helper agents with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time; each helper is listed in the activity panel |
 | Hooks during runs | Only Hook-role nodes run their pre-hook; hooks on agent nodes run only manually from the Hooks tab |
 | Provider calls | Implemented for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints |

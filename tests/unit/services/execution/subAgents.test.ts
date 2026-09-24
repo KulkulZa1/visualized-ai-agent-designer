@@ -19,7 +19,7 @@ function setup(
   const subAgents = createSubAgentRunner({
     parentName: "Lead",
     workflowName: "W",
-    parentTools: ["read_file", "fs.write", "subagent_dispatch", "web_search"],
+    parentTools: ["read_file", "fs.write", "subagent_dispatch", "web_search", "bash"],
     runLoop: loop,
     onEvent: (message) => events.push(message),
     onUpdate,
@@ -43,7 +43,8 @@ describe("createSubAgentRunner", () => {
     expect(events.length).toBe(2); // started, finished
   });
 
-  it("gives a helper only tools its parent has, and never subagent_dispatch", async () => {
+  it("gives a helper only tools its parent has, and never subagent_dispatch or bash", async () => {
+    // Only the workflow's own agents ask the user to approve commands.
     const { subAgents, loop } = setup();
     await subAgents.dispatch({ task: "t", tools: ["read_file", "bash", "subagent_dispatch", "web_search"] });
     await subAgents.dispatch({ task: "t" });

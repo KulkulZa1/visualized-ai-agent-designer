@@ -25,6 +25,7 @@ const KIND_COLOR: Record<string, string> = {
   error:           "var(--red)",
   file_write:      "var(--green)",
   hook_executed:   "var(--orange)",
+  command_executed: "var(--orange)",
   workflow_saved:  "var(--accent)",
   workflow_loaded: "var(--blue)",
   file_read:       "var(--muted)",

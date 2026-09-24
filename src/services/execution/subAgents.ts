@@ -2,7 +2,8 @@
  * subAgents — `subagent_dispatch`: an agent starts helper agents while it runs.
  *
  * A helper gets a fresh context (its brief is the whole conversation), a subset
- * of its parent's tools, and its parent's provider, model, deadline and Stop.
+ * of its parent's tools (never bash), and its parent's provider, model, deadline
+ * and Stop.
  * Helpers cannot start helpers (one level deep), one node run starts at most
  * MAX_SUBAGENTS_PER_NODE of them, and the parent gets each helper's final report
  * as the tool result.
@@ -48,8 +49,9 @@ function text(value: unknown): string {
 export function createSubAgentRunner(opts: SubAgentRunnerOptions) {
   let started = 0;
   let tokens = 0;
-  // Never subagent_dispatch: helpers stay one level deep.
-  const allowed = runnableTools(opts.parentTools).filter((t) => t !== SUBAGENT_TOOL);
+  // Never subagent_dispatch (helpers stay one level deep) or bash (only the
+  // workflow's own agents ask the user to approve commands).
+  const allowed = runnableTools(opts.parentTools).filter((t) => t !== SUBAGENT_TOOL && t !== "bash");
 
   async function dispatch(args: Record<string, unknown>): Promise<string> {
     const task = text(args.task);

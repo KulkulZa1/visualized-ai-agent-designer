@@ -35,8 +35,9 @@ export interface AgentLoopOptions {
   tools: string[];
   /** Model calls allowed. */
   maxSteps: number;
-  /** Epoch ms after which no new model call starts. */
-  deadline: number;
+  /** Epoch ms after which no new model call starts. It can move later: time
+   *  spent waiting for the user's approval does not count. */
+  deadline: () => number;
   timeoutMessage: string;
   isCancelled: () => boolean;
   callTurn: (system: string, messages: ChatMessage[], tools: ToolSpec[]) => Promise<ChatReply>;
@@ -66,12 +67,18 @@ export interface AgentLoopResult {
  *  call itself cannot be aborted; its late result is discarded. Giving up on Stop
  *  lets the run settle (and a new run start) without waiting for the call. */
 export function beforeDeadline<T>(
-  work: Promise<T>, deadline: number, message: string, isCancelled: () => boolean,
+  work: Promise<T>, deadline: number | (() => number), message: string, isCancelled: () => boolean,
 ): Promise<T> {
+  const at = typeof deadline === "number" ? () => deadline : deadline;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadline - Date.now()));
+    // The deadline may have moved later by the time the timer fires: wait on.
+    const arm = () => {
+      timer = setTimeout(() => (Date.now() >= at() ? reject(new Error(message)) : arm()),
+        Math.max(0, at() - Date.now()));
+    };
+    arm();
     poll = setInterval(() => { if (isCancelled()) reject(new Error("Run stopped")); }, 200);
   });
   return Promise.race([work, expired]).finally(() => {
@@ -86,7 +93,7 @@ const TRUNCATED = new Set(["max_tokens", "length"]);
 function checkpoint(opts: AgentLoopOptions): void {
   if (opts.isCancelled()) throw new Error("Run stopped");
   // A tool step may have used up the budget: don't start another paid call.
-  if (Date.now() >= opts.deadline) throw new Error(opts.timeoutMessage);
+  if (Date.now() >= opts.deadline()) throw new Error(opts.timeoutMessage);
 }
 
 function guarded<T>(opts: AgentLoopOptions, work: Promise<T>): Promise<T> {

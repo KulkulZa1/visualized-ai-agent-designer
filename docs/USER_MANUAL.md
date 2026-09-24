@@ -1,6 +1,6 @@
 ﻿# Harness Studio User Manual
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 ## What Harness Studio Is
 
@@ -17,7 +17,14 @@ run the workflow against configured providers.
 - Streaming is simulated after the full provider response arrives.
 - Context inspector is useful but not a complete durable trace yet.
 - Artifact viewer still uses mock placeholders during execution.
-- Agents can use workspace file tools (read, list, grep, `fs.write`, `fs.append`); the `bash`/`run_command` tool is disabled and refused. An agent only runs the tools you gave it.
+- Agents can use workspace file tools (read, list, grep, `fs.write`, `fs.append`). An agent only runs the tools you gave it.
+- An agent with the `bash` tool can run shell commands, for example the tests:
+  - A dialog shows each command, the agent that wants it and the folder. The command runs only if you click **Allow**; **Deny** or Esc refuses it and tells the agent.
+  - It runs in the workspace folder (cmd.exe on Windows, sh elsewhere) with your permissions. There is no sandbox, so allow only commands you understand.
+  - It gets no input and no provider API keys, and it stops at the agent's time limit. Time spent waiting for your answer does not count toward that limit.
+  - Stop refuses commands still waiting for approval; a command that is already running continues until it finishes or reaches the time limit.
+  - Helpers started with `subagent_dispatch` cannot run commands.
+  - Every approval, denial and result is in the audit log.
 - An agent with the `subagent_dispatch` tool can start helper agents while it runs: each gets a fresh context, a subset of the agent's tools and the same model, and reports back. Helpers cannot start helpers; at most 5 per node run, 3 at a time. The node's activity panel lists each helper with its status, task, tools, time and report (or error); a helper still working when you press Stop shows as stopped, and so does the node itself; starts and tool calls are also in the audit log.
 - During runs only Hook-role nodes run their pre-hook. Hooks on agent nodes run only when you click **Run hook** in the Hooks tab, and a hook marked "require consent" is not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway condition text, prompt `{{variables}}`, and workflow-level timeout/retry settings are saved but not applied at runtime yet.

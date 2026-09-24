@@ -78,7 +78,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
-- Agent shell execution is disabled: `bash`/`run_command` calls are refused and not advertised to the model. Re-enabling needs a per-command consent system.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves each exact command (`commandConsentStore` + `CommandConsentDialog`, Rust `execute_command`). Keep it that way: no auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed, and Stop does not kill a command that is already running (it ends at the node's time limit).
 - During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. Hooks marked `requireConsent` are not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
 - The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).

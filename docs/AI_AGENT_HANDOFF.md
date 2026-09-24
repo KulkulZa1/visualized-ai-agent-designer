@@ -45,7 +45,7 @@ Verified in this pass:
 - Context snapshots are useful for inspection but are not a complete durable trace system.
 - OS keychain or Stronghold storage for provider keys is not implemented.
 - MCP write tools are intentionally absent until permissioning and audit are stronger.
-- Agent shell execution (`bash`/`run_command`) is disabled until a per-command consent system exists.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves each one; approved commands are not sandboxed, and Stop does not kill one that is already running.
 - Pre/post hooks on agent nodes do not run during workflow runs (manual Hooks-tab runs only); only Hook-role nodes run their pre-hook.
 - Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
 - The VS Code extension is an experimental scaffold; most commands do not work yet.

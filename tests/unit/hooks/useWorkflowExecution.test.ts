@@ -6,6 +6,7 @@ import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
 import { useAuditStore } from "@/store/auditStore";
+import { useCommandConsentStore, type CommandRequest } from "@/store/commandConsentStore";
 import { MAX_REVISION_ROUNDS } from "@/services/execution/routing";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
@@ -406,6 +407,89 @@ describe("useWorkflowExecution", () => {
       expect(stopped?.status).toBe("cancelled");
       expect(stopped?.agents.W.status).toBe("stopped");
       expect(draftCalls).toBe(2);
+    });
+  });
+
+  describe("shell commands", () => {
+    /** Node A runs `npm test` with bash, then answers from the result. */
+    function commandNode(timeoutSeconds = 300) {
+      const node = makeNode("A");
+      node.data.tools = [ToolPermission.Bash];
+      node.data.maxSteps = 3;
+      node.data.timeoutSeconds = timeoutSeconds;
+      useWorkflowStore.setState({ nodes: [node], edges: [] });
+      const messages: string[] = [];
+      mockInvokeHandler("call_ollama_api", (args) => {
+        messages.push((args as { userMessage: string }).userMessage);
+        return messages.length === 1
+          ? '<tool_call>{"name":"bash","args":{"command":"npm test"}}</tool_call>'
+          : "tests checked";
+      });
+      const executed = vi.fn(() => ({ exitCode: 0, stdout: "5 passed", stderr: "", durationMs: 900 }));
+      mockInvokeHandler("execute_command", executed);
+      return { messages, executed };
+    }
+
+    async function waitForApprovalPrompt() {
+      while (useCommandConsentStore.getState().queue.length === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return useCommandConsentStore.getState().queue[0];
+    }
+
+    beforeEach(() => useCommandConsentStore.setState({ queue: [] }));
+
+    it("runs an agent's command once the user approves it and gives the agent the result", async () => {
+      const { messages, executed } = commandNode();
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      let request: CommandRequest | undefined;
+      await act(async () => {
+        const running = result.current.executeWorkflow(undefined, vi.fn());
+        request = await waitForApprovalPrompt();
+        expect(executed).not.toHaveBeenCalled();
+        useCommandConsentStore.getState().answer(request.id, "allow");
+        await running;
+      });
+
+      expect(request).toMatchObject({ agentName: "A", command: "npm test", workspacePath: "/ws" });
+      expect(executed).toHaveBeenCalledWith(
+        expect.objectContaining({ workspacePath: "/ws", command: "npm test", consentGranted: true }));
+      expect(messages[1]).toContain("5 passed");
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("done");
+      expect(useAuditStore.getState().entries.some((e) => e.action === "command_executed" && e.success)).toBe(true);
+    });
+
+    it("stops the node and runs nothing when Stop is pressed while a command waits for approval", async () => {
+      const { executed } = commandNode();
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      await act(async () => {
+        const running = result.current.executeWorkflow(undefined, vi.fn());
+        await waitForApprovalPrompt();
+        useExecutionStore.getState().cancelRun();
+        await running;
+      });
+
+      expect(executed).not.toHaveBeenCalled();
+      expect(useCommandConsentStore.getState().queue).toEqual([]);
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
+    });
+
+    it("does not time the agent out while it waits for the user's answer", async () => {
+      const { executed } = commandNode(1);
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      await act(async () => {
+        const running = result.current.executeWorkflow(undefined, vi.fn());
+        const request = await waitForApprovalPrompt();
+        await new Promise((resolve) => setTimeout(resolve, 1300)); // past the node's 1 s limit
+        useCommandConsentStore.getState().answer(request.id, "allow");
+        await running;
+      });
+
+      expect(executed).toHaveBeenCalled();
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("done");
     });
   });
 

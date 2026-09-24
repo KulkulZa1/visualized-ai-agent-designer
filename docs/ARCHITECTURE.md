@@ -1,6 +1,6 @@
 ﻿# Architecture
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 ## Stack
 
@@ -100,11 +100,18 @@ Partial/mock:
   and times out after the Hook node's `timeoutSeconds` (default 30 s, max 1 h;
   30 s for manual runs from the Hooks tab). Hook processes do not inherit provider API keys.
   During workflow runs only Hook-role nodes run their pre-hook.
-- Agents have no shell tool: `bash`/`run_command` calls are refused and the
-  `execute_inline_command` IPC command was removed. Agent file tools (read, list,
-  grep, `fs.write`, `fs.append`) are confined to the open workspace, and an agent
-  can only run the tools offered to it. A sub-agent gets a subset of its parent's
-  tools and cannot start sub-agents.
+- Agent shell commands (`bash`/`run_command`, `src/services/execution/commandTool.ts`)
+  run only after the user approves each exact command (`commandConsentStore`,
+  `CommandConsentDialog`). Time spent waiting for the answer does not count
+  against the node's time. The Rust `execute_command` runs the line in the
+  workspace folder (Windows: `cmd.exe /d /s /c` in a cmd started after
+  `chcp 65001`, so output is UTF-8; elsewhere `sh -c`), without provider keys
+  or input, until the node's remaining time runs out. It is not sandboxed.
+  `execute_inline_command` stays removed.
+- Agent file tools (read, list, grep, `fs.write`, `fs.append`) are confined to
+  the open workspace, and an agent can only run the tools offered to it. A
+  sub-agent gets a subset of its parent's tools (never `bash`) and cannot start
+  sub-agents.
 - Default Tauri capabilities do not allow frontend shell execute/kill.
 - CLI is read-only.
 - MCP has no write tools and no workflow execution.

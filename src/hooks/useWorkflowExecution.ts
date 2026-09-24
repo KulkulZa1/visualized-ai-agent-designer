@@ -16,6 +16,7 @@ import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useAuditStore } from "@/store/auditStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useCommandConsentStore } from "@/store/commandConsentStore";
 import { AgentRole } from "@/types/agent";
 import type { HookResult } from "@/types/hookResult";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
@@ -52,6 +53,7 @@ import {
   type ToolSpec,
 } from "@/services/execution/toolExecutor";
 import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
+import { runCommandTool } from "@/services/execution/commandTool";
 import {
   createSubAgentRunner,
   MAX_CONCURRENT_SUBAGENTS,
@@ -513,10 +515,12 @@ export function useWorkflowExecution() {
         let eventCount = 0;
         const helpers: SubAgentRecord[] = [];
 
+        // Moves later by the time spent waiting for the user to approve a command.
+        let deadline = Date.now() + timeoutSeconds * 1000;
         // Shared by the node and the helpers it dispatches.
         const shared = {
           maxSteps: data.maxSteps || 5,
-          deadline: Date.now() + timeoutSeconds * 1000,
+          deadline: () => deadline,
           isCancelled: isRunCancelled,
           preferText: noNativeTools.has(nativeKey),
           // A billing error on a hosted provider retries via the text path, whose
@@ -544,6 +548,23 @@ export function useWorkflowExecution() {
             action: "file_read", agentId: nodeId,
             details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
         };
+
+        // bash: each command waits for the user's approval (CommandConsentDialog).
+        const runCommand = (args: Record<string, unknown>) => runCommandTool(args, {
+          agentName: data.name, workspacePath, invoke,
+          askUser: (command) => useCommandConsentStore.getState().request({
+            runId, agentName: data.name, command, workspacePath: workspacePath ?? "",
+          }),
+          deadline: () => deadline,
+          extendDeadline: (ms) => { deadline += ms; },
+          isCancelled: isRunCancelled,
+          onAudit: (details, success) => {
+            const entry = { id: `${nodeId}-cmd-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "command_executed" as const, agentId: nodeId, details, success };
+            addEntry(entry);
+            if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
+          },
+        });
 
         const subAgents = createSubAgentRunner({
           parentName: data.name,
@@ -581,8 +602,8 @@ export function useWorkflowExecution() {
           userMessage: baseUserMsg,
           tools: data.tools as string[],
           timeoutMessage: `${data.name} timed out after ${timeoutSeconds}s`,
-          runTool: (call) => call.name === SUBAGENT_TOOL
-            ? subAgents.dispatch(call.args)
+          runTool: (call) => call.name === SUBAGENT_TOOL ? subAgents.dispatch(call.args)
+            : call.name === "bash" ? runCommand(call.args)
             : executeTool(call, workspacePath, invoke, data.tools as string[]),
           onToolCall: logToolCall(""),
           concurrentTools: [SUBAGENT_TOOL],
@@ -743,6 +764,9 @@ export function useWorkflowExecution() {
     } catch {
       finishRun("error");
       return;
+    } finally {
+      // A command still waiting for approval must not run once the run is over.
+      useCommandConsentStore.getState().denyRun(runId);
     }
 
     const finalRun = useExecutionStore.getState().currentRun;

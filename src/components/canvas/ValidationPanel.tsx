@@ -36,7 +36,7 @@ const FIX_SUGGESTIONS: Record<string, { icon: string; fix: string }> = {
   },
   no_hooks_on_bash: {
     icon: "⚠",
-    fix: "Remove the bash permission: agent-issued shell commands are disabled at runtime.",
+    fix: "Commands run only after you approve each one, with your permissions (no sandbox). Remove the bash permission if the workflow should run unattended.",
   },
 };
 
