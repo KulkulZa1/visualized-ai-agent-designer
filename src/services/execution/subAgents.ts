@@ -9,7 +9,7 @@
  */
 
 import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
-import { runnableTools } from "@/services/execution/toolExecutor";
+import { runnableTools, toolForNativeName } from "@/services/execution/toolExecutor";
 import type { AgentLoopResult } from "@/services/execution/agentLoop";
 
 export const SUBAGENT_TOOL = "subagent_dispatch";
@@ -55,8 +55,10 @@ export function createSubAgentRunner(opts: SubAgentRunnerOptions) {
     }
     started++;
     const name = text(args.name) || `${opts.parentName} helper ${started}`;
-    // A helper gets the tools it asks for, but only ones its parent has.
-    const requested = Array.isArray(args.tools) ? args.tools.map(String) : allowed;
+    // A helper gets the tools it asks for (by tool or native name), but only ones its parent has.
+    const requested = Array.isArray(args.tools)
+      ? args.tools.map((t) => toolForNativeName(String(t), opts.parentTools) ?? String(t))
+      : allowed;
     const tools = allowed.filter((t) => requested.includes(t));
     const system = buildSystemMessage({
       agentName: name, role: "worker", workflowName: opts.workflowName,

@@ -44,6 +44,12 @@ describe("createSubAgentRunner", () => {
     expect(loop.mock.calls[1][0].tools).toEqual(["read_file", "fs.write"]);
   });
 
+  it("accepts the native tool names the model sees (fs_write for fs.write)", async () => {
+    const { subAgents, loop } = setup();
+    await subAgents.dispatch({ task: "t", tools: ["fs_write", "read_file"] });
+    expect(loop.mock.calls[0][0].tools).toEqual(["read_file", "fs.write"]);
+  });
+
   it(`refuses more than ${MAX_SUBAGENTS_PER_NODE} helpers per node run`, async () => {
     const { subAgents, loop } = setup();
     for (let i = 0; i < MAX_SUBAGENTS_PER_NODE; i++) await subAgents.dispatch({ task: `t${i}` });
