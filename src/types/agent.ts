@@ -94,7 +94,8 @@ export interface AgentNodeData extends Record<string, unknown> {
   memoryRead: string[];
   memoryWrite: string[];
   tokens: TokenBudget;
-  status: "idle" | "running" | "waiting" | "done" | "error";
+  /** "stopped" is shown on the canvas after Stop but saved as "idle" (not in the file schema). */
+  status: "idle" | "running" | "waiting" | "done" | "error" | "stopped";
   condition?: string;    // gateway only
   description?: string;
   thinkDepth?: "none" | "low" | "medium" | "high";

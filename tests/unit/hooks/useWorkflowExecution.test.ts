@@ -61,6 +61,10 @@ beforeEach(() => {
     message: "ok", model_available: true, pull_command: null,
   }));
   mockInvokeHandler("call_ollama_api", () => "ok");
+  // Nodes with tools use the text tool protocol unless a test registers its own chat_turn.
+  mockInvokeHandler("chat_turn", () => ({
+    text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false,
+  }));
 });
 
 describe("useWorkflowExecution", () => {
@@ -75,6 +79,208 @@ describe("useWorkflowExecution", () => {
     expect(finished?.agents.A.status).toBe("done");
     expect(finished?.agents.B.status).toBe("error");
     expect(finished?.status).toBe("error");
+  });
+
+  it("runs a tool-using node with native tool calls, offering and naming only runnable tools", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile, ToolPermission.WebSearch];
+    node.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const turns: Array<{ system: string; tools: Array<{ name: string }>; messages: unknown[] }> = [];
+    mockInvokeHandler("chat_turn", (args) => {
+      turns.push(args as (typeof turns)[number]);
+      return turns.length === 1
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+            toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }] }
+        : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+    mockInvokeHandler("read_workspace_file", () => "A");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(turns[0].tools.map((t) => t.name)).toEqual(["read_file"]);
+    expect(turns[0].system).toContain("Allowed tools: read_file\n");
+    expect(turns[1].messages).toHaveLength(3); // user, assistant tool call, tool result
+  });
+
+  it("falls back to the text protocol when the model refuses native tools, for the rest of the run", async () => {
+    const a = makeNode("A");
+    const b = makeNode("B");
+    a.data.tools = b.data.tools = [ToolPermission.ReadFile];
+    useWorkflowStore.setState({
+      nodes: [a, b],
+      edges: [{ id: "e", source: "A", target: "B" }],
+    });
+    let nativeCalls = 0;
+    let textCalls = 0;
+    mockInvokeHandler("chat_turn", () => {
+      nativeCalls++;
+      return { text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false };
+    });
+    mockInvokeHandler("call_ollama_api", () => { textCalls++; return "ok"; });
+
+    const finished = await run();
+
+    expect(finished?.status).toBe("done");
+    expect(nativeCalls).toBe(1); // B does not try native tools again
+    expect(textCalls).toBe(2);
+  });
+
+  it("uses the text protocol when the backend has no chat_turn command (VS Code extension)", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("chat_turn", () => {
+      throw new Error('[HarnessVscode] Unhandled command: "chat_turn". This command requires the Tauri runtime.');
+    });
+    mockInvokeHandler("call_ollama_api", () => "ok");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "ok" });
+  });
+
+  it("lets an agent dispatch helpers that start fresh, use only its tools and report back", async () => {
+    const lead = makeNode("Lead");
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    type Turn = {
+      system: string; tools: Array<{ name: string }>;
+      messages: Array<{ role: string; text?: string; toolResults?: Array<{ content: string }> }>;
+    };
+    const turns: Turn[] = [];
+    mockInvokeHandler("chat_turn", (args) => {
+      const turn = args as Turn;
+      turns.push(turn);
+      if (!turn.system.startsWith("You are Lead,")) {
+        return { text: `summary of ${turn.messages[0].text}`, toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+      }
+      return turn.messages.length === 1
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true, toolCalls: [
+            { id: "d1", name: "subagent_dispatch", args: { task: "Summarize a.md", name: "A-reader" } },
+            { id: "d2", name: "subagent_dispatch", args: { task: "Summarize b.md", name: "B-reader" } },
+          ] }
+        : { text: "combined", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(finished?.agents.Lead).toMatchObject({ status: "done", output: "combined" });
+    const helpers = turns.filter((t) => !t.system.startsWith("You are Lead,"));
+    expect(helpers.map((h) => h.messages).sort((x, y) => String(x[0].text).localeCompare(String(y[0].text))))
+      .toEqual([[{ role: "user", text: "Summarize a.md" }], [{ role: "user", text: "Summarize b.md" }]]);
+    expect(helpers[0].tools.map((t) => t.name)).toEqual(["read_file"]);
+    const leadFinal = turns.find((t) => t.system.startsWith("You are Lead,") && t.messages.length === 3);
+    expect(leadFinal?.messages[2].toolResults?.map((r) => r.content)).toEqual([
+      "Report from A-reader:\nsummary of Summarize a.md",
+      "Report from B-reader:\nsummary of Summarize b.md",
+    ]);
+    // The activity panel reads the helpers from the node's run record.
+    expect(finished?.agents.Lead.subAgents).toEqual([
+      expect.objectContaining({
+        name: "A-reader", task: "Summarize a.md", tools: ["read_file"],
+        status: "done", output: "summary of Summarize a.md",
+      }),
+      expect.objectContaining({
+        name: "B-reader", task: "Summarize b.md", status: "done", output: "summary of Summarize b.md",
+      }),
+    ]);
+  });
+
+  it("records a late-finishing helper on its own run only, never on a newer run", async () => {
+    const lead = makeNode("Lead");
+    // read_file gives the helper a runnable tool, so it too uses chat_turn.
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    let helperCalled = false;
+    mockInvokeHandler("chat_turn", (args) => {
+      if ((args as { system: string }).system.startsWith("You are Lead,")) {
+        return { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: "d1", name: "subagent_dispatch", args: { task: "t", name: "H" } }] };
+      }
+      helperCalled = true;
+      return new Promise(() => {}); // the helper is still working
+    });
+    const { result } = renderHook(() => useWorkflowExecution());
+
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      while (!helperCalled) await new Promise((resolve) => setTimeout(resolve, 10));
+      useExecutionStore.getState().startRun("next run"); // the helper now belongs to an old run
+      await first;
+    });
+
+    expect(useExecutionStore.getState().currentRun?.workflowName).toBe("next run");
+    expect(useExecutionStore.getState().currentRun?.agents.Lead?.subAgents).toBeUndefined();
+  });
+
+  async function stopWhileRunning() {
+    const { result } = renderHook(() => useWorkflowExecution());
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      useExecutionStore.getState().cancelRun();
+      await first;
+    });
+    return useExecutionStore.getState().currentRun;
+  }
+
+  it("marks a node stopped, without an error, when the run is stopped while it works", async () => {
+    mockInvokeHandler("call_ollama_api", () => new Promise<string>(() => {})); // never answers
+    useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
+
+    const run = await stopWhileRunning();
+
+    expect(run?.agents.A.status).toBe("stopped");
+    expect(run?.agents.A.error).toBeUndefined();
+    // The canvas node shows it too.
+    expect(useWorkflowStore.getState().nodes[0].data.status).toBe("stopped");
+  });
+
+  it("marks a hook node stopped when the run is stopped while its hook runs", async () => {
+    const hook = makeNode("Gate");
+    hook.data.role = AgentRole.Hook;
+    hook.data.preHook = { path: ".harness/hooks/test_gate.sh", requireConsent: false };
+    useWorkflowStore.setState({ nodes: [hook], edges: [] });
+    mockInvokeHandler("execute_hook", () => new Promise(() => {})); // still running
+
+    const run = await stopWhileRunning();
+
+    expect(run?.agents.Gate.status).toBe("stopped");
+    expect(run?.agents.Gate.error).toBeUndefined();
+    expect(useWorkflowStore.getState().nodes[0].data.status).toBe("stopped");
+  });
+
+  it("shows a helper as stopped when the run is stopped while it works", async () => {
+    const lead = makeNode("Lead");
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    let helperCalled = false;
+    mockInvokeHandler("chat_turn", (args) => {
+      if ((args as { system: string }).system.startsWith("You are Lead,")) {
+        return { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: "d1", name: "subagent_dispatch", args: { task: "t", name: "H" } }] };
+      }
+      helperCalled = true;
+      return new Promise(() => {}); // still working when Stop is pressed
+    });
+    const { result } = renderHook(() => useWorkflowExecution());
+
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      while (!helperCalled) await new Promise((resolve) => setTimeout(resolve, 10));
+      useExecutionStore.getState().cancelRun();
+      await first;
+    });
+
+    const run = useExecutionStore.getState().currentRun;
+    expect(run?.status).toBe("cancelled");
+    expect(run?.agents.Lead.status).toBe("stopped");
+    expect(run?.agents.Lead.subAgents).toEqual([expect.objectContaining({ name: "H", status: "stopped" })]);
   });
 
   it("refuses to start a second run while one is already starting or running", async () => {
@@ -275,9 +481,13 @@ describe("useWorkflowExecution", () => {
     node.data.maxSteps = 3;
     useWorkflowStore.setState({ nodes: [node], edges: [] });
     let providerCalls = 0;
-    mockInvokeHandler("call_ollama_api", () => {
+    // A node with tools uses native tool calls (chat_turn).
+    mockInvokeHandler("chat_turn", () => {
       providerCalls++;
-      return '<tool_call>{"name":"read_file","args":{"path":"a.md"}}</tool_call>';
+      return {
+        text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+        toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }],
+      };
     });
     mockInvokeHandler("read_workspace_file", () =>
       new Promise<string>((resolve) => setTimeout(() => resolve("text"), 120)));

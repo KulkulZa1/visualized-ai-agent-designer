@@ -15,6 +15,7 @@ const STATUS_COLOR: Record<AgentStatus, string> = {
   done:    "var(--green)",
   error:   "var(--red)",
   skipped: "var(--hint)",
+  stopped: "var(--hint)",
 };
 
 const STATUS_ICON: Record<AgentStatus, string> = {
@@ -24,6 +25,7 @@ const STATUS_ICON: Record<AgentStatus, string> = {
   done:    "check",
   error:   "x",
   skipped: "chev",
+  stopped: "stop",
 };
 
 function elapsed(start?: number, end?: number): string {

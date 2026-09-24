@@ -27,6 +27,7 @@ export function NodeIcon({ name, size = 14, stroke = 1.6, color = "currentColor"
     case "send":   return <svg {...p}><path d="M22 2L11 13M22 2l-7 20-4-9-9-4z"/></svg>;
     case "cog":    return <svg {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 008 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H2a2 2 0 010-4h.09A1.65 1.65 0 004.6 8a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V2a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H22a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>;
     case "play":   return <svg {...p}><path d="M6 4l14 8-14 8V4z"/></svg>;
+    case "stop":   return <svg {...p}><rect x="6" y="6" width="12" height="12" rx="2"/></svg>;
     case "save":   return <svg {...p}><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>;
     case "check":  return <svg {...p}><path d="M20 6L9 17l-5-5"/></svg>;
     case "x":      return <svg {...p}><path d="M18 6L6 18M6 6l12 12"/></svg>;

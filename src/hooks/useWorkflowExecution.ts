@@ -4,7 +4,8 @@
  * What this now does properly:
  * 1. AGENT CHAINING   — upstream agent outputs are passed as context to downstream agents
  * 2. MEMORY           — memoryRead/memoryWrite keys persist values across agents per run
- * 3. TOOL EXECUTION   — read_file, list_files, grep executed via Tauri on <tool_call> tags
+ * 3. TOOL EXECUTION   — the node's tools run through agentLoop.ts (native tool calls, <tool_call>
+ *                       fallback); subagent_dispatch starts helper agents (subAgents.ts)
  * 4. GATEWAY ROUTING  — gateway JSON output determines which downstream branch to follow
  * 5. MEMORY NODES     — aggregate upstream outputs into memory keys (no LLM call needed)
  * 6. PARALLEL EXEC    — independent branches run concurrently up to executionSettings.maxParallel
@@ -20,6 +21,7 @@ import type { HookResult } from "@/types/hookResult";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
 import { createSnapshot } from "@/services/context-builder/snapshotService";
 import type { Artifact } from "@/types/inspection";
+import type { SubAgentRecord } from "@/types/execution";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -27,26 +29,34 @@ import {
   isOllamaCloudUrl,
   isRemoteOllamaUrl,
   selectProviderForModel,
+  shouldFallbackToOllama,
   type LlmProvider,
   type RuntimeProvider,
 } from "@/utils/providerConfig";
 import {
+  callChatTurn,
   callProvider,
   buildSystemMessage,
   resolveModel,
   REASONING_EFFORT,
-  estimateTokens,
   isReasoningModel,
+  type ChatMessage,
 } from "@/services/model-providers/providerAdapter";
 import { readWorkspaceFile, writeAuditEntry } from "@/ipc/tauriCommands";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import { MemoryService } from "@/services/execution/memoryService";
 import {
-  buildToolInstructions,
-  parseToolCall,
-  stripToolCall,
   executeTool,
+  runnableTools,
+  type ToolCall,
+  type ToolSpec,
 } from "@/services/execution/toolExecutor";
+import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
+import {
+  createSubAgentRunner,
+  MAX_CONCURRENT_SUBAGENTS,
+  SUBAGENT_TOOL,
+} from "@/services/execution/subAgents";
 import { runParallel } from "@/services/execution/parallelScheduler";
 import { resolvePromptContent } from "@/services/execution/promptSource";
 import { entryAgentIds } from "@/services/execution/entryNodes";
@@ -110,24 +120,6 @@ function isExecutable(role: AgentRole): boolean {
 // Set synchronously when a run starts so a second Run click during the async
 // provider preflight (before isRunning flips) is rejected too.
 let runInFlight = false;
-
-/** Reject once `deadline` (epoch ms) passes or the run is stopped. The provider
- *  call itself cannot be aborted; its late result is discarded. Giving up on Stop
- *  lets the run settle (and a new run start) without waiting for the call. */
-function beforeDeadline<T>(
-  work: Promise<T>, deadline: number, message: string, isCancelled: () => boolean,
-): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let poll: ReturnType<typeof setInterval> | undefined;
-  const expired = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadline - Date.now()));
-    poll = setInterval(() => { if (isCancelled()) reject(new Error("Run stopped")); }, 200);
-  });
-  return Promise.race([work, expired]).finally(() => {
-    clearTimeout(timer);
-    clearInterval(poll);
-  });
-}
 
 // ── Health checks ─────────────────────────────────────────────────────────────
 
@@ -312,6 +304,7 @@ export function useWorkflowExecution() {
     const memory        = new MemoryService();
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
+    const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
 
     const entryIds = entryAgentIds(nodes, edges);
     const isEntryNode = (id: string) => entryIds.has(id);
@@ -414,8 +407,8 @@ export function useWorkflowExecution() {
             } catch (e) {
               if (isRunCancelled()) {
                 // Stopped while the hook ran; the process ends at its own timeout.
-                updateAgent(nodeId, { status: "skipped", error: "Stopped by user", finishedAt: Date.now() });
-                updateNodeData(nodeId, { status: "idle" });
+                updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+                updateNodeData(nodeId, { status: "stopped" });
                 return;
               }
               hookFailed = true;
@@ -464,7 +457,6 @@ export function useWorkflowExecution() {
       try {
         const promptContent = await resolvePromptContent(data.promptSource, workspacePath, readWorkspaceFile);
 
-        const toolInstructions = buildToolInstructions(data.tools as string[]);
         const memoryContext    = memory.buildContext(data.memoryRead);
 
         const upstreamParts: string[] = [];
@@ -481,14 +473,12 @@ export function useWorkflowExecution() {
         }
         const upstreamContext = upstreamParts.join("\n\n─────────────────\n\n");
 
-        const systemMsg = [
-          buildSystemMessage({
-            agentName: data.name, role: data.role, workflowName: meta.name,
-            description: data.description, tools: data.tools as string[],
-            memoryRead: data.memoryRead, memoryWrite: data.memoryWrite, promptContent,
-          }),
-          toolInstructions,
-        ].filter(Boolean).join("\n\n");
+        // Only tools that actually run are named; the loop adds how to call them.
+        const systemMsg = buildSystemMessage({
+          agentName: data.name, role: data.role, workflowName: meta.name,
+          description: data.description, tools: runnableTools(data.tools as string[]),
+          memoryRead: data.memoryRead, memoryWrite: data.memoryWrite, promptContent,
+        });
 
         const userMsgParts: string[] = [];
         if (isEntryNode(nodeId)) {
@@ -509,73 +499,103 @@ export function useWorkflowExecution() {
           effectiveThinkDepth && effectiveThinkDepth !== "none" ? effectiveThinkDepth :
           (REASONING_EFFORT[rawModel] ?? null);
 
-        const maxSteps    = data.maxSteps || 5;
         const timeoutSeconds = data.timeoutSeconds || 300;
-        const deadline    = Date.now() + timeoutSeconds * 1000;
-        let currentMsg    = baseUserMsg;
-        let finalText     = "";
-        let stepsDone     = 0;
+        const providerParams = {
+          provider: runtimeProvider, model, rawModel, maxTokens: maxTok,
+          apiKey: apiKeyForProvider, requiresKey: selProv.requiresKey && !envKeyConfigured,
+          ollamaBaseUrl: effectiveOllamaUrl, ollamaModel: effectiveOllamaModel,
+          ollamaApiKey: ollamaApiKey || undefined,
+          customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
+          reasoningEffort,
+        };
+        const nativeKey = `${runtimeProvider}:${model}`;
         let toolCallCount = 0;
+        let eventCount = 0;
+        const helpers: SubAgentRecord[] = [];
 
-        while (stepsDone < maxSteps) {
-          if (isRunCancelled()) break;
-          // A tool step may have used up the budget: don't start another paid call.
-          if (Date.now() >= deadline) throw new Error(`${data.name} timed out after ${timeoutSeconds}s`);
-
-          const callResult = await beforeDeadline(
-            callProvider(
-              {
-                provider: runtimeProvider, model, rawModel,
-                systemMsg, userMsg: currentMsg, maxTokens: maxTok,
-                apiKey: apiKeyForProvider, requiresKey: selProv.requiresKey && !envKeyConfigured,
-                ollamaBaseUrl: effectiveOllamaUrl, ollamaModel: effectiveOllamaModel,
-                ollamaApiKey: ollamaApiKey || undefined,
-                customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
-                reasoningEffort,
-              },
-              invoke,
-            ),
-            deadline,
-            `${data.name} timed out after ${timeoutSeconds}s`,
-            isRunCancelled,
-          );
-
-          if (callResult.usedOllamaFallback) {
-            addEntry({ id: `${nodeId}-fb-${Date.now()}`, timestamp: new Date().toISOString(),
-              action: "hook_executed", agentId: nodeId,
-              details: `Billing error — fell back to Ollama (${effectiveOllamaModel})`, success: false });
-          }
-
-          const responseText = callResult.text;
-          const toolCall     = parseToolCall(responseText);
-
-          if (!toolCall) {
-            finalText = responseText;
-            break;
-          }
-
-          // Stop may have been pressed while the model was answering.
-          if (isRunCancelled()) break;
+        // Shared by the node and the helpers it dispatches.
+        const shared = {
+          maxSteps: data.maxSteps || 5,
+          deadline: Date.now() + timeoutSeconds * 1000,
+          isCancelled: isRunCancelled,
+          preferText: noNativeTools.has(nativeKey),
+          // A billing error on a hosted provider retries via the text path, whose
+          // provider call falls back to local Ollama (never to a remote one). A
+          // backend without chat_turn (the VS Code extension) uses the text path too.
+          fallbackOnError: (e: unknown) =>
+            /Unhandled command: "chat_turn"/.test(String(e)) ||
+            ((runtimeProvider === "openai" || runtimeProvider === "anthropic") &&
+              shouldFallbackToOllama(String(e)) && !isRemoteOllamaUrl(effectiveOllamaUrl)),
+          callTurn: (system: string, messages: ChatMessage[], tools: ToolSpec[]) =>
+            callChatTurn({ ...providerParams, systemMsg: system, messages, tools }, invoke),
+          callText: async (system: string, userMsg: string) => {
+            const callResult = await callProvider({ ...providerParams, systemMsg: system, userMsg }, invoke);
+            if (callResult.usedOllamaFallback) {
+              addEntry({ id: `${nodeId}-fb-${Date.now()}`, timestamp: new Date().toISOString(),
+                action: "hook_executed", agentId: nodeId,
+                details: `Billing error — fell back to Ollama (${effectiveOllamaModel})`, success: false });
+            }
+            return callResult.text;
+          },
+        };
+        const logToolCall = (who: string) => (call: ToolCall) => {
           toolCallCount++;
           addEntry({ id: `${nodeId}-tool-${toolCallCount}-${Date.now()}`, timestamp: new Date().toISOString(),
             action: "file_read", agentId: nodeId,
-            details: `Tool: ${toolCall.name}(${JSON.stringify(toolCall.args)})`, success: true });
+            details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
+        };
 
-          const toolResult = await executeTool(toolCall, workspacePath, invoke, data.tools as string[]);
-          const beforeTool = stripToolCall(responseText);
+        const subAgents = createSubAgentRunner({
+          parentName: data.name,
+          workflowName: meta.name,
+          parentTools: data.tools as string[],
+          isCancelled: isRunCancelled,
+          runLoop: (child) => runAgentLoop({
+            ...shared,
+            system: child.system,
+            userMessage: child.userMessage,
+            tools: child.tools,
+            timeoutMessage: `Sub-agent "${child.name}" ran past ${data.name}'s ${timeoutSeconds}s limit`,
+            runTool: (call) => executeTool(call, workspacePath, invoke, child.tools),
+            onToolCall: logToolCall(`↳ ${child.name} — `),
+          }),
+          onEvent: (details, success) => {
+            eventCount++;
+            addEntry({ id: `${nodeId}-sub-${eventCount}-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, details, success });
+          },
+          // The activity panel shows the helpers from the node's run record. A helper
+          // can finish after its run ended (Stop): never write it into a newer run.
+          onUpdate: (record) => {
+            if (useExecutionStore.getState().currentRun?.id !== runId) return;
+            const i = helpers.findIndex((h) => h.id === record.id);
+            if (i >= 0) helpers[i] = record;
+            else helpers.push(record);
+            updateAgent(nodeId, { subAgents: [...helpers] });
+          },
+        });
 
-          currentMsg =
-            `${currentMsg}\n\n` +
-            `[Step ${toolCallCount}: called ${toolCall.name}]\n` +
-            (beforeTool ? `${beforeTool}\n` : "") +
-            `<tool_result>${toolResult}</tool_result>\n\n` +
-            `Now continue your task based on the tool result above.`;
-
-          stepsDone++;
+        const loop = await runAgentLoop({
+          ...shared,
+          system: systemMsg,
+          userMessage: baseUserMsg,
+          tools: data.tools as string[],
+          timeoutMessage: `${data.name} timed out after ${timeoutSeconds}s`,
+          runTool: (call) => call.name === SUBAGENT_TOOL
+            ? subAgents.dispatch(call.args)
+            : executeTool(call, workspacePath, invoke, data.tools as string[]),
+          onToolCall: logToolCall(""),
+          concurrentTools: [SUBAGENT_TOOL],
+          maxConcurrent: MAX_CONCURRENT_SUBAGENTS,
+        });
+        if (loop.nativeRefused) {
+          noNativeTools.add(nativeKey);
+          addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "workflow_loaded", agentId: nodeId,
+            details: `${model} via ${runtimeProvider} refused native tool calls — using the text tool protocol`,
+            success: true });
         }
-
-        if (!finalText && stepsDone >= maxSteps)
-          finalText = `[Reached max steps (${maxSteps}). Last context:\n${currentMsg.slice(-500)}]`;
+        const finalText = loop.text;
 
         // Store output + memory
         agentOutputs.set(nodeId, finalText);
@@ -602,7 +622,7 @@ export function useWorkflowExecution() {
           updateAgent(nodeId, { output: accumulated });
         }
 
-        const tokenEstimate = estimateTokens(systemMsg, currentMsg, finalText);
+        const tokenEstimate = loop.tokenEstimate + subAgents.tokenEstimate();
         updateAgent(nodeId, {
           status: "done", output: finalText, finishedAt: Date.now(),
           tokenEstimate, providerUsed: runtimeProvider, modelUsed: model,
@@ -639,8 +659,8 @@ export function useWorkflowExecution() {
       } catch (e) {
         if (isRunCancelled()) {
           // Stopped while this node was working: not a failure of the node.
-          updateAgent(nodeId, { status: "skipped", error: "Stopped by user", finishedAt: Date.now() });
-          updateNodeData(nodeId, { status: "idle" });
+          updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+          updateNodeData(nodeId, { status: "stopped" });
           return;
         }
         updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });

@@ -7,6 +7,9 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   callProvider,
+  callChatTurn,
+  type ChatMessage,
+  type ChatTurnParams,
   buildSystemMessage,
   resolveModel,
   estimateTokens,
@@ -246,5 +249,59 @@ describe("callProvider — missing API key", () => {
     await expect(
       callProvider(makeParams({ provider: "ollama", apiKey: "", requiresKey: false }), spy as unknown as InvokeFn)
     ).resolves.not.toThrow();
+  });
+});
+
+// ── callChatTurn (native tool calling) ────────────────────────────────────────
+
+describe("callChatTurn", () => {
+  const reply = { text: "ok", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+  const history: ChatMessage[] = [{ role: "user", text: "hi" }];
+  const turn = (overrides: Partial<ChatTurnParams> = {}): ChatTurnParams => {
+    const { userMsg: _unused, ...base } = makeParams();
+    return { ...base, messages: history, tools: [], ...overrides };
+  };
+
+  it("sends the history and tools to chat_turn with the provider's API model ID", async () => {
+    const spy = vi.fn(async () => reply);
+    const res = await callChatTurn(
+      turn({ provider: "anthropic", model: "claude-sonnet-4.6", apiKey: "k" }), spy as unknown as InvokeFn,
+    );
+    expect(res).toEqual(reply);
+    expect(spy).toHaveBeenCalledWith("chat_turn", expect.objectContaining({
+      provider: "anthropic", model: "claude-sonnet-4-6", apiKey: "k",
+      system: "You are a test agent.", messages: history, tools: [], maxTokens: 256,
+    }));
+  });
+
+  it("uses the Ollama model, base URL and key for Ollama", async () => {
+    const spy = vi.fn(async () => reply);
+    await callChatTurn(
+      turn({ provider: "ollama-cloud", ollamaModel: "gemma4-31b:cloud", ollamaBaseUrl: "https://ollama.com/api", ollamaApiKey: "ok" }),
+      spy as unknown as InvokeFn,
+    );
+    expect(spy).toHaveBeenCalledWith("chat_turn", expect.objectContaining({
+      provider: "ollama-cloud", model: "gemma4:31b-cloud", baseUrl: "https://ollama.com/api", apiKey: "ok",
+    }));
+  });
+
+  it("sends a keyless custom endpoint its URL and no reasoning effort", async () => {
+    const spy = vi.fn(async () => reply);
+    await callChatTurn(
+      turn({ provider: "openai-compatible", model: "openai", apiKey: "", customBaseUrl: " https://x/v1 ", reasoningEffort: "high" }),
+      spy as unknown as InvokeFn,
+    );
+    expect(spy).toHaveBeenCalledWith("chat_turn", expect.objectContaining({
+      provider: "openai-compatible", baseUrl: "https://x/v1", apiKey: "", reasoningEffort: null,
+    }));
+  });
+
+  it("refuses a missing custom URL or a missing required key before calling", async () => {
+    const spy = vi.fn(async () => reply);
+    await expect(callChatTurn(turn({ provider: "openai-compatible" }), spy as unknown as InvokeFn))
+      .rejects.toThrow(/Custom endpoint URL/);
+    await expect(callChatTurn(turn({ apiKey: "", requiresKey: true }), spy as unknown as InvokeFn))
+      .rejects.toThrow(/API key/);
+    expect(spy).not.toHaveBeenCalled();
   });
 });

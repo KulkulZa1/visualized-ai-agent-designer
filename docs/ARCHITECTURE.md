@@ -33,6 +33,23 @@ up to `executionSettings.maxParallel`. Feedback edges are ignored for dependency
 scheduling, and gateway routes skip branches whose labels do not match the
 selected route.
 
+Inside a node, `src/services/execution/agentLoop.ts` runs the model ⇄ tool loop:
+
+- **Native tool calls** (nodes with runnable tools): the Rust `chat_turn` command
+  sends JSON-schema tool definitions and a real message history in each
+  provider's format (Anthropic `tool_use`/`tool_result`, OpenAI `tool_calls` +
+  `role: "tool"`, Ollama `tool_calls` + `tool_name`); every call of a turn is
+  answered. Only tools offered to the agent run.
+- **Text protocol** (`<tool_call>` tags, one tool per step): nodes without tools,
+  models or servers that refuse tool definitions (remembered for the run), a
+  first-call billing error (so the local Ollama fallback applies), and the VS Code
+  extension, whose invoke shim has no `chat_turn`.
+- **Sub-agents** (`subagent_dispatch`, `src/services/execution/subAgents.ts`): an
+  agent starts helpers with a fresh context, a subset of its tools and its
+  provider, model, deadline and Stop; each report returns as the tool result.
+  One level deep, at most 5 per node run and 3 at a time. Each helper is recorded
+  on the node's run (`AgentRun.subAgents`) and listed in the activity panel.
+
 Important boundaries:
 
 - This is JavaScript async concurrency inside the renderer, not OS process isolation.
@@ -79,7 +96,9 @@ Partial/mock:
   During workflow runs only Hook-role nodes run their pre-hook.
 - Agents have no shell tool: `bash`/`run_command` calls are refused and the
   `execute_inline_command` IPC command was removed. Agent file tools (read, list,
-  grep, `fs.write`, `fs.append`) are confined to the open workspace.
+  grep, `fs.write`, `fs.append`) are confined to the open workspace, and an agent
+  can only run the tools offered to it. A sub-agent gets a subset of its parent's
+  tools and cannot start sub-agents.
 - Default Tauri capabilities do not allow frontend shell execute/kill.
 - CLI is read-only.
 - MCP has no write tools and no workflow execution.

@@ -23,6 +23,7 @@ CLI is read-only. MCP is read/test-only.
 | Hidden cloud calls | No hidden provider calls added; health checks are explicit run/setup actions and a run's preflight contacts only providers that run will use; the billing-error fallback only goes to a local Ollama server | Show exact payload previews before remote calls |
 | Prompt injection | Agent shell execution is disabled, so model output never runs as a command. Model-issued `fs.write`/`fs.append` calls (for nodes granted those tools) do write files inside the open workspace | Add prompt-injection warnings and redaction for persisted traces; per-command consent before re-enabling shell execution |
 | MCP command injection | `run_tests.filter` validates characters and rejects traversal before spawning | Keep MCP test tools bounded |
+| Tool and sub-agent escalation | An agent runs only the tools offered to it (read tools included); the system prompt names only those. `subagent_dispatch` helpers get a subset of their parent's tools, cannot start helpers themselves, share the parent's deadline and Stop, and are capped at 5 per node run (3 at a time) | A single helper cannot be stopped on its own (Stop ends the whole run) |
 
 ## Provider Privacy
 

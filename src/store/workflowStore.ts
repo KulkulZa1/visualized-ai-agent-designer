@@ -241,7 +241,8 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
         const savedId = new Map(nodes.map((n, i) => [n.id, `agent-${i}`]));
         return {
           meta,
-          agents: nodes.map((n) => n.data),
+          // "stopped" is display-only: the workflow file schema does not accept it.
+          agents: nodes.map((n) => n.data.status === "stopped" ? { ...n.data, status: "idle" as const } : n.data),
           connections: edges
             .filter((e) => savedId.has(e.source) && savedId.has(e.target))
             .map((e) => ({

@@ -8,7 +8,7 @@ const OPENAI_RATE_LIMIT_MESSAGE: &str =
     "OpenAI API rate limit reached. The application will retry with exponential backoff.";
 const ANTHROPIC_CREDIT_MESSAGE: &str =
     "Anthropic API is configured, but the account has insufficient API credits. Please recharge credits in Anthropic Console Plans & Billing.";
-const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
+pub(crate) const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/api";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5-coder:7b";
 const DEFAULT_OLLAMA_CLOUD_MODEL: &str = "gemma4:31b-cloud";
@@ -136,7 +136,7 @@ pub struct ProviderDefaults {
 /// forever, hanging the whole workflow if an endpoint accepts the connection
 /// but never responds. Connect fails fast; the response timeout is generous
 /// so slow local CPU models still finish.
-fn generation_client() -> Result<reqwest::Client, String> {
+pub(crate) fn generation_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(600))
@@ -157,7 +157,7 @@ fn without_query(url: &str) -> &str {
     url.split('?').next().unwrap_or(url)
 }
 
-fn resolve_api_key(provided: &str, env_name: &str) -> Result<String, String> {
+pub(crate) fn resolve_api_key(provided: &str, env_name: &str) -> Result<String, String> {
     let trimmed = provided.trim();
     if !trimmed.is_empty() {
         return Ok(trimmed.to_string());
@@ -373,6 +373,34 @@ pub async fn call_openai_api(
         is_custom,
     );
 
+    let value = post_openai(&client, &endpoint, &api_key, &body)
+        .await
+        .map_err(|f| f.message)?;
+    let parsed: OpenAIResponse = serde_json::from_value(value)
+        .map_err(|e| format!("Failed to parse OpenAI response: {e}"))?;
+    parsed
+        .choices
+        .into_iter()
+        .next()
+        .ok_or_else(|| "No content in OpenAI response".to_string())
+        .and_then(openai_reply_text)
+}
+
+/// A failed provider request; `status` is None when no HTTP response arrived.
+#[derive(Debug)]
+pub(crate) struct HttpFailure {
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+/// POST a Chat Completions request, retrying rate limits and temporary server
+/// errors (after 1 s, 2 s, 4 s). Returns the parsed JSON body.
+pub(crate) async fn post_openai(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, HttpFailure> {
     let delays = [1u64, 2, 4];
     let mut last_err = String::new();
 
@@ -382,52 +410,46 @@ pub async fn call_openai_api(
         }
 
         let mut req = client
-            .post(&endpoint)
+            .post(endpoint)
             .header("Content-Type", "application/json");
         if !api_key.is_empty() {
             req = req.header("Authorization", format!("Bearer {}", api_key));
         }
-        let response = req
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Network error: {}", e.without_url()))?;
+        let response = req.json(body).send().await.map_err(|e| HttpFailure {
+            status: None,
+            message: format!("Network error: {}", e.without_url()),
+        })?;
 
         let status = response.status().as_u16();
+        let fail = |message: String| HttpFailure { status: Some(status), message };
 
         if response.status().is_success() {
-            let parsed: OpenAIResponse = response
+            return response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse OpenAI response: {}", e.without_url()))?;
-            return parsed
-                .choices
-                .into_iter()
-                .next()
-                .ok_or_else(|| "No content in OpenAI response".to_string())
-                .and_then(openai_reply_text);
+                .map_err(|e| fail(format!("Failed to parse OpenAI response: {}", e.without_url())));
         }
 
         let text = response.text().await.unwrap_or_default();
         let normalized = normalize_provider_error("openai", status, &text);
         if normalized.billing_related {
-            return Err(normalized.message);
+            return Err(fail(normalized.message));
         }
         if normalized.retryable {
             if attempt == 3 {
-                return Err(format!(
+                return Err(fail(format!(
                     "{} Retried 3 times without success.",
                     normalized.message
-                ));
+                )));
             }
             last_err = format!("OpenAI rate limit: retrying... (attempt {})", attempt + 1);
             eprintln!("{last_err}");
             continue;
         }
-        return Err(normalized.message);
+        return Err(fail(normalized.message));
     }
 
-    Err(last_err)
+    Err(HttpFailure { status: None, message: last_err })
 }
 
 // ── Anthropic / Claude ────────────────────────────────────────────────────────
@@ -476,7 +498,28 @@ async fn anthropic_call_inner(
             content: user_message.to_string(),
         }],
     };
+    let body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
 
+    let value = post_anthropic(client, &api_key, &body)
+        .await
+        .map_err(|f| f.message)?;
+    let parsed: ClaudeResponse = serde_json::from_value(value)
+        .map_err(|e| format!("Failed to parse Anthropic response: {e}"))?;
+    parsed
+        .content
+        .into_iter()
+        .find(|b| b.kind == "text")
+        .and_then(|b| b.text)
+        .ok_or_else(|| "No text content in Anthropic response".to_string())
+}
+
+/// POST a Messages API request, retrying rate limits and temporary server
+/// errors (after 1 s, 2 s, 4 s). Returns the parsed JSON body.
+pub(crate) async fn post_anthropic(
+    client: &reqwest::Client,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, HttpFailure> {
     let delays = [1u64, 2, 4];
     let mut last_err = String::new();
 
@@ -487,40 +530,38 @@ async fn anthropic_call_inner(
 
         let response = client
             .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&body)
+            .json(body)
             .send()
             .await
-            .map_err(|e| format!("Anthropic network error: {e}"))?;
+            .map_err(|e| HttpFailure {
+                status: None,
+                message: format!("Anthropic network error: {e}"),
+            })?;
 
         let status = response.status().as_u16();
+        let fail = |message: String| HttpFailure { status: Some(status), message };
 
         if response.status().is_success() {
-            let parsed: ClaudeResponse = response
+            return response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse Anthropic response: {e}"))?;
-            return parsed
-                .content
-                .into_iter()
-                .find(|b| b.kind == "text")
-                .and_then(|b| b.text)
-                .ok_or_else(|| "No text content in Anthropic response".to_string());
+                .map_err(|e| fail(format!("Failed to parse Anthropic response: {e}")));
         }
 
         let text = response.text().await.unwrap_or_default();
         let normalized = normalize_provider_error("anthropic", status, &text);
         if normalized.billing_related {
-            return Err(normalized.message);
+            return Err(fail(normalized.message));
         }
         if normalized.retryable {
             if attempt == 3 {
-                return Err(format!(
+                return Err(fail(format!(
                     "{} Retried 3 times without success.",
                     normalized.message
-                ));
+                )));
             }
             last_err = format!(
                 "Anthropic rate limit: retrying... (attempt {})",
@@ -529,10 +570,10 @@ async fn anthropic_call_inner(
             eprintln!("{last_err}");
             continue;
         }
-        return Err(normalized.message);
+        return Err(fail(normalized.message));
     }
 
-    Err(last_err)
+    Err(HttpFailure { status: None, message: last_err })
 }
 
 #[tauri::command]
@@ -598,7 +639,6 @@ pub async fn call_ollama_api(
         &base_url,
         ollama_requires_api_key(&base_url),
     )?;
-    let url = ollama_api_endpoint(&base_url, "chat");
     let model = normalize_ollama_model(&model);
 
     let body = serde_json::json!({
@@ -613,42 +653,10 @@ pub async fn call_ollama_api(
         },
     });
 
-    let mut request = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    if let Some(ref api_key) = api_key {
-        request = request.header("Authorization", format!("Bearer {api_key}"));
-    }
-
-    let response = request
-        .send()
+    let value = post_ollama(&client, &base_url, api_key.as_deref(), &body, &model)
         .await
-        .map_err(|_| ollama_unavailable_message(&base_url))?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if matches!(status.as_u16(), 401 | 403) {
-            return Err(format!(
-                "Ollama endpoint returned {status}. If this is Ollama Cloud or an authenticated remote endpoint, set OLLAMA_API_KEY or OLLAMA_REMOTE_API_KEY."
-            ));
-        }
-        // Ollama answers a missing model with 404 / "model '…' not found". Other
-        // errors that merely mention "model" (e.g. out of memory) are reported as-is.
-        if status.as_u16() == 404 || text.to_lowercase().contains("not found") {
-            return Err(format!(
-                "Ollama model {model} is not installed. Run: ollama pull {model}"
-            ));
-        }
-        let safe_text = redact_secret(&text, api_key.as_deref());
-        return Err(format!("Ollama {status}: {safe_text}"));
-    }
-
-    let parsed: OllamaChatResponse = response
-        .json()
-        .await
+        .map_err(|f| f.message)?;
+    let parsed: OllamaChatResponse = serde_json::from_value(value)
         .map_err(|e| format!("Failed to parse Ollama response: {e}"))?;
 
     if parsed.message.content.trim().is_empty() {
@@ -656,6 +664,55 @@ pub async fn call_ollama_api(
     } else {
         Ok(parsed.message.content)
     }
+}
+
+/// POST to Ollama's `/api/chat` (no retries). Returns the parsed JSON body.
+pub(crate) async fn post_ollama(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    body: &serde_json::Value,
+    model: &str,
+) -> Result<serde_json::Value, HttpFailure> {
+    let url = ollama_api_endpoint(base_url, "chat");
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", "application/json")
+        .json(body);
+
+    if let Some(api_key) = api_key {
+        request = request.header("Authorization", format!("Bearer {api_key}"));
+    }
+
+    let response = request.send().await.map_err(|_| HttpFailure {
+        status: None,
+        message: ollama_unavailable_message(base_url),
+    })?;
+
+    let status = response.status();
+    let fail = |message: String| HttpFailure { status: Some(status.as_u16()), message };
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        if matches!(status.as_u16(), 401 | 403) {
+            return Err(fail(format!(
+                "Ollama endpoint returned {status}. If this is Ollama Cloud or an authenticated remote endpoint, set OLLAMA_API_KEY or OLLAMA_REMOTE_API_KEY."
+            )));
+        }
+        // Ollama answers a missing model with 404 / "model '…' not found". Other
+        // errors that merely mention "model" (e.g. out of memory) are reported as-is.
+        if status.as_u16() == 404 || text.to_lowercase().contains("not found") {
+            return Err(fail(format!(
+                "Ollama model {model} is not installed. Run: ollama pull {model}"
+            )));
+        }
+        let safe_text = redact_secret(&text, api_key);
+        return Err(fail(format!("Ollama {status}: {safe_text}")));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| fail(format!("Failed to parse Ollama response: {e}")))
 }
 
 // ── Provider health check ─────────────────────────────────────────────────────
@@ -685,7 +742,7 @@ fn ollama_missing_api_key_message() -> String {
     "Ollama Cloud is selected, but no API key is configured. Set OLLAMA_API_KEY for ollama.com, or OLLAMA_REMOTE_API_KEY for an authenticated remote endpoint.".to_string()
 }
 
-fn ollama_requires_api_key(base_url: &str) -> bool {
+pub(crate) fn ollama_requires_api_key(base_url: &str) -> bool {
     let host = ollama_host(base_url);
     host == "ollama.com" || host.ends_with(".ollama.com")
 }
@@ -763,7 +820,7 @@ fn anthropic_models_fallback(status: u16) -> Option<Vec<String>> {
 /// Workflows use dotted display versions ("claude-sonnet-4.6"); the Anthropic API
 /// only accepts hyphenated IDs ("claude-sonnet-4-6") and 404s on the dotted form.
 /// Mirrors toAnthropicModelId() in providerAdapter.ts.
-fn normalize_anthropic_model(model: &str) -> String {
+pub(crate) fn normalize_anthropic_model(model: &str) -> String {
     let model = model.trim();
     if model.starts_with("claude-") {
         model.replace('.', "-")
@@ -772,14 +829,14 @@ fn normalize_anthropic_model(model: &str) -> String {
     }
 }
 
-fn normalize_ollama_model(model: &str) -> String {
+pub(crate) fn normalize_ollama_model(model: &str) -> String {
     match model.trim() {
         "gemma4-31b:cloud" => "gemma4:31b-cloud".to_string(),
         value => value.to_string(),
     }
 }
 
-fn resolve_ollama_api_key_for_endpoint(
+pub(crate) fn resolve_ollama_api_key_for_endpoint(
     provided: &str,
     base_url: &str,
     required: bool,
@@ -1427,7 +1484,7 @@ fn _use_mask_key(key: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -1453,7 +1510,7 @@ mod tests {
         bytes.len() >= header_end + 4 + content_length
     }
 
-    fn spawn_mock_ollama_server(status: u16, body: &'static str) -> (String, Receiver<String>) {
+    pub(crate) fn spawn_mock_ollama_server(status: u16, body: &'static str) -> (String, Receiver<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let (tx, rx) = mpsc::channel();

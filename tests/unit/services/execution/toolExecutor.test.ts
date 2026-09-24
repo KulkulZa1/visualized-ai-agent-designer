@@ -4,6 +4,10 @@ import {
   parseToolCall,
   stripToolCall,
   buildToolInstructions,
+  runnableTools,
+  toolDefinitions,
+  nativeToolName,
+  toolForNativeName,
 } from "@/services/execution/toolExecutor";
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
 
@@ -344,5 +348,66 @@ describe("executeTool — list_files", () => {
     );
     expect(result).toContain("src/components/App.tsx");
     expect(result).not.toContain("main.ts");
+  });
+});
+
+// ── Native tool definitions ───────────────────────────────────────────────────
+
+describe("runnableTools / toolDefinitions", () => {
+  it("keeps only the tools that actually run", () => {
+    expect(runnableTools(["read_file", "todo_write", "web_search", "fs.append", "bash"]))
+      .toEqual(["read_file", "fs.append"]);
+  });
+
+  it("offers runnable tools as JSON-schema definitions with provider-safe names", () => {
+    const defs = toolDefinitions(["read_file", "fs.write", "web_search"]);
+    expect(defs.map((d) => d.name)).toEqual(["read_file", "fs_write"]);
+    expect(defs[0].parameters).toMatchObject({ type: "object", required: ["path"] });
+    expect(defs[1].parameters).toMatchObject({ type: "object", required: ["path", "content"] });
+    for (const d of toolDefinitions(["read_file", "fs.read", "list_files", "grep", "fs.write", "fs.append"])) {
+      expect(d.name).toMatch(/^[a-zA-Z0-9_-]{1,64}$/);
+      expect(d.description.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("maps a native name back to the node's tool", () => {
+    expect(nativeToolName("fs.append")).toBe("fs_append");
+    expect(toolForNativeName("fs_append", ["read_file", "fs.append"])).toBe("fs.append");
+    expect(toolForNativeName("fs_write", ["read_file"])).toBeNull();
+    // Text-protocol aliases still resolve to the offered tool.
+    expect(toolForNativeName("write_file", ["fs.write"])).toBe("fs.write");
+  });
+});
+
+describe("executeTool — native (non-string) arguments", () => {
+  it("coerces a numeric path and writes object content as JSON", async () => {
+    const invoke = vi.fn(async () => undefined) as unknown as InvokeFn;
+    await executeTool(
+      { name: "fs.write", args: { path: 42, content: { ok: true } } }, "/workspace", invoke, ["fs.write"],
+    );
+    expect(invoke).toHaveBeenCalledWith("write_workspace_file", {
+      workspacePath: "/workspace", relativePath: "42", content: JSON.stringify({ ok: true }, null, 2),
+    });
+  });
+});
+
+describe("subagent_dispatch definition", () => {
+  it("is runnable and offered with a required task, a name and a tools list", () => {
+    expect(runnableTools(["subagent_dispatch", "todo_write"])).toEqual(["subagent_dispatch"]);
+    const [def] = toolDefinitions(["subagent_dispatch"]);
+    expect(def.name).toBe("subagent_dispatch");
+    expect(def.parameters).toMatchObject({
+      type: "object",
+      required: ["task"],
+      properties: {
+        task: { type: "string" },
+        name: { type: "string" },
+        tools: { type: "array", items: { type: "string" } },
+      },
+    });
+  });
+
+  it("is described in the text protocol too", () => {
+    expect(buildToolInstructions(["subagent_dispatch"])).toContain("• subagent_dispatch:");
   });
 });
