@@ -74,6 +74,57 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
   },
 };
 
+// ── Native tool definitions ───────────────────────────────────────────────────
+
+/** A tool definition in JSON-schema form, for providers with native tool calling. */
+export interface ToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+const REQUIRED_ARGS: Record<string, string[]> = {
+  read_file: ["path"],
+  "fs.read": ["path"],
+  list_files: [],
+  grep: ["path", "pattern"],
+  "fs.write": ["path", "content"],
+  "fs.append": ["path", "content"],
+};
+
+/** The node's tools that actually run; the others (web_search, …) never execute. */
+export function runnableTools(allowedTools: string[]): string[] {
+  return allowedTools.filter((t) => t in SAFE_TOOL_DEFS || t in WRITE_EXEC_TOOL_DEFS);
+}
+
+/** Provider tool names may only use [a-zA-Z0-9_-]: "fs.read" is offered as "fs_read". */
+export function nativeToolName(tool: string): string {
+  return tool.replace(/\./g, "_");
+}
+
+/** The node's tool a call refers to (native name, tool name or alias), or null
+ *  when the agent was not offered it. */
+export function toolForNativeName(name: string, allowedTools: string[]): string | null {
+  const canonical = TOOL_ALIASES[name] ?? name;
+  return runnableTools(allowedTools).find((t) => t === canonical || nativeToolName(t) === name) ?? null;
+}
+
+export function toolDefinitions(allowedTools: string[]): ToolSpec[] {
+  return runnableTools(allowedTools).map((tool) => {
+    const def = SAFE_TOOL_DEFS[tool] ?? WRITE_EXEC_TOOL_DEFS[tool];
+    const properties = Object.fromEntries(
+      Object.entries(def.args).map(([arg, text]) => [
+        arg, { type: "string", description: text.replace(/^\(optional\)\s*/, "") },
+      ]),
+    );
+    return {
+      name: nativeToolName(tool),
+      description: def.description,
+      parameters: { type: "object", properties, required: REQUIRED_ARGS[tool] ?? [] },
+    };
+  });
+}
+
 // Canonical name for each tool alias (LLM may use either form)
 const TOOL_ALIASES: Record<string, string> = {
   write_file: "fs.write",
@@ -134,7 +185,14 @@ If you don't need a tool right now, respond normally without any tool_call tags.
 
 export interface ToolCall {
   name: string;
-  args: Record<string, string>;
+  args: Record<string, unknown>;
+}
+
+/** Native tool calls may send numbers or objects where the tool expects text. */
+function argText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value === undefined || value === null) return "";
+  return typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
 }
 
 export function parseToolCall(text: string): ToolCall | null {
@@ -195,7 +253,7 @@ export async function executeTool(
     // ── Read tools ───────────────────────────────────────────────────────────
 
     if (name === "read_file" || name === "fs.read") {
-      const path = args.path ?? args.file ?? "";
+      const path = argText(args.path ?? args.file);
       if (!path) return "[error] read_file requires a 'path' argument.";
       const content = await invokeFn<string>("read_workspace_file", {
         workspacePath,
@@ -218,8 +276,8 @@ export async function executeTool(
         }
       };
       walk(entries);
-      const prefix = (args.path ?? "").trim().replace(/\\/g, "/").replace(/^\/|\/$/g, "");
-      const pattern = (args.pattern ?? "").trim();
+      const prefix = argText(args.path).trim().replace(/\\/g, "/").replace(/^\/|\/$/g, "");
+      const pattern = argText(args.pattern).trim();
       const filtered = flat
         .filter((e) => {
           if (prefix && e.path !== prefix && !e.path.startsWith(`${prefix}/`)) return false;
@@ -232,8 +290,8 @@ export async function executeTool(
     }
 
     if (name === "grep") {
-      const path = args.path ?? "";
-      const pattern = args.pattern ?? "";
+      const path = argText(args.path);
+      const pattern = argText(args.pattern);
       if (!path || !pattern) return "[error] grep requires 'path' and 'pattern' arguments.";
       const content = await invokeFn<string>("read_workspace_file", {
         workspacePath,
@@ -255,9 +313,9 @@ export async function executeTool(
     // ── Write tools ──────────────────────────────────────────────────────────
 
     if (name === "fs.write" || name === "write_file") {
-      const path = args.path ?? "";
+      const path = argText(args.path);
       if (!path) return "[error] fs.write requires a 'path' argument.";
-      const content = args.content ?? "";
+      const content = argText(args.content);
       await invokeFn<void>("write_workspace_file", {
         workspacePath,
         relativePath: path.trim(),
@@ -267,9 +325,9 @@ export async function executeTool(
     }
 
     if (name === "fs.append" || name === "append_file") {
-      const path = args.path ?? "";
+      const path = argText(args.path);
       if (!path) return "[error] fs.append requires a 'path' argument.";
-      const toAppend = args.content ?? "";
+      const toAppend = argText(args.content);
       // Only a missing file counts as empty. Any other read failure (e.g. a
       // non-UTF-8 file) must not turn the append into an overwrite. Rust io
       // errors end in "(os error 2)" (not found) / "(os error 3)" (no such

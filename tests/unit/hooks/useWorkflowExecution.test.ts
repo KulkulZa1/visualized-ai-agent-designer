@@ -77,6 +77,52 @@ describe("useWorkflowExecution", () => {
     expect(finished?.status).toBe("error");
   });
 
+  it("runs a tool-using node with native tool calls, offering and naming only runnable tools", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile, ToolPermission.WebSearch];
+    node.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const turns: Array<{ system: string; tools: Array<{ name: string }>; messages: unknown[] }> = [];
+    mockInvokeHandler("chat_turn", (args) => {
+      turns.push(args as (typeof turns)[number]);
+      return turns.length === 1
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+            toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }] }
+        : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+    mockInvokeHandler("read_workspace_file", () => "A");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(turns[0].tools.map((t) => t.name)).toEqual(["read_file"]);
+    expect(turns[0].system).toContain("Allowed tools: read_file\n");
+    expect(turns[1].messages).toHaveLength(3); // user, assistant tool call, tool result
+  });
+
+  it("falls back to the text protocol when the model refuses native tools, for the rest of the run", async () => {
+    const a = makeNode("A");
+    const b = makeNode("B");
+    a.data.tools = b.data.tools = [ToolPermission.ReadFile];
+    useWorkflowStore.setState({
+      nodes: [a, b],
+      edges: [{ id: "e", source: "A", target: "B" }],
+    });
+    let nativeCalls = 0;
+    let textCalls = 0;
+    mockInvokeHandler("chat_turn", () => {
+      nativeCalls++;
+      return { text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false };
+    });
+    mockInvokeHandler("call_ollama_api", () => { textCalls++; return "ok"; });
+
+    const finished = await run();
+
+    expect(finished?.status).toBe("done");
+    expect(nativeCalls).toBe(1); // B does not try native tools again
+    expect(textCalls).toBe(2);
+  });
+
   it("refuses to start a second run while one is already starting or running", async () => {
     useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
     let providerCalls = 0;
@@ -275,9 +321,13 @@ describe("useWorkflowExecution", () => {
     node.data.maxSteps = 3;
     useWorkflowStore.setState({ nodes: [node], edges: [] });
     let providerCalls = 0;
-    mockInvokeHandler("call_ollama_api", () => {
+    // A node with tools uses native tool calls (chat_turn).
+    mockInvokeHandler("chat_turn", () => {
       providerCalls++;
-      return '<tool_call>{"name":"read_file","args":{"path":"a.md"}}</tool_call>';
+      return {
+        text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+        toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }],
+      };
     });
     mockInvokeHandler("read_workspace_file", () =>
       new Promise<string>((resolve) => setTimeout(() => resolve("text"), 120)));

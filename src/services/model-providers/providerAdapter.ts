@@ -10,6 +10,7 @@
 
 import type { RuntimeProvider } from "@/utils/providerConfig";
 import { isRemoteOllamaUrl, shouldFallbackToOllama } from "@/utils/providerConfig";
+import type { ToolSpec } from "@/services/execution/toolExecutor";
 
 // ── Public types ─────────────────────────────────────────────────────────────
 
@@ -203,6 +204,70 @@ export async function callProvider(
     }
     throw primaryErr;
   }
+}
+
+// ── Native tool calling (one model turn) ──────────────────────────────────────
+
+export interface NativeToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+export interface NativeToolResult {
+  id: string;
+  name: string;
+  content: string;
+  isError: boolean;
+}
+
+/** Provider-neutral history; the Rust `chat_turn` command serializes it per provider. */
+export type ChatMessage =
+  | { role: "user"; text: string }
+  | { role: "assistant"; text: string; toolCalls: NativeToolCall[] }
+  | { role: "tool"; toolResults: NativeToolResult[] };
+
+export interface ChatReply {
+  text: string;
+  toolCalls: NativeToolCall[];
+  finishReason: string;
+  /** False when the model or server refused the tool definitions. */
+  nativeToolsSupported: boolean;
+}
+
+export interface ChatTurnParams extends Omit<ProviderCallParams, "userMsg"> {
+  messages: ChatMessage[];
+  tools: ToolSpec[];
+}
+
+/** One model turn with native tool calling — same provider mapping as `callProvider`. */
+export async function callChatTurn(params: ChatTurnParams, invokeFn: InvokeFn): Promise<ChatReply> {
+  const {
+    provider, model, apiKey, requiresKey, systemMsg, messages, tools, maxTokens,
+    ollamaBaseUrl, ollamaModel, ollamaApiKey, customBaseUrl, reasoningEffort,
+  } = params;
+  const turn = (args: Record<string, unknown>) => invokeFn<ChatReply>("chat_turn", {
+    system: systemMsg, messages, tools, maxTokens, reasoningEffort: null, baseUrl: null, ...args,
+  });
+
+  if (provider === "ollama" || provider === "ollama-cloud") {
+    return turn({ provider, model: resolveModel(ollamaModel), apiKey: ollamaApiKey ?? "", baseUrl: ollamaBaseUrl });
+  }
+  if (provider === "openai-compatible") {
+    if (!customBaseUrl?.trim()) {
+      throw new Error("Custom endpoint URL is not configured. Add it in Settings → Custom Endpoint.");
+    }
+    return turn({ provider, model, apiKey: apiKey || "", baseUrl: customBaseUrl.trim() });
+  }
+  if (!apiKey && requiresKey) {
+    throw new Error(`No ${provider} API key. Add it in Settings or set the provider key in the environment.`);
+  }
+  return turn({
+    provider,
+    model: provider === "anthropic" ? toAnthropicModelId(model) : model,
+    apiKey,
+    ...(provider === "openai" ? { reasoningEffort } : {}),
+  });
 }
 
 // ── Token estimator ───────────────────────────────────────────────────────────
