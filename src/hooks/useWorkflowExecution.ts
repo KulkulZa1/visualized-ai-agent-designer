@@ -563,8 +563,10 @@ export function useWorkflowExecution() {
             addEntry({ id: `${nodeId}-sub-${eventCount}-${Date.now()}`, timestamp: new Date().toISOString(),
               action: "workflow_loaded", agentId: nodeId, details, success });
           },
-          // The activity panel shows the helpers from the node's run record.
+          // The activity panel shows the helpers from the node's run record. A helper
+          // can finish after its run ended (Stop): never write it into a newer run.
           onUpdate: (record) => {
+            if (useExecutionStore.getState().currentRun?.id !== runId) return;
             const i = helpers.findIndex((h) => h.id === record.id);
             if (i >= 0) helpers[i] = record;
             else helpers.push(record);

@@ -23,7 +23,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 491 tests / 44 files |
+| `npx vitest run` | Passed, 492 tests / 44 files |
 | `cargo test` | Passed, 63 tests |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |

@@ -61,6 +61,10 @@ beforeEach(() => {
     message: "ok", model_available: true, pull_command: null,
   }));
   mockInvokeHandler("call_ollama_api", () => "ok");
+  // Nodes with tools use the text tool protocol unless a test registers its own chat_turn.
+  mockInvokeHandler("chat_turn", () => ({
+    text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false,
+  }));
 });
 
 describe("useWorkflowExecution", () => {
@@ -183,6 +187,34 @@ describe("useWorkflowExecution", () => {
         name: "B-reader", task: "Summarize b.md", status: "done", output: "summary of Summarize b.md",
       }),
     ]);
+  });
+
+  it("records a late-finishing helper on its own run only, never on a newer run", async () => {
+    const lead = makeNode("Lead");
+    // read_file gives the helper a runnable tool, so it too uses chat_turn.
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    let helperCalled = false;
+    mockInvokeHandler("chat_turn", (args) => {
+      if ((args as { system: string }).system.startsWith("You are Lead,")) {
+        return { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: "d1", name: "subagent_dispatch", args: { task: "t", name: "H" } }] };
+      }
+      helperCalled = true;
+      return new Promise(() => {}); // the helper is still working
+    });
+    const { result } = renderHook(() => useWorkflowExecution());
+
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      while (!helperCalled) await new Promise((resolve) => setTimeout(resolve, 10));
+      useExecutionStore.getState().startRun("next run"); // the helper now belongs to an old run
+      await first;
+    });
+
+    expect(useExecutionStore.getState().currentRun?.workflowName).toBe("next run");
+    expect(useExecutionStore.getState().currentRun?.agents.Lead?.subAgents).toBeUndefined();
   });
 
   it("refuses to start a second run while one is already starting or running", async () => {
