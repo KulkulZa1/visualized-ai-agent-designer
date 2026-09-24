@@ -21,7 +21,7 @@ rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 501 tests / 45 files (2026-09-24) |
+| Frontend tests | `npx vitest run` | Passed, 513 tests / 46 files (2026-09-24) |
 | Rust tests | `npm run test:rust` | Passed, 63 Rust tests (2026-09-24) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
@@ -51,7 +51,7 @@ Installer outputs:
 | Feature | Current state |
 |---|---|
 | Canvas/editor | Working |
-| Parallel execution | Working; `runParallel()` (`src/services/execution/parallelScheduler.ts`) runs independent branches concurrently up to `executionSettings.maxParallel`; feedback edges excluded from deps, gateway routing prunes skipped branches |
+| Parallel execution | Working; `runParallel()` (`src/services/execution/parallelScheduler.ts`) runs independent branches concurrently up to `executionSettings.maxParallel`; feedback edges excluded from deps but drive revision loops (≤2 rounds), gateway routing prunes skipped branches |
 | YAML examples | Working; 7 workflow files detected by CLI/MCP |
 | AuditStrip filters | Working with All chip, kind filters, agent chips, empty states |
 | Workflow Wizard | Rule-based, working; blog and self-improvement flows verified in UI |

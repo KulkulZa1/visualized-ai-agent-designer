@@ -5,6 +5,8 @@ import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useAuditStore } from "@/store/auditStore";
+import { MAX_REVISION_ROUNDS } from "@/services/execution/routing";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 
@@ -281,6 +283,123 @@ describe("useWorkflowExecution", () => {
     expect(run?.status).toBe("cancelled");
     expect(run?.agents.Lead.status).toBe("stopped");
     expect(run?.agents.Lead.subAgents).toEqual([expect.objectContaining({ name: "H", status: "stopped" })]);
+  });
+
+  describe("revision loops", () => {
+    const who = (args: unknown) => /^You are (\w+),/.exec((args as { system: string }).system)![1];
+    const feedback = (source: string, target: string, label: string) =>
+      ({ id: `fb-${source}-${target}`, source, target, data: { edgeKind: "feedback", label } });
+
+    /** W drafts, R reviews (feedback edge back to W), D runs after the review. */
+    function reviewLoop(reviews: string[]) {
+      useWorkflowStore.setState({
+        nodes: [makeNode("W"), makeNode("R"), makeNode("D")],
+        edges: [{ id: "w-r", source: "W", target: "R" }, feedback("R", "W", "revise"), { id: "r-d", source: "R", target: "D" }],
+      });
+      const calls: Record<string, string[]> = { W: [], R: [], D: [] };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        calls[name].push((args as { userMessage: string }).userMessage);
+        if (name === "W") return `draft ${calls.W.length}`;
+        if (name === "R") return reviews[Math.min(calls.R.length, reviews.length) - 1];
+        return "shipped";
+      });
+      return calls;
+    }
+
+    it("re-runs the reviewed agent with the review and its previous output until the reviewer passes", async () => {
+      const calls = reviewLoop(["REVISE — tighten the intro", '{"verdict":"PASS"}']);
+
+      const finished = await run();
+
+      expect([calls.W.length, calls.R.length, calls.D.length]).toEqual([2, 2, 1]);
+      expect(calls.W[1]).toContain("REVISION REQUEST (round 1) from R");
+      expect(calls.W[1]).toContain("tighten the intro");
+      expect(calls.W[1]).toContain("YOUR PREVIOUS OUTPUT:\ndraft 1");
+      expect(calls.D[0]).toContain('{"verdict":"PASS"}'); // downstream sees the final review
+      expect(finished?.status).toBe("done");
+      expect(finished?.agents.W.revision).toBe(1);
+    });
+
+    it("stops after the revision limit and continues downstream", async () => {
+      const calls = reviewLoop(["REVISE"]);
+
+      const finished = await run();
+
+      expect([calls.W.length, calls.R.length, calls.D.length]).toEqual([1 + MAX_REVISION_ROUNDS, 1 + MAX_REVISION_ROUNDS, 1]);
+      expect(finished?.status).toBe("done");
+      expect(useAuditStore.getState().entries.some((e) => /revision limit/.test(e.details ?? ""))).toBe(true);
+    });
+
+    it("re-runs every node between the target and a gateway that routes back, then follows its final route", async () => {
+      const gate = makeNode("G");
+      gate.data.role = AgentRole.Gateway;
+      useWorkflowStore.setState({
+        nodes: [makeNode("D"), makeNode("C"), gate, makeNode("S")],
+        edges: [
+          { id: "d-c", source: "D", target: "C" }, { id: "c-g", source: "C", target: "G" },
+          feedback("G", "D", "revise"), { id: "g-s", source: "G", target: "S", data: { label: "ship" } },
+        ],
+      });
+      const count: Record<string, number> = { D: 0, C: 0, G: 0, S: 0 };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        count[name]++;
+        if (name === "G") return count.G === 1 ? '{"route":"revise"}' : '{"route":"ship"}';
+        return `${name} ${count[name]}`;
+      });
+
+      const finished = await run();
+
+      expect(count).toEqual({ D: 2, C: 2, G: 2, S: 1 });
+      expect(finished?.agents.S.status).toBe("done");
+    });
+
+    it("re-runs only the agents whose feedback edge the verdict names", async () => {
+      useWorkflowStore.setState({
+        nodes: [makeNode("A"), makeNode("B"), makeNode("R")],
+        edges: [
+          { id: "a-r", source: "A", target: "R" }, { id: "b-r", source: "B", target: "R" },
+          feedback("R", "A", "code-fix"), feedback("R", "B", "rust-fix"),
+        ],
+      });
+      const count: Record<string, number> = { A: 0, B: 0, R: 0 };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        count[name]++;
+        return name === "R" ? (count.R === 1 ? '{"verdict":"rust-fix"}' : "APPROVED") : "ok";
+      });
+
+      await run();
+
+      expect(count).toEqual({ A: 1, B: 2, R: 2 });
+    });
+
+    it("ends the loop when the run is stopped during a revision round", async () => {
+      useWorkflowStore.setState({
+        nodes: [makeNode("W"), makeNode("R")],
+        edges: [{ id: "w-r", source: "W", target: "R" }, feedback("R", "W", "revise")],
+      });
+      let draftCalls = 0;
+      mockInvokeHandler("call_ollama_api", (args) => {
+        if (who(args) === "R") return "REVISE";
+        draftCalls++;
+        return draftCalls === 1 ? "draft 1" : new Promise<string>(() => {}); // revising when Stop is pressed
+      });
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      await act(async () => {
+        const first = result.current.executeWorkflow(undefined, vi.fn());
+        while (draftCalls < 2) await new Promise((resolve) => setTimeout(resolve, 10));
+        useExecutionStore.getState().cancelRun();
+        await first;
+      });
+
+      const stopped = useExecutionStore.getState().currentRun;
+      expect(stopped?.status).toBe("cancelled");
+      expect(stopped?.agents.W.status).toBe("stopped");
+      expect(draftCalls).toBe(2);
+    });
   });
 
   it("refuses to start a second run while one is already starting or running", async () => {

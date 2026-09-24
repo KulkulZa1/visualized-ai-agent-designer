@@ -58,10 +58,16 @@ import {
   SUBAGENT_TOOL,
 } from "@/services/execution/subAgents";
 import { runParallel } from "@/services/execution/parallelScheduler";
+import {
+  firedFeedbackEdges,
+  MAX_REVISION_ROUNDS,
+  parseGatewayRoute,
+  revisionPath,
+} from "@/services/execution/routing";
 import { resolvePromptContent } from "@/services/execution/promptSource";
 import { entryAgentIds } from "@/services/execution/entryNodes";
 
-// ── Gateway route parser ──────────────────────────────────────────────────────
+// ── Edge helpers ──────────────────────────────────────────────────────────────
 
 type EdgeData = { label?: string; edgeKind?: string };
 
@@ -73,24 +79,6 @@ function edgeLabel(edge: { label?: unknown; data?: unknown }): string | undefine
   const dataLabel = (edge.data as EdgeData | undefined)?.label;
   if (typeof dataLabel === "string") return dataLabel;
   return typeof edge.label === "string" ? edge.label : undefined;
-}
-
-/**
- * Try to extract a routing key from a gateway's text output.
- * Looks for JSON `{"route":"X"}`, `{"target":"X"}`, `{"domain":"X"}`, `{"verdict":"X"}`.
- */
-function parseGatewayRoute(text: string): string | null {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    try {
-      const obj = JSON.parse(jsonMatch[0]);
-      const val = obj.route ?? obj.target ?? obj.domain ?? obj.verdict ?? obj.action ?? null;
-      if (typeof val === "string" && val.trim()) return val.trim().toLowerCase();
-    } catch { /* fall through */ }
-  }
-  const kvMatch = text.match(/(?:route|target|domain|verdict|action)\s*[":]\s*"?([a-zA-Z0-9_-]+)"?/i);
-  if (kvMatch) return kvMatch[1].toLowerCase();
-  return null;
 }
 
 // ── Provider types ────────────────────────────────────────────────────────────
@@ -305,6 +293,8 @@ export function useWorkflowExecution() {
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
     const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
+    // Feedback-edge target → the review it is being re-run for.
+    const revisionRequests = new Map<string, { from: string; text: string; round: number }>();
 
     const entryIds = entryAgentIds(nodes, edges);
     const isEntryNode = (id: string) => entryIds.has(id);
@@ -487,6 +477,13 @@ export function useWorkflowExecution() {
         }
         if (memoryContext)   userMsgParts.push(`MEMORY:\n${memoryContext}`);
         if (upstreamContext) userMsgParts.push(`UPSTREAM OUTPUTS:\n${upstreamContext}`);
+        // Re-run for a revision: the review, and what this agent produced last time.
+        const revision = revisionRequests.get(nodeId);
+        if (revision) {
+          userMsgParts.push(`REVISION REQUEST (round ${revision.round}) from ${revision.from}:\n${revision.text}`);
+          const previous = agentOutputs.get(nodeId);
+          if (previous) userMsgParts.push(`YOUR PREVIOUS OUTPUT:\n${previous}`);
+        }
         if (userMsgParts.length === 0)
           userMsgParts.push(`Execute your role as ${data.name} in the ${meta.name} workflow.`);
 
@@ -680,13 +677,48 @@ export function useWorkflowExecution() {
       }
     }
 
+    // ── Revision loops ─────────────────────────────────────────────────────────
+    // A node whose verdict fires its feedback edges re-runs the path from each
+    // target back to itself, then reviews again (at most MAX_REVISION_ROUNDS times).
+    // The scheduler awaits this, so downstream nodes see the final result.
+    async function runNode(nodeId: string): Promise<void> {
+      await processNode(nodeId);
+      const name = nodes.find((n) => n.id === nodeId)?.data.name ?? nodeId;
+      for (let round = 1; ; round++) {
+        if (isRunCancelled()) return;
+        const review = agentOutputs.get(nodeId) ?? "";
+        const targets = [...new Set(firedFeedbackEdges(nodeId, review, edges).map((e) => e.target))];
+        if (targets.length === 0) return;
+        if (round > MAX_REVISION_ROUNDS) {
+          addEntry({ id: `${nodeId}-revision-limit-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "workflow_loaded", agentId: nodeId, success: false,
+            details: `↺ ${name}: revision limit (${MAX_REVISION_ROUNDS}) reached — continuing with the latest version` });
+          return;
+        }
+        const targetNames = targets.map((t) => nodes.find((n) => n.id === t)?.data.name ?? t).join(", ");
+        addEntry({ id: `${nodeId}-revision-${round}-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "workflow_loaded", agentId: nodeId, success: true,
+          details: `↺ ${name} asked for revision ${round}/${MAX_REVISION_ROUNDS}: re-running ${targetNames}` });
+        for (const target of targets) revisionRequests.set(target, { from: name, text: review, round });
+        for (const id of revisionPath(targets, nodeId, edges)) {
+          if (isRunCancelled()) return;
+          updateAgent(id, { revision: round });
+          await processNode(id);
+        }
+        for (const target of targets) revisionRequests.delete(target);
+        if (isRunCancelled()) return;
+        updateAgent(nodeId, { revision: round });
+        await processNode(nodeId);
+      }
+    }
+
     // ── Parallel execution (replaces sequential for-loop) ────────────────────
     const maxParallel = executionSettings.maxParallel || 4;
     try {
       await runParallel(
         nodes,
         edges,
-        processNode,
+        runNode,
         {
           maxParallel,
           isCancelled: isRunCancelled,

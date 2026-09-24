@@ -30,6 +30,8 @@ export interface AgentRun {
   modelUsed?: string;
   tokenEstimate?: number;
   subAgents?: SubAgentRecord[];
+  /** Revision round the latest output belongs to (feedback loops); unset for the first run. */
+  revision?: number;
 }
 
 export interface WorkflowRun {
