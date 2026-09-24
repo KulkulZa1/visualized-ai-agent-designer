@@ -1,5 +1,20 @@
 export type AgentStatus = "idle" | "waiting" | "running" | "done" | "error" | "skipped";
 
+/** A helper started with `subagent_dispatch` while its parent node ran. */
+export interface SubAgentRecord {
+  id: string;
+  name: string;
+  task: string;
+  tools: string[];
+  status: "running" | "done" | "error";
+  startedAt: number;
+  finishedAt?: number;
+  /** The helper's final report. */
+  output?: string;
+  error?: string;
+  toolCalls?: number;
+}
+
 export interface AgentRun {
   agentId: string;
   agentName: string;
@@ -12,6 +27,7 @@ export interface AgentRun {
   providerUsed?: string;
   modelUsed?: string;
   tokenEstimate?: number;
+  subAgents?: SubAgentRecord[];
 }
 
 export interface WorkflowRun {

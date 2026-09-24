@@ -47,7 +47,8 @@ Inside a node, `src/services/execution/agentLoop.ts` runs the model ⇄ tool loo
 - **Sub-agents** (`subagent_dispatch`, `src/services/execution/subAgents.ts`): an
   agent starts helpers with a fresh context, a subset of its tools and its
   provider, model, deadline and Stop; each report returns as the tool result.
-  One level deep, at most 5 per node run and 3 at a time.
+  One level deep, at most 5 per node run and 3 at a time. Each helper is recorded
+  on the node's run (`AgentRun.subAgents`) and listed in the activity panel.
 
 Important boundaries:
 

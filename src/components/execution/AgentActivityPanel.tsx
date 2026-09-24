@@ -1,7 +1,7 @@
 /**
  * AgentActivityPanel — live view of a selected agent's execution state.
  *
- * Shows: upstream inputs → live output → downstream connections
+ * Shows: upstream inputs → live output (+ sub-agents it started) → downstream connections
  * Plus: status, model, elapsed time, token budget, prompt preview.
  *
  * Appears at the bottom of the canvas center column when a node is selected
@@ -12,6 +12,7 @@ import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useNodeExecutionData } from "@/hooks/useNodeExecutionData";
 import { ROLE_META } from "@/utils/nodeColors";
+import type { SubAgentRecord } from "@/types/execution";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -97,6 +98,56 @@ function ConnectionPill({
           {label}
         </span>
       )}
+    </div>
+  );
+}
+
+/** Helpers the agent started with subagent_dispatch: status, brief, report. */
+function SubAgentList({ helpers }: { helpers: SubAgentRecord[] }) {
+  return (
+    <div style={{ marginTop: 10 }}>
+      <SectionLabel>Sub-agents ({helpers.length})</SectionLabel>
+      {helpers.map((h) => (
+        <div key={h.id} style={{
+          marginBottom: 6, padding: "6px 8px", borderRadius: 5,
+          background: "var(--surface-2)", border: "1px solid var(--border)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
+            {statusDot(h.status)}
+            <span style={{ fontWeight: 600, color: "var(--text)" }}>{h.name}</span>
+            <span style={{ color: statusColor(h.status) }}>{h.status}</span>
+            <span style={{ fontSize: 10, color: "var(--hint)", fontFamily: "var(--font-mono)" }}>
+              ⏱ {elapsed(h.startedAt, h.finishedAt)}
+            </span>
+            {h.toolCalls !== undefined && (
+              <span style={{ fontSize: 10, color: "var(--hint)" }}>
+                {h.toolCalls} tool call{h.toolCalls === 1 ? "" : "s"}
+              </span>
+            )}
+            <span style={{ flex: 1 }}/>
+            {h.tools.map((t) => (
+              <span key={t} style={{
+                fontSize: 9, padding: "1px 5px", borderRadius: 3,
+                background: "var(--surface-3)", color: "var(--muted)",
+                fontFamily: "var(--font-mono)", border: "1px solid var(--border)",
+              }}>{t}</span>
+            ))}
+          </div>
+          <div title={h.task} style={{
+            fontSize: 10, color: "var(--muted)", marginTop: 3,
+            overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+          }}>{h.task}</div>
+          {(h.error || h.output) && (
+            <pre style={{
+              margin: "5px 0 0", padding: "5px 8px", borderRadius: 4,
+              background: "var(--bg)", border: "1px solid var(--border)",
+              color: h.error ? "var(--red)" : "var(--text)",
+              fontFamily: "var(--font-mono)", fontSize: 10,
+              whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 120, overflow: "auto",
+            }}>{h.error ?? h.output}</pre>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -416,6 +467,10 @@ export function AgentActivityPanel({
                 <span style={{ animation: "pulse 1s infinite" }}>●</span>
                 Generating…
               </div>
+            )}
+
+            {agentRun?.subAgents && agentRun.subAgents.length > 0 && (
+              <SubAgentList helpers={agentRun.subAgents} />
             )}
           </div>
         </div>

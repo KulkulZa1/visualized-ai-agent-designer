@@ -173,6 +173,16 @@ describe("useWorkflowExecution", () => {
       "Report from A-reader:\nsummary of Summarize a.md",
       "Report from B-reader:\nsummary of Summarize b.md",
     ]);
+    // The activity panel reads the helpers from the node's run record.
+    expect(finished?.agents.Lead.subAgents).toEqual([
+      expect.objectContaining({
+        name: "A-reader", task: "Summarize a.md", tools: ["read_file"],
+        status: "done", output: "summary of Summarize a.md",
+      }),
+      expect.objectContaining({
+        name: "B-reader", task: "Summarize b.md", status: "done", output: "summary of Summarize b.md",
+      }),
+    ]);
   });
 
   it("refuses to start a second run while one is already starting or running", async () => {

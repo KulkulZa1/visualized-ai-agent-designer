@@ -11,6 +11,7 @@
 import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
 import { runnableTools, toolForNativeName } from "@/services/execution/toolExecutor";
 import type { AgentLoopResult } from "@/services/execution/agentLoop";
+import type { SubAgentRecord } from "@/types/execution";
 
 export const SUBAGENT_TOOL = "subagent_dispatch";
 export const MAX_SUBAGENTS_PER_NODE = 5;
@@ -30,6 +31,8 @@ export interface SubAgentRunnerOptions {
   /** Runs the helper's loop with the parent's provider, deadline and Stop. */
   runLoop: (child: SubAgentRun) => Promise<AgentLoopResult>;
   onEvent?: (message: string, success: boolean) => void;
+  /** Each helper's state when it starts and when it finishes (activity panel). */
+  onUpdate?: (record: SubAgentRecord) => void;
 }
 
 const HELPER_INSTRUCTIONS =
@@ -66,13 +69,21 @@ export function createSubAgentRunner(opts: SubAgentRunnerOptions) {
       tools, memoryRead: [], memoryWrite: [], promptContent: HELPER_INSTRUCTIONS,
     });
 
+    const record: SubAgentRecord = {
+      id: `sub-${started}`, name, task, tools, status: "running", startedAt: Date.now(),
+    };
+    opts.onUpdate?.(record);
     opts.onEvent?.(`↳ Sub-agent "${name}" started by ${opts.parentName}: ${task.slice(0, 120)}`, true);
     try {
       const result = await opts.runLoop({ name, system, userMessage: task, tools });
       tokens += result.tokenEstimate;
+      opts.onUpdate?.({
+        ...record, status: "done", output: result.text, toolCalls: result.toolCalls, finishedAt: Date.now(),
+      });
       opts.onEvent?.(`✓ Sub-agent "${name}" reported (${result.text.length} chars)`, true);
       return `Report from ${name}:\n${result.text}`;
     } catch (e) {
+      opts.onUpdate?.({ ...record, status: "error", error: String(e), finishedAt: Date.now() });
       opts.onEvent?.(`✗ Sub-agent "${name}" failed: ${String(e)}`, false);
       return `[error] Sub-agent ${name} failed: ${String(e)}`;
     }

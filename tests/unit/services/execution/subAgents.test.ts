@@ -5,8 +5,12 @@ import {
   type SubAgentRun,
 } from "@/services/execution/subAgents";
 import type { AgentLoopResult } from "@/services/execution/agentLoop";
+import type { SubAgentRecord } from "@/types/execution";
 
-function setup(runLoop?: (child: SubAgentRun) => Promise<AgentLoopResult>) {
+function setup(
+  runLoop?: (child: SubAgentRun) => Promise<AgentLoopResult>,
+  onUpdate?: (record: SubAgentRecord) => void,
+) {
   const loop = vi.fn(runLoop ?? (async (child: SubAgentRun): Promise<AgentLoopResult> => ({
     text: `did: ${child.userMessage}`, toolCalls: 0, mode: "native", nativeRefused: false, tokenEstimate: 10,
   })));
@@ -17,6 +21,7 @@ function setup(runLoop?: (child: SubAgentRun) => Promise<AgentLoopResult>) {
     parentTools: ["read_file", "fs.write", "subagent_dispatch", "web_search"],
     runLoop: loop,
     onEvent: (message) => events.push(message),
+    onUpdate,
   });
   return { subAgents, loop, events };
 }
@@ -73,5 +78,26 @@ describe("createSubAgentRunner", () => {
     await subAgents.dispatch({ task: "good" });
     await subAgents.dispatch({ task: "good" });
     expect(subAgents.tokenEstimate()).toBe(14);
+  });
+
+  it("reports each helper's progress for the activity panel", async () => {
+    const updates: SubAgentRecord[] = [];
+    const { subAgents } = setup(async (child) => {
+      if (child.userMessage === "bad") throw new Error("boom");
+      return { text: "the report", toolCalls: 2, mode: "native", nativeRefused: false, tokenEstimate: 1 };
+    }, (record) => updates.push(record));
+
+    await subAgents.dispatch({ task: "good", name: "Reader", tools: ["read_file"] });
+    await subAgents.dispatch({ task: "bad", name: "Broken" });
+
+    expect(updates.map((u) => [u.id, u.name, u.status])).toEqual([
+      ["sub-1", "Reader", "running"], ["sub-1", "Reader", "done"],
+      ["sub-2", "Broken", "running"], ["sub-2", "Broken", "error"],
+    ]);
+    expect(updates[1]).toMatchObject({
+      task: "good", tools: ["read_file"], output: "the report", toolCalls: 2,
+    });
+    expect(updates[1].finishedAt).toBeGreaterThanOrEqual(updates[1].startedAt);
+    expect(updates[3]).toMatchObject({ error: "Error: boom" });
   });
 });

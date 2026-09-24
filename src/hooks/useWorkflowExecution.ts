@@ -4,7 +4,8 @@
  * What this now does properly:
  * 1. AGENT CHAINING   — upstream agent outputs are passed as context to downstream agents
  * 2. MEMORY           — memoryRead/memoryWrite keys persist values across agents per run
- * 3. TOOL EXECUTION   — read_file, list_files, grep executed via Tauri on <tool_call> tags
+ * 3. TOOL EXECUTION   — the node's tools run through agentLoop.ts (native tool calls, <tool_call>
+ *                       fallback); subagent_dispatch starts helper agents (subAgents.ts)
  * 4. GATEWAY ROUTING  — gateway JSON output determines which downstream branch to follow
  * 5. MEMORY NODES     — aggregate upstream outputs into memory keys (no LLM call needed)
  * 6. PARALLEL EXEC    — independent branches run concurrently up to executionSettings.maxParallel
@@ -20,6 +21,7 @@ import type { HookResult } from "@/types/hookResult";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
 import { createSnapshot } from "@/services/context-builder/snapshotService";
 import type { Artifact } from "@/types/inspection";
+import type { SubAgentRecord } from "@/types/execution";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -509,6 +511,7 @@ export function useWorkflowExecution() {
         const nativeKey = `${runtimeProvider}:${model}`;
         let toolCallCount = 0;
         let eventCount = 0;
+        const helpers: SubAgentRecord[] = [];
 
         // Shared by the node and the helpers it dispatches.
         const shared = {
@@ -559,6 +562,13 @@ export function useWorkflowExecution() {
             eventCount++;
             addEntry({ id: `${nodeId}-sub-${eventCount}-${Date.now()}`, timestamp: new Date().toISOString(),
               action: "workflow_loaded", agentId: nodeId, details, success });
+          },
+          // The activity panel shows the helpers from the node's run record.
+          onUpdate: (record) => {
+            const i = helpers.findIndex((h) => h.id === record.id);
+            if (i >= 0) helpers[i] = record;
+            else helpers.push(record);
+            updateAgent(nodeId, { subAgents: [...helpers] });
           },
         });
 
