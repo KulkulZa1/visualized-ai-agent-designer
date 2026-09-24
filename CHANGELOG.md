@@ -6,7 +6,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Native tool calling** — agents with runnable tools call them through the provider's native tool calling (new Rust `chat_turn` command for Anthropic, OpenAI and compatible endpoints, and Ollama): JSON-schema tool definitions, a real message history, and every tool call of a turn answered. Models or servers that refuse tool definitions fall back to the `<tool_call>` text protocol for the rest of the run; so does the VS Code extension, whose invoke shim lacks the command.
+- **Sub-agents** — `subagent_dispatch` now starts helper agents while a node runs: each gets a fresh context, a subset of its parent's tools and the parent's provider, model, deadline and Stop, and its final report comes back as the tool result; several dispatches in one turn run in parallel. One level deep, at most 5 per node run and 3 at a time; starts, reports and tool calls are in the audit log.
+
 ### Changed
+- **Only offered tools run** — an agent can no longer run a tool it was not given (read tools were never checked), and the system prompt's "Allowed tools" names only tools that actually run.
+- **Examples that list `subagent_dispatch`** (Parallel Research's Coordinator, the Harness Studio project's orchestrator) now really start helpers when the model chooses to, which adds model calls.
 - **Hooks during workflow runs** — only Hook-role nodes run their `preHook`; pre/post hooks on agent nodes run only manually from the Hooks tab and `postHook` never runs during runs. A `requireConsent` hook fails its node instead of running, a failed hook stops the run even with `continueOnError`, and hooks receive only `AGENT_ID`, `WORKSPACE` and their declared env (no per-call `HOOK_INPUT`). A Hook node times out after its own `timeoutSeconds` (default 30 s, max 1 h); a manual run from the Hooks tab uses 30 s.
 - **Permission matrix and validator** — pre/post hooks on agent nodes are no longer presented as a "gate" ("Add guard" removed); the validator warns that `bash` is disabled.
 - **Unapplied settings are labeled** — temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}` and workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` are still not applied at runtime, and the UI now says so.
@@ -15,6 +21,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Repository** — root `CLAUDE.md` is a short pointer to `AGENT.md` (the generated 12-agent harness moved to `examples/harness-studio-project.CLAUDE.md`); `src-tauri/target-codex-verify*` and `.claude/settings.local.json` untracked; `outputs/` ignored; the empty-state screenshot moved to `docs/assets/empty-state.png`; `.gitattributes` added (LF).
 
 ### Fixed
+- **Tool names with leaked template tokens** — gpt-oss behind some servers returns names like `read_file<|channel|>commentary`; they are now cleaned instead of refused as unknown tools.
 - **Native tool calls from OpenAI-compatible endpoints** — servers that parse the model's tool intent themselves (e.g. gpt-oss behind vLLM) reply with `tool_calls` and no `content`; every agent then failed with "Failed to parse OpenAI response" at its first tool call, and a tool call next to text was dropped. The first native call is now passed to the run loop as a `<tool_call>`, and an empty reply reports its `finish_reason`. Found by a live run against a free endpoint.
 - **Purchasing demo docs** — `docs/E2E_DEMO_PLAN.md`'s expected ranking now follows its own rubric (SUP-A 92.0 > SUP-B 89.5 > SUP-C 43.5, not SUP-B first), and the example no longer claims to append to `.harness/decision-log.jsonl`.
 - **Monaco editor now bundled locally** — it previously loaded from `cdn.jsdelivr.net` at runtime, which is unreachable air-gapped and blocked by the CSP (`script-src 'self'`) in every packaged build. Opening `.md`/`.yaml` files now works fully offline. `monaco-editor` is an explicit dependency; CSP `worker-src` gained `'self'`.
