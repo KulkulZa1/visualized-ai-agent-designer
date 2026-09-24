@@ -13,8 +13,8 @@ development and demos, but not ready for broad release.
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 513 tests / 46 files (verified 2026-09-24) |
-| `cargo test` | Passed, 63 tests (verified 2026-09-24) |
+| `npx vitest run` | Passed, 538 tests / 49 files (verified 2026-09-25) |
+| `cargo test` | Passed, 74 tests (verified 2026-09-25) |
 | `npm run build` | Passed |
 | `npm run tauri -- dev` | Launched desktop binary and WebView2 (earlier pass, not re-run) |
 | `npm run tauri -- build` | Produced MSI and NSIS installers (earlier pass, not re-run) |

@@ -37,8 +37,8 @@ npm run build
 Latest verified results (2026-09-24):
 
 - TypeScript passed.
-- Vitest passed, 513 tests / 46 files.
-- Rust tests passed, 63 tests.
+- Vitest passed, 538 tests / 49 files.
+- Rust tests passed, 74 tests.
 - Frontend build passed with Vite chunk warnings only.
 
 ## Build Installers

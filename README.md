@@ -19,8 +19,8 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Area | Result |
 |---|---|
 | TypeScript | `npx tsc --noEmit` passed |
-| Frontend/unit tests | `npx vitest run` passed, 513 tests / 46 files |
-| Rust tests | `cargo test` passed, 63 tests |
+| Frontend/unit tests | `npx vitest run` passed, 538 tests / 49 files |
+| Rust tests | `cargo test` passed, 74 tests |
 | Frontend build | `npm run build` passed |
 | Tauri dev app | `npm run tauri -- dev` launched `agent-workflow-builder.exe` and WebView2 |
 | Tauri package | `npm run tauri -- build` produced MSI and NSIS installers |
