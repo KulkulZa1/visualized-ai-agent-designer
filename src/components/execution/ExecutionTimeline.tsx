@@ -8,6 +8,7 @@ const STATUS_COLOR: Record<AgentStatus, string> = {
   done:    "rgba(95,191,127,0.7)",
   error:   "rgba(224,117,117,0.7)",
   skipped: "var(--hint)",
+  stopped: "var(--hint)",
 };
 
 function TimelineBar({

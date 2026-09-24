@@ -1,4 +1,5 @@
-export type AgentStatus = "idle" | "waiting" | "running" | "done" | "error" | "skipped";
+/** "skipped": not run because of gateway routing; "stopped": the run was stopped while it worked. */
+export type AgentStatus = "idle" | "waiting" | "running" | "done" | "error" | "skipped" | "stopped";
 
 /** A helper started with `subagent_dispatch` while its parent node ran. */
 export interface SubAgentRecord {

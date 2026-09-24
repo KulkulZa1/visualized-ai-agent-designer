@@ -17,7 +17,7 @@ run the workflow against configured providers.
 - Context inspector is useful but not a complete durable trace yet.
 - Artifact viewer still uses mock placeholders during execution.
 - Agents can use workspace file tools (read, list, grep, `fs.write`, `fs.append`); the `bash`/`run_command` tool is disabled and refused. An agent only runs the tools you gave it.
-- An agent with the `subagent_dispatch` tool can start helper agents while it runs: each gets a fresh context, a subset of the agent's tools and the same model, and reports back. Helpers cannot start helpers; at most 5 per node run, 3 at a time. The node's activity panel lists each helper with its status, task, tools, time and report (or error); a helper still working when you press Stop shows as stopped; starts and tool calls are also in the audit log.
+- An agent with the `subagent_dispatch` tool can start helper agents while it runs: each gets a fresh context, a subset of the agent's tools and the same model, and reports back. Helpers cannot start helpers; at most 5 per node run, 3 at a time. The node's activity panel lists each helper with its status, task, tools, time and report (or error); a helper still working when you press Stop shows as stopped, and so does the node itself; starts and tool calls are also in the audit log.
 - During runs only Hook-role nodes run their pre-hook. Hooks on agent nodes run only when you click **Run hook** in the Hooks tab, and a hook marked "require consent" is not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway condition text, prompt `{{variables}}`, and workflow-level timeout/retry settings are saved but not applied at runtime yet.
 - CLI is read-only.
@@ -90,7 +90,7 @@ npm run build
 npm run tauri -- build
 ```
 
-Latest verified baseline (2026-09-24): TypeScript passed, Vitest 495 tests /
+Latest verified baseline (2026-09-24): TypeScript passed, Vitest 498 tests /
 44 files passed, 63 Rust tests passed, and the frontend build passed. Tauri dev
 launch and the MSI/NSIS package build were verified in an earlier pass and not
 re-run.

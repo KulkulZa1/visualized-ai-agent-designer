@@ -385,6 +385,11 @@ export function AgentActivityPanel({
                 ↷ Skipped by gateway
               </span>
             )}
+            {status === "stopped" && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: "var(--hint)" }}>
+                ■ Stopped
+              </span>
+            )}
             {!hasRun && status === "idle" && (
               <span style={{ fontSize: 10, color: "var(--hint)" }}>
                 Output

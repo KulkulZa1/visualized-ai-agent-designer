@@ -64,7 +64,7 @@ describe("AgentActivityPanel", () => {
         id: "r", workflowName: "W", startedAt: now, status: "cancelled",
         agents: {
           n1: {
-            agentId: "n1", agentName: "Lead", status: "skipped", startedAt: now,
+            agentId: "n1", agentName: "Lead", status: "stopped", startedAt: now,
             subAgents: [{ id: "sub-1", name: "H", task: "t", tools: [], status: "stopped",
               startedAt: now, finishedAt: now + 500 }],
           },
@@ -73,10 +73,29 @@ describe("AgentActivityPanel", () => {
       isRunning: false,
     });
 
+    const { getAllByText, container } = render(<AgentActivityPanel nodeId="n1" onClose={() => {}} />);
+
+    // The node's header status and the helper's status both read "stopped", in grey.
+    for (const label of getAllByText("stopped")) expect(label.style.color).toBe("var(--hint)");
+    expect(container.querySelectorAll("pre")).toHaveLength(0);
+  });
+
+  it("labels a node stopped by the user as Stopped, not skipped by a gateway", () => {
+    useWorkflowStore.getState().addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
+    const now = Date.now();
+    useExecutionStore.setState({
+      currentRun: {
+        id: "r", workflowName: "W", startedAt: now, status: "cancelled",
+        agents: { n1: { agentId: "n1", agentName: "n1", status: "stopped", startedAt: now, finishedAt: now + 900 } },
+      },
+      isRunning: false,
+    });
+
     const { getByText, container } = render(<AgentActivityPanel nodeId="n1" onClose={() => {}} />);
 
-    expect(getByText("stopped").style.color).toBe("var(--hint)");
-    expect(container.querySelectorAll("pre")).toHaveLength(0);
+    expect(getByText("■ Stopped").style.color).toBe("var(--hint)");
+    expect(container.textContent).not.toContain("Skipped by gateway");
+    expect(container.textContent).not.toContain("Run the workflow to see output here");
   });
 
   it("shows no sub-agent section for a node without helpers", () => {

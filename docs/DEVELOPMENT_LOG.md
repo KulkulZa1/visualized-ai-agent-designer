@@ -5,11 +5,11 @@
 - Agents with runnable tools now use the provider's native tool calling: Rust `chat_turn` (Anthropic, OpenAI and compatible, Ollama) takes a provider-neutral history plus JSON-schema tool definitions; the model ⇄ tool loop moved to `src/services/execution/agentLoop.ts`. The `<tool_call>` text protocol remains the fallback (no runnable tools, tools refused by the model or server, first-call billing error, VS Code extension).
 - Only tools offered to an agent run, and the system prompt names only runnable tools.
 - `subagent_dispatch` starts real helper agents (`src/services/execution/subAgents.ts`): fresh context, a subset of the parent's tools, the parent's provider/model/deadline/Stop; one level deep, max 5 per node run, 3 at a time.
-- The activity panel lists a node's helpers (status, task, tools, time, tool calls, report or error) from `AgentRun.subAgents`, updated as each helper starts and finishes; a helper still working when the run is stopped is shown as stopped, not failed.
+- The activity panel lists a node's helpers (status, task, tools, time, tool calls, report or error) from `AgentRun.subAgents`, updated as each helper starts and finishes; a helper still working when the run is stopped is shown as stopped, not failed, and so is its node (before: "skipped" with a "Stopped by user" error).
 - Live checks (free keyless endpoint `https://text.pollinations.ai/openai`, gpt-oss-20b, synthetic data; headless run through the real run loop and Rust `chat_turn` via a temporary localhost bridge):
   - Purchasing Decision with native tools: the multi-turn tool history was accepted and tools ran, but tool names came back as `read_file<|channel|>commentary`, which wasted steps; fixed (names are cleaned). The run still ended `error`: the Risk Reviewer spent four ~30 s steps guessing nonexistent file paths and passed its 90 s limit.
   - Sub-agents: an orchestrator dispatched three helpers (one per turn; the model did not batch them, so parallel dispatch was only exercised by unit tests); each read its note with only `read_file` and reported, and the orchestrator combined the reports correctly. Run `done` in 259 s; four 429 rate limits were absorbed by the retry.
-- Verification: `npx tsc --noEmit` passed; `npx vitest run` 495 tests / 44 files; `cargo test --manifest-path src-tauri/Cargo.toml` 63 tests; `cargo check` clean; `npm run build` passed.
+- Verification: `npx tsc --noEmit` passed; `npx vitest run` 498 tests / 44 files; `cargo test --manifest-path src-tauri/Cargo.toml` 63 tests; `cargo check` clean; `npm run build` passed.
 
 ## 2026-09-24 - Live Check Against a Free Cloud Model
 

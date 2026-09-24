@@ -217,6 +217,40 @@ describe("useWorkflowExecution", () => {
     expect(useExecutionStore.getState().currentRun?.agents.Lead?.subAgents).toBeUndefined();
   });
 
+  async function stopWhileRunning() {
+    const { result } = renderHook(() => useWorkflowExecution());
+    await act(async () => {
+      const first = result.current.executeWorkflow(undefined, vi.fn());
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      useExecutionStore.getState().cancelRun();
+      await first;
+    });
+    return useExecutionStore.getState().currentRun;
+  }
+
+  it("marks a node stopped, without an error, when the run is stopped while it works", async () => {
+    mockInvokeHandler("call_ollama_api", () => new Promise<string>(() => {})); // never answers
+    useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
+
+    const run = await stopWhileRunning();
+
+    expect(run?.agents.A.status).toBe("stopped");
+    expect(run?.agents.A.error).toBeUndefined();
+  });
+
+  it("marks a hook node stopped when the run is stopped while its hook runs", async () => {
+    const hook = makeNode("Gate");
+    hook.data.role = AgentRole.Hook;
+    hook.data.preHook = { path: ".harness/hooks/test_gate.sh", requireConsent: false };
+    useWorkflowStore.setState({ nodes: [hook], edges: [] });
+    mockInvokeHandler("execute_hook", () => new Promise(() => {})); // still running
+
+    const run = await stopWhileRunning();
+
+    expect(run?.agents.Gate.status).toBe("stopped");
+    expect(run?.agents.Gate.error).toBeUndefined();
+  });
+
   it("shows a helper as stopped when the run is stopped while it works", async () => {
     const lead = makeNode("Lead");
     lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
@@ -242,6 +276,7 @@ describe("useWorkflowExecution", () => {
 
     const run = useExecutionStore.getState().currentRun;
     expect(run?.status).toBe("cancelled");
+    expect(run?.agents.Lead.status).toBe("stopped");
     expect(run?.agents.Lead.subAgents).toEqual([expect.objectContaining({ name: "H", status: "stopped" })]);
   });
 
