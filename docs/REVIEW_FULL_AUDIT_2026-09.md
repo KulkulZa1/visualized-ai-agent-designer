@@ -16,7 +16,7 @@ and repository-hygiene changes were not.
 |---|---|
 | `npx tsc --noEmit` | 0 errors |
 | `npx vitest run` | 456 tests / 42 files pass (was 288 / 30) |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | 49 tests pass (was 30) |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 50 tests pass (was 30) |
 | `npm run build` | Passes (existing chunk-size warnings only) |
 | `cargo check --release` | Passes without the `devtools` feature |
 
@@ -85,6 +85,8 @@ was declined) and installer smoke tests on a clean machine.
 | Item | Why not fixed here |
 |---|---|
 | Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` are not applied at runtime | Features; temperature needs per-model rules (newer Claude and OpenAI reasoning models reject sampling params). Now labeled in the UI and docs |
+| 11 of the 17 node tools are never executed at run time: `web_search`, `web_fetch`, `classify`, `vector_search`, `cite`, `git`, `todo_write`, `subagent_dispatch`, `test`, `puppeteer` (plus `bash`, blocked by decision). Only `read_file`, `fs.read`, `list_files`, `grep`, `fs.write`, `fs.append` run, yet the system message still lists every node tool under "Allowed tools" | Implementing them (dynamic sub-agents, web access, test running) is the agent-runtime upgrade, not a fix |
+| Native tool calls: only the first of several `tool_calls` runs per step; `arguments` that are not valid JSON become `{}` (the tool reports what is missing and the model can retry) | The run loop's text protocol is one tool per step; native multi-call support needs the tool-use loop rework |
 | Gateway label matching is substring-based (`ui` matches `build`) | May be intended for `approved-with-changes`; needs a routing-spec decision |
 | Pre/post hooks never run on agent nodes; hooks get no per-call input | Running them would break the bundled examples (scripts expect `HOOK_INPUT`); needs a hook protocol design |
 | Backend trusts the frontend-supplied workspace root | Needs a backend-remembered workspace (design change) |

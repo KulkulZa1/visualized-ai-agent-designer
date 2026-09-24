@@ -38,7 +38,7 @@ Latest verified results (2026-09-24):
 
 - TypeScript passed.
 - Vitest passed, 456 tests / 42 files.
-- Rust tests passed, 49 tests.
+- Rust tests passed, 50 tests.
 - Frontend build passed with Vite chunk warnings only.
 
 ## Build Installers

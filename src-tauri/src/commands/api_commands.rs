@@ -1942,6 +1942,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_first_native_tool_call_is_rendered_and_bad_arguments_become_empty() {
+        // The run loop runs one tool per step. Arguments that are not valid JSON
+        // become {} so the tool reports what is missing and the model can retry.
+        let text = custom_endpoint_reply(
+            r#"{"choices":[{"message":{"tool_calls":[{"function":{"name":"fs.write","arguments":"{path: a.md}"}},{"function":{"name":"read_file","arguments":"{\"path\":\"b.md\"}"}}]},"finish_reason":"tool_calls"}]}"#,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tool_call_json(&text),
+            serde_json::json!({ "name": "fs.write", "args": {} })
+        );
+    }
+
+    #[tokio::test]
     async fn null_tool_calls_with_text_is_a_plain_reply() {
         let text = custom_endpoint_reply(r#"{"choices":[{"message":{"content":"hi","tool_calls":null}}]}"#)
             .await
