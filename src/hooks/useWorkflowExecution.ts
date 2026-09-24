@@ -517,10 +517,12 @@ export function useWorkflowExecution() {
           isCancelled: isRunCancelled,
           preferText: noNativeTools.has(nativeKey),
           // A billing error on a hosted provider retries via the text path, whose
-          // provider call falls back to local Ollama (never to a remote one).
+          // provider call falls back to local Ollama (never to a remote one). A
+          // backend without chat_turn (the VS Code extension) uses the text path too.
           fallbackOnError: (e: unknown) =>
-            (runtimeProvider === "openai" || runtimeProvider === "anthropic") &&
-            shouldFallbackToOllama(String(e)) && !isRemoteOllamaUrl(effectiveOllamaUrl),
+            /Unhandled command: "chat_turn"/.test(String(e)) ||
+            ((runtimeProvider === "openai" || runtimeProvider === "anthropic") &&
+              shouldFallbackToOllama(String(e)) && !isRemoteOllamaUrl(effectiveOllamaUrl)),
           callTurn: (system: string, messages: ChatMessage[], tools: ToolSpec[]) =>
             callChatTurn({ ...providerParams, systemMsg: system, messages, tools }, invoke),
           callText: async (system: string, userMsg: string) => {

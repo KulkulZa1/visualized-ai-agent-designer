@@ -123,6 +123,20 @@ describe("useWorkflowExecution", () => {
     expect(textCalls).toBe(2);
   });
 
+  it("uses the text protocol when the backend has no chat_turn command (VS Code extension)", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("chat_turn", () => {
+      throw new Error('[HarnessVscode] Unhandled command: "chat_turn". This command requires the Tauri runtime.');
+    });
+    mockInvokeHandler("call_ollama_api", () => "ok");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "ok" });
+  });
+
   it("lets an agent dispatch helpers that start fresh, use only its tools and report back", async () => {
     const lead = makeNode("Lead");
     lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
