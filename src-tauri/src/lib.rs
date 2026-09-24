@@ -8,6 +8,7 @@ use commands::{
         check_provider_health, get_provider_defaults, list_provider_models,
     },
     audit_commands::write_audit_entry,
+    chat_turn::chat_turn,
     fs_commands::{
         list_workspace_files, open_workspace_dialog, read_workspace_file, write_workspace_file,
     },
@@ -57,6 +58,7 @@ pub fn run() {
             call_anthropic_api,
             call_openai_api,
             call_ollama_api,
+            chat_turn,
             check_provider_health,
             get_provider_defaults,
             list_provider_models,
