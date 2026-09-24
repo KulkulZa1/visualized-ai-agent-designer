@@ -390,3 +390,24 @@ describe("executeTool — native (non-string) arguments", () => {
     });
   });
 });
+
+describe("subagent_dispatch definition", () => {
+  it("is runnable and offered with a required task, a name and a tools list", () => {
+    expect(runnableTools(["subagent_dispatch", "todo_write"])).toEqual(["subagent_dispatch"]);
+    const [def] = toolDefinitions(["subagent_dispatch"]);
+    expect(def.name).toBe("subagent_dispatch");
+    expect(def.parameters).toMatchObject({
+      type: "object",
+      required: ["task"],
+      properties: {
+        task: { type: "string" },
+        name: { type: "string" },
+        tools: { type: "array", items: { type: "string" } },
+      },
+    });
+  });
+
+  it("is described in the text protocol too", () => {
+    expect(buildToolInstructions(["subagent_dispatch"])).toContain("• subagent_dispatch:");
+  });
+});

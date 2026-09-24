@@ -123,6 +123,44 @@ describe("useWorkflowExecution", () => {
     expect(textCalls).toBe(2);
   });
 
+  it("lets an agent dispatch helpers that start fresh, use only its tools and report back", async () => {
+    const lead = makeNode("Lead");
+    lead.data.tools = [ToolPermission.SubagentDispatch, ToolPermission.ReadFile];
+    lead.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [lead], edges: [] });
+    type Turn = {
+      system: string; tools: Array<{ name: string }>;
+      messages: Array<{ role: string; text?: string; toolResults?: Array<{ content: string }> }>;
+    };
+    const turns: Turn[] = [];
+    mockInvokeHandler("chat_turn", (args) => {
+      const turn = args as Turn;
+      turns.push(turn);
+      if (!turn.system.startsWith("You are Lead,")) {
+        return { text: `summary of ${turn.messages[0].text}`, toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+      }
+      return turn.messages.length === 1
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true, toolCalls: [
+            { id: "d1", name: "subagent_dispatch", args: { task: "Summarize a.md", name: "A-reader" } },
+            { id: "d2", name: "subagent_dispatch", args: { task: "Summarize b.md", name: "B-reader" } },
+          ] }
+        : { text: "combined", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(finished?.agents.Lead).toMatchObject({ status: "done", output: "combined" });
+    const helpers = turns.filter((t) => !t.system.startsWith("You are Lead,"));
+    expect(helpers.map((h) => h.messages).sort((x, y) => String(x[0].text).localeCompare(String(y[0].text))))
+      .toEqual([[{ role: "user", text: "Summarize a.md" }], [{ role: "user", text: "Summarize b.md" }]]);
+    expect(helpers[0].tools.map((t) => t.name)).toEqual(["read_file"]);
+    const leadFinal = turns.find((t) => t.system.startsWith("You are Lead,") && t.messages.length === 3);
+    expect(leadFinal?.messages[2].toolResults?.map((r) => r.content)).toEqual([
+      "Report from A-reader:\nsummary of Summarize a.md",
+      "Report from B-reader:\nsummary of Summarize b.md",
+    ]);
+  });
+
   it("refuses to start a second run while one is already starting or running", async () => {
     useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
     let providerCalls = 0;

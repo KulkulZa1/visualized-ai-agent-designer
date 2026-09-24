@@ -151,3 +151,45 @@ describe("runAgentLoop — deadline and Stop", () => {
     expect(opts.runTool).not.toHaveBeenCalled();
   });
 });
+
+describe("runAgentLoop — concurrent tools", () => {
+  const tracked = () => {
+    const state = { running: 0, peak: 0 };
+    const runTool = vi.fn(async (call: { args: Record<string, unknown> }) => {
+      state.running++;
+      state.peak = Math.max(state.peak, state.running);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state.running--;
+      return `R:${String(call.args.task ?? call.args.path)}`;
+    });
+    return { state, runTool };
+  };
+
+  it("runs concurrent tools in parallel up to the limit and keeps result order", async () => {
+    const { state, runTool } = tracked();
+    const calls = [1, 2, 3, 4].map((i) => ({ id: `c${i}`, name: "subagent_dispatch", args: { task: `t${i}` } }));
+    const callTurn = vi.fn()
+      .mockResolvedValueOnce(reply({ toolCalls: calls }))
+      .mockResolvedValueOnce(reply({ text: "done" }));
+
+    await runAgentLoop(options({
+      tools: ["subagent_dispatch"], callTurn, runTool, concurrentTools: ["subagent_dispatch"], maxConcurrent: 3,
+    }));
+
+    expect(state.peak).toBe(3);
+    expect(callTurn.mock.calls[1][1][2].toolResults.map((r: { content: string }) => r.content))
+      .toEqual(["R:t1", "R:t2", "R:t3", "R:t4"]);
+  });
+
+  it("still runs other tools one at a time", async () => {
+    const { state, runTool } = tracked();
+    const calls = [1, 2, 3].map((i) => ({ id: `c${i}`, name: "read_file", args: { path: `p${i}` } }));
+    const callTurn = vi.fn()
+      .mockResolvedValueOnce(reply({ toolCalls: calls }))
+      .mockResolvedValueOnce(reply({ text: "done" }));
+
+    await runAgentLoop(options({ callTurn, runTool, concurrentTools: ["subagent_dispatch"], maxConcurrent: 3 }));
+
+    expect(state.peak).toBe(1);
+  });
+});

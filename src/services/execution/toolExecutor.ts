@@ -74,6 +74,22 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
   },
 };
 
+// Run by the agent loop (services/execution/subAgents.ts), not by executeTool.
+const AGENT_TOOL_DEFS: Record<string, ToolDef> = {
+  subagent_dispatch: {
+    name: "subagent_dispatch",
+    description:
+      "Start a helper agent with a fresh context to do one self-contained task and get its final report back. " +
+      "Put everything it needs in the task: the goal, relevant facts or file paths, constraints, and what to report. " +
+      "Several calls in one reply run in parallel.",
+    args: {
+      task: "The complete brief for the helper",
+      name: "(optional) Short label for the helper, e.g. spec-reader",
+      tools: "(optional) Which of your tools the helper may use, e.g. [\"read_file\"]; default: all of yours",
+    },
+  },
+};
+
 // ── Native tool definitions ───────────────────────────────────────────────────
 
 /** A tool definition in JSON-schema form, for providers with native tool calling. */
@@ -90,11 +106,21 @@ const REQUIRED_ARGS: Record<string, string[]> = {
   grep: ["path", "pattern"],
   "fs.write": ["path", "content"],
   "fs.append": ["path", "content"],
+  subagent_dispatch: ["task"],
 };
+
+// Arguments that are not plain strings.
+const ARG_SCHEMAS: Record<string, Record<string, Record<string, unknown>>> = {
+  subagent_dispatch: { tools: { type: "array", items: { type: "string" } } },
+};
+
+function toolDef(tool: string): ToolDef | undefined {
+  return SAFE_TOOL_DEFS[tool] ?? WRITE_EXEC_TOOL_DEFS[tool] ?? AGENT_TOOL_DEFS[tool];
+}
 
 /** The node's tools that actually run; the others (web_search, …) never execute. */
 export function runnableTools(allowedTools: string[]): string[] {
-  return allowedTools.filter((t) => t in SAFE_TOOL_DEFS || t in WRITE_EXEC_TOOL_DEFS);
+  return allowedTools.filter((t) => toolDef(t) !== undefined);
 }
 
 /** Provider tool names may only use [a-zA-Z0-9_-]: "fs.read" is offered as "fs_read". */
@@ -111,10 +137,11 @@ export function toolForNativeName(name: string, allowedTools: string[]): string 
 
 export function toolDefinitions(allowedTools: string[]): ToolSpec[] {
   return runnableTools(allowedTools).map((tool) => {
-    const def = SAFE_TOOL_DEFS[tool] ?? WRITE_EXEC_TOOL_DEFS[tool];
+    const def = toolDef(tool) as ToolDef;
     const properties = Object.fromEntries(
       Object.entries(def.args).map(([arg, text]) => [
-        arg, { type: "string", description: text.replace(/^\(optional\)\s*/, "") },
+        arg,
+        { ...(ARG_SCHEMAS[tool]?.[arg] ?? { type: "string" }), description: text.replace(/^\(optional\)\s*/, "") },
       ]),
     );
     return {
@@ -141,8 +168,9 @@ const TOOL_ALIASES: Record<string, string> = {
 export function buildToolInstructions(allowedTools: string[]): string {
   const safeNames = allowedTools.filter((t) => t in SAFE_TOOL_DEFS);
   const writeExecNames = allowedTools.filter((t) => t in WRITE_EXEC_TOOL_DEFS);
+  const agentNames = allowedTools.filter((t) => t in AGENT_TOOL_DEFS);
 
-  if (safeNames.length === 0 && writeExecNames.length === 0) return "";
+  if (safeNames.length === 0 && writeExecNames.length === 0 && agentNames.length === 0) return "";
 
   function formatDef(def: ToolDef): string {
     const argList = Object.entries(def.args)
@@ -164,6 +192,10 @@ export function buildToolInstructions(allowedTools: string[]): string {
       `modifying files, or running commands. Do not use these unless necessary.\n\n` +
       writeExecBlock
     );
+  }
+
+  if (agentNames.length > 0) {
+    sections.push(agentNames.map((n) => formatDef(AGENT_TOOL_DEFS[n])).join("\n\n"));
   }
 
   return `

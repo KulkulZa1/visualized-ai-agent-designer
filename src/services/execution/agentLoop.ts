@@ -48,6 +48,9 @@ export interface AgentLoopOptions {
   preferText?: boolean;
   /** First-call errors that should be retried with the text protocol. */
   fallbackOnError?: (error: unknown) => boolean;
+  /** Tools whose calls in one turn may run at the same time (sub-agents). */
+  concurrentTools?: string[];
+  maxConcurrent?: number;
 }
 
 export interface AgentLoopResult {
@@ -100,8 +103,29 @@ async function runOffered(opts: AgentLoopOptions, call: ToolCall): Promise<strin
 }
 
 async function answer(opts: AgentLoopOptions, call: NativeToolCall): Promise<NativeToolResult> {
+  // Stop may have been pressed while the model was answering or a tool ran.
+  if (opts.isCancelled()) throw new Error("Run stopped");
   const content = await runOffered(opts, call);
   return { id: call.id, name: call.name, content, isError: content.startsWith("[error]") };
+}
+
+/** Answer every call of a turn, in call order. Calls to concurrent tools run in
+ *  parallel (up to maxConcurrent); all other tools run one at a time. */
+async function answerAll(opts: AgentLoopOptions, calls: NativeToolCall[]): Promise<NativeToolResult[]> {
+  const results: NativeToolResult[] = new Array(calls.length);
+  const concurrent = new Set(opts.concurrentTools ?? []);
+  const indexes = calls.map((_, i) => i);
+  const isConcurrent = (i: number) => concurrent.has(toolForNativeName(calls[i].name, opts.tools) ?? "");
+  const run = async (i: number) => { results[i] = await answer(opts, calls[i]); };
+
+  const parallel = indexes.filter(isConcurrent);
+  let next = 0;
+  const worker = async () => { while (next < parallel.length) await run(parallel[next++]); };
+  await Promise.all([
+    (async () => { for (const i of indexes.filter((i) => !isConcurrent(i))) await run(i); })(),
+    ...Array.from({ length: Math.min(opts.maxConcurrent ?? 1, parallel.length) }, worker),
+  ]);
+  return results;
 }
 
 async function runNative(
@@ -135,14 +159,8 @@ async function runNative(
     }
 
     messages.push({ role: "assistant", text: reply.text, toolCalls: reply.toolCalls });
-    const results: NativeToolResult[] = [];
-    for (const call of reply.toolCalls) {
-      // Stop may have been pressed while the model was answering.
-      if (opts.isCancelled()) throw new Error("Run stopped");
-      results.push(await answer(opts, call));
-      toolCalls++;
-    }
-    messages.push({ role: "tool", toolResults: results });
+    messages.push({ role: "tool", toolResults: await answerAll(opts, reply.toolCalls) });
+    toolCalls += reply.toolCalls.length;
     last = reply.text;
   }
   return done(`[Reached max steps (${opts.maxSteps}).${last ? ` Last reply:\n${last.slice(-500)}` : ""}]`);
