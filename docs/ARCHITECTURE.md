@@ -33,8 +33,9 @@ up to `executionSettings.maxParallel`. Feedback edges are ignored for dependency
 scheduling, and gateway routes skip branches whose labels do not match the
 selected route. A node with outgoing feedback edges is a reviewer: when its
 verdict is REVISE (or names a feedback edge's label), the path from each fired
-edge's target back to the reviewer re-runs with the review and the target's
-previous output, then the reviewer runs again — at most `MAX_REVISION_ROUNDS`
+edge's target back to the reviewer re-runs with the review, the reviewer's
+other inputs the target does not see (e.g. the critique behind a gateway's
+route) and the target's previous output, then the reviewer runs again — at most `MAX_REVISION_ROUNDS`
 (2) times (`src/services/execution/routing.ts`). The scheduler awaits the whole
 loop, so downstream nodes and gateway routing use the final round.
 

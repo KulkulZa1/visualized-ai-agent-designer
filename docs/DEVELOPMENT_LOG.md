@@ -1,5 +1,19 @@
 ﻿# Development Log
 
+## 2026-09-25 - Revision Loops
+
+- Feedback edges now loop (`src/services/execution/routing.ts`, the `runNode` wrapper in `useWorkflowExecution.ts`). A node with outgoing feedback edges is a reviewer. When its verdict is REVISE, or it names a feedback edge's label, the path from each fired edge's target back to the reviewer re-runs, and then the reviewer runs again. This happens at most `MAX_REVISION_ROUNDS` (2) times, after which the run continues with the latest version. The scheduler awaits the loop, so downstream nodes and gateway routing see the final round.
+- A re-run agent gets a REVISION REQUEST with the review, its previous output, and whatever the reviewer read that the agent does not see itself.
+- Live check against the free keyless endpoint `https://text.pollinations.ai/openai` (gpt-oss-20b, synthetic data). It was a headless run through the real run loop and the Rust `call_openai_api`, over a temporary localhost bridge. The graph was Drafter → Critic → Loop Gate (gateway), with feedback from Loop Gate to Drafter ("revise") and Loop Gate → Publisher ("ship").
+  - First run: `done` in 276 s. Drafter, Critic and Loop Gate each ran 3 times and the revision limit was hit. The Drafter's revision request carried only the gate's `{"route":"revise"}`, not the Critic's note to add "Harness Studio", so it never fixed the draft. After the limit, the gate's last route ("revise") matched no forward edge, so every branch ran and the Publisher got the unrevised draft.
+  - Fixed test-first: the request now also carries the reviewer's other inputs, minus what the target already receives.
+  - Second run: `done` in 91 s. The Drafter added "Harness Studio" after one round, the Critic answered PASS, and the gate routed "ship". The Publisher ran once, with the revised draft. Counts: Drafter 2, Critic 2, Loop Gate 2, Publisher 1.
+- Verification:
+  - `npx tsc --noEmit` passed.
+  - `npx vitest run`: 513 tests / 46 files.
+  - `cargo test --manifest-path src-tauri/Cargo.toml`: 63 tests.
+  - `npm run build` passed.
+
 ## 2026-09-24 - Native Tool Calling and Sub-Agents
 
 - Agents with runnable tools now use the provider's native tool calling: Rust `chat_turn` (Anthropic, OpenAI and compatible, Ollama) takes a provider-neutral history plus JSON-schema tool definitions; the model ⇄ tool loop moved to `src/services/execution/agentLoop.ts`. The `<tool_call>` text protocol remains the fallback (no runnable tools, tools refused by the model or server, first-call billing error, VS Code extension).

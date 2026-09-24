@@ -294,10 +294,24 @@ export function useWorkflowExecution() {
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
     const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
     // Feedback-edge target → the review it is being re-run for.
-    const revisionRequests = new Map<string, { from: string; text: string; round: number }>();
+    const revisionRequests = new Map<string, { from: string; text: string; reviewed: string; round: number }>();
 
     const entryIds = entryAgentIds(nodes, edges);
     const isEntryNode = (id: string) => entryIds.has(id);
+
+    // "[From: name → label]\noutput" for each forward input of nodeId that has output.
+    const inputsOf = (nodeId: string, skip: ReadonlySet<string> = new Set()) => {
+      const parts: string[] = [];
+      for (const e of edges) {
+        if (e.target !== nodeId || isFeedbackEdge(e) || skip.has(e.source)) continue;
+        const out = agentOutputs.get(e.source);
+        if (!out) continue;
+        const srcName = nodes.find((n) => n.id === e.source)?.data.name ?? e.source;
+        const labelText = edgeLabel(e);
+        parts.push(`[From: ${srcName}${labelText ? ` → ${labelText}` : ""}]\n${out}`);
+      }
+      return parts;
+    };
 
     const runId = startRun(meta.name);
     // Scoped to this run: Stop (or any newer run) ends it.
@@ -449,19 +463,7 @@ export function useWorkflowExecution() {
 
         const memoryContext    = memory.buildContext(data.memoryRead);
 
-        const upstreamParts: string[] = [];
-        for (const e of edges) {
-          if (e.target !== nodeId) continue;
-          if (isFeedbackEdge(e)) continue;
-          const out = agentOutputs.get(e.source);
-          if (!out) continue;
-          const srcNode = nodes.find((n) => n.id === e.source);
-          const srcName = srcNode?.data.name ?? e.source;
-          const labelText = edgeLabel(e);
-          const label   = labelText ? ` → ${labelText}` : "";
-          upstreamParts.push(`[From: ${srcName}${label}]\n${out}`);
-        }
-        const upstreamContext = upstreamParts.join("\n\n─────────────────\n\n");
+        const upstreamContext = inputsOf(nodeId).join("\n\n─────────────────\n\n");
 
         // Only tools that actually run are named; the loop adds how to call them.
         const systemMsg = buildSystemMessage({
@@ -481,6 +483,7 @@ export function useWorkflowExecution() {
         const revision = revisionRequests.get(nodeId);
         if (revision) {
           userMsgParts.push(`REVISION REQUEST (round ${revision.round}) from ${revision.from}:\n${revision.text}`);
+          if (revision.reviewed) userMsgParts.push(`WHAT ${revision.from} REVIEWED:\n${revision.reviewed}`);
           const previous = agentOutputs.get(nodeId);
           if (previous) userMsgParts.push(`YOUR PREVIOUS OUTPUT:\n${previous}`);
         }
@@ -699,7 +702,12 @@ export function useWorkflowExecution() {
         addEntry({ id: `${nodeId}-revision-${round}-${Date.now()}`, timestamp: new Date().toISOString(),
           action: "workflow_loaded", agentId: nodeId, success: true,
           details: `↺ ${name} asked for revision ${round}/${MAX_REVISION_ROUNDS}: re-running ${targetNames}` });
-        for (const target of targets) revisionRequests.set(target, { from: name, text: review, round });
+        for (const target of targets) {
+          // Plus what the reviewer read that the target doesn't see itself, e.g. the
+          // critique behind a gateway's bare {"route":"revise"}.
+          const seen = new Set([target, ...edges.filter((e) => e.target === target && !isFeedbackEdge(e)).map((e) => e.source)]);
+          revisionRequests.set(target, { from: name, text: review, reviewed: inputsOf(nodeId, seen).join("\n\n"), round });
+        }
         for (const id of revisionPath(targets, nodeId, edges)) {
           if (isRunCancelled()) return;
           updateAgent(id, { revision: round });

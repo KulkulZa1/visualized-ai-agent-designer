@@ -316,6 +316,7 @@ describe("useWorkflowExecution", () => {
       expect(calls.W[1]).toContain("REVISION REQUEST (round 1) from R");
       expect(calls.W[1]).toContain("tighten the intro");
       expect(calls.W[1]).toContain("YOUR PREVIOUS OUTPUT:\ndraft 1");
+      expect(calls.W[1].match(/draft 1/g)).toHaveLength(1); // the draft the reviewer read isn't repeated
       expect(calls.D[0]).toContain('{"verdict":"PASS"}'); // downstream sees the final review
       expect(finished?.status).toBe("done");
       expect(finished?.agents.W.revision).toBe(1);
@@ -342,10 +343,13 @@ describe("useWorkflowExecution", () => {
         ],
       });
       const count: Record<string, number> = { D: 0, C: 0, G: 0, S: 0 };
+      const drafts: string[] = [];
       mockInvokeHandler("call_ollama_api", (args) => {
         const name = who(args);
         count[name]++;
+        if (name === "D") drafts.push((args as { userMessage: string }).userMessage);
         if (name === "G") return count.G === 1 ? '{"route":"revise"}' : '{"route":"ship"}';
+        if (name === "C") return count.C === 1 ? "REVISE: add the missing section" : "PASS";
         return `${name} ${count[name]}`;
       });
 
@@ -353,6 +357,9 @@ describe("useWorkflowExecution", () => {
 
       expect(count).toEqual({ D: 2, C: 2, G: 2, S: 1 });
       expect(finished?.agents.S.status).toBe("done");
+      // The gateway only routes: the drafter must still see the critique it acted on.
+      expect(drafts[1]).toContain("REVISE: add the missing section");
+      expect(drafts[1]).toContain('{"route":"revise"}');
     });
 
     it("re-runs only the agents whose feedback edge the verdict names", async () => {

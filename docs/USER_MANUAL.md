@@ -13,7 +13,7 @@ run the workflow against configured providers.
 - Execution uses dependency-aware bounded parallel scheduling for independent forward-edge branches.
 - Agents have separate node IDs, prompts, models, outputs, status, logs, and snapshots, but are not separate OS processes.
 - Feedback edges do not create scheduling dependencies, and gateway routing can skip unmatched branches.
-- A node with a feedback edge acts as a reviewer: when it answers REVISE (or names the edge's label, e.g. `rust-fix`), the agents from the edge's target back to the reviewer re-run with its review and their previous output, and the reviewer checks again — at most 2 rounds, then the run continues with the latest version.
+- A node with a feedback edge acts as a reviewer: when it answers REVISE (or names the edge's label, e.g. `rust-fix`), the agents from the edge's target back to the reviewer re-run with its review (for a gateway that only answers a route, also the critique it read) and their previous output, and the reviewer checks again — at most 2 rounds, then the run continues with the latest version.
 - Streaming is simulated after the full provider response arrives.
 - Context inspector is useful but not a complete durable trace yet.
 - Artifact viewer still uses mock placeholders during execution.
