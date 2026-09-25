@@ -207,6 +207,21 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolve_safe_path_rejects_new_files_under_a_symlink_leading_outside() {
+        let ws = temp_workspace();
+        let outside = temp_workspace();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join("link")).unwrap();
+
+        let root = ws.path().to_str().unwrap();
+        assert!(matches!(resolve_safe_path(root, "link/new.txt"), Err(AppError::PathTraversal(_))));
+        assert!(matches!(
+            resolve_safe_path(root, "link/deep/nested/new.txt"),
+            Err(AppError::PathTraversal(_))
+        ));
+    }
+
     #[test]
     fn resolve_safe_path_rejects_new_absolute_paths_outside_the_workspace() {
         let ws = temp_workspace();
