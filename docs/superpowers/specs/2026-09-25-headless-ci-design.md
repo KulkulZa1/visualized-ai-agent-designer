@@ -85,7 +85,8 @@ These are out of scope:
     and exits.
 - **Commands served:**
   - Model calls: `chat_turn` (via `run_turn`, not streaming), `call_openai_api`,
-    `call_anthropic_api`, `call_ollama_api`.
+    `call_anthropic_api`, `call_claude_api` (the alias `callProvider` uses for
+    Anthropic), `call_ollama_api`.
   - Provider info: `check_provider_health`, `get_provider_defaults`.
   - Workspace files: `read_workspace_file`, `write_workspace_file`,
     `delete_workspace_file`, `list_workspace_files`.
@@ -97,6 +98,10 @@ These are out of scope:
   the consent flag enforced in Rust, killing the whole command process tree.
 - **Build:** `npm run build:core` runs
   `cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features core --bin harness-core`.
+- **Implementation note (Part 1 review):** each command's arguments get a
+  camelCase `Deserialize` struct, tested against the exact JSON the
+  TypeScript side builds. That includes `chat_turn`'s `onDelta: null`, which is
+  what a CLI run sends.
 
 ## 3. `harness run`
 
@@ -153,6 +158,15 @@ These are out of scope:
 - **Core client:** `src/cli/coreClient.ts` starts `harness-core` and turns
   `invoke` into request/response over its pipes. If the process dies, pending
   calls reject with "harness-core stopped".
+- **Implementation notes (Part 1 review):**
+  - The engine still reaches Tauri through `providerAdapter.ts`, which imports
+    `Channel`. The CLI's Vite build aliases `@tauri-apps/api/core` to a small
+    Node shim whose `Channel` throws. `deltaChannel` then sends
+    `onDelta: null`, so there is no streaming.
+  - The end-to-end test runs the built `cli/dist/harness-run.mjs` with `node`.
+    That is the only check that the bundle loads in Node.
+  - The engine's simulated typing (the app's progressive reveal) costs about
+    0.5–1 s per node. A host option lets the CLI skip it.
 
 ## 4. Saved runs, resume, CI
 
@@ -172,6 +186,10 @@ These are out of scope:
   workspace is open, which closes the "no persisted run traces" gap. This
   repo's `.gitignore` gets `.harness/runs/`, and the docs tell users to ignore
   it too, like `.harness/snapshots/`.
+  - Implementation note (Part 1 review): the engine keeps its own change log.
+    In the app, a revert in the Changes dialog removes entries only from the
+    store's copy. The app's record must therefore save the store's change log,
+    not the engine's.
 - **Resume:** `harness run <workflow> --resume <runId>` loads the record and
   keeps the same run id (`attempts` + 1). It uses the saved task; passing
   `--task` with a different task is exit 2. A node is reused (not run) only if
