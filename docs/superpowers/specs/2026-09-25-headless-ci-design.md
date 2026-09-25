@@ -186,10 +186,16 @@ These are out of scope:
   workspace is open, which closes the "no persisted run traces" gap. This
   repo's `.gitignore` gets `.harness/runs/`, and the docs tell users to ignore
   it too, like `.harness/snapshots/`.
-  - Implementation note (Part 1 review): the engine keeps its own change log.
-    In the app, a revert in the Changes dialog removes entries only from the
-    store's copy. The app's record must therefore save the store's change log,
-    not the engine's.
+  - Implementation notes (Part 4):
+    - Nodes are keyed by their place in the workflow file (`agent-<i>`), so a
+      run in the app and a run of the saved file name the same node alike.
+    - The resume state also keeps `outputs`: the text each node passes
+      downstream. For a memory node, that differs from its shown output.
+    - `definitionHash` also covers max tokens, think depth, the memory keys and
+      a hook node's hook. For a file prompt, the file's content is hashed.
+    - `harness-core` ignores Ctrl+C, which reaches it along with `harness run`
+      (same console or process group). The CLI turns Ctrl+C into Stop, and it
+      needs the core to finish the run and save it.
 - **Resume:** `harness run <workflow> --resume <runId>` loads the record and
   keeps the same run id (`attempts` + 1). It uses the saved task; passing
   `--task` with a different task is exit 2. A node is reused (not run) only if
