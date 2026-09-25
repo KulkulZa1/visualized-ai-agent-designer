@@ -237,6 +237,38 @@ describe("runWorkflow", () => {
     if (!outcome.started) throw new Error(outcome.error);
     expect(snapshot).toHaveBeenCalledWith({ runId: outcome.run.id, nodeId: "A", status: "completed", output: "ok" });
   });
+
+  it("tells the host each node's model and provider when it starts", async () => {
+    const { host, log } = fakeHost();
+
+    await runWorkflow(runInput([makeNode("A")]), host);
+
+    expect(log.agents.find(([id, p]) => id === "A" && p.status === "running")?.[1])
+      .toMatchObject({ modelUsed: "qwen2.5-coder:7b", providerUsed: "ollama" });
+  });
+
+  it("skips the progressive reveal of answers when the host asks (harness run)", async () => {
+    const answer = "x".repeat(300);
+    const revealSteps = (agents: Array<[string, Partial<AgentRun>]>) =>
+      agents.filter(([, p]) => p.output !== undefined && p.status === undefined).length;
+
+    const shown = fakeHost({ call_ollama_api: () => answer });
+    await runWorkflow(runInput([makeNode("A")]), shown.host);
+    const plain = fakeHost({ call_ollama_api: () => answer }, { revealOutput: false });
+    await runWorkflow(runInput([makeNode("A")]), plain.host);
+
+    expect(revealSteps(shown.log.agents)).toBeGreaterThan(1);
+    expect(revealSteps(plain.log.agents)).toBe(0);
+  });
+
+  it("names the host's command policy in the audit", async () => {
+    const { nodes, handlers } = commandRun();
+    const { host, log } = fakeHost(handlers, { askCommand: async () => "deny", commandPolicy: "--allow-command" });
+
+    await runWorkflow(runInput(nodes), host);
+
+    expect(log.audit.map((e) => e.details)).toContain("A: command denied (not in --allow-command): npm test");
+  });
 });
 
 describe("the engine's boundary", () => {

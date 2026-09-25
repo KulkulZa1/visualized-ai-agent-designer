@@ -144,4 +144,19 @@ describe("runCommandTool", () => {
     expect(calls).toContainEqual(["cancel_command", { commandId: started.commandId }]);
     expect(audit.at(-1)).toEqual({ details: expect.stringContaining("stopped"), success: false });
   });
+
+  it("names the run's command policy, not the user, when commands are allowed up front (harness run)", async () => {
+    const denied = options({ askUser: vi.fn(async () => "deny" as const), policy: "--allow-command" });
+    const text = await runCommandTool({ command: "rm -rf build" }, denied.opts);
+    expect(text).toMatch(/^\[error\] This run does not allow this command \(--allow-command\)/);
+    expect(denied.audit).toEqual([
+      { details: "Tester: command denied (not in --allow-command): rm -rf build", success: false },
+    ]);
+
+    const allowed = options({ askUser: vi.fn(async () => "granted" as const), policy: "--allow-command" });
+    await runCommandTool({ command: "npm test" }, allowed.opts);
+    expect(allowed.audit).toEqual([
+      { details: "Tester ran: npm test (allowed by --allow-command; exit 0, 1200 ms)", success: true },
+    ]);
+  });
 });

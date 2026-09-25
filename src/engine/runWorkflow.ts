@@ -125,6 +125,10 @@ export interface RunHost {
   /** True once the run is stopped. Asked only after onRunStarted. */
   isCancelled: () => boolean;
   snapshot?: (snapshot: NodeSnapshot) => void;
+  /** Who approves commands when it is not the user (harness run: "--allow-command"). */
+  commandPolicy?: string;
+  /** false: no progressive reveal of each final answer (the app shows one; harness run does not). */
+  revealOutput?: boolean;
 }
 
 /** A run that never started (the provider preflight failed), or the finished run. */
@@ -136,7 +140,7 @@ export type RunOutcome =
 
 type EdgeData = { label?: string; edgeKind?: string };
 
-function isFeedbackEdge(edge: { type?: string; data?: unknown }): boolean {
+export function isFeedbackEdge(edge: { type?: string; data?: unknown }): boolean {
   return (edge.data as EdgeData | undefined)?.edgeKind === "feedback" || edge.type === "feedback";
 }
 
@@ -481,9 +485,6 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     }
 
     // ── AGENT / GATEWAY / WORKER / CRITIC / AGGREGATOR NODE ─────────────
-    updateAgent(nodeId, { agentId: nodeId, agentName: data.name, status: "running", startedAt: Date.now() });
-    updateNodeData(nodeId, { status: "running" });
-
     const rawModel = data.model || (effectiveProvider === "openai-compatible" ? customApiModel : effectiveOllamaModel);
     const selProv  = selectProviderForModel({
       mode: effectiveProvider, model: rawModel,
@@ -503,6 +504,11 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       (selProv.provider === "openai" && providerDefaults.openai_api_key_configured) ||
       (selProv.provider === "anthropic" && providerDefaults.anthropic_api_key_configured);
 
+    updateAgent(nodeId, {
+      agentId: nodeId, agentName: data.name, status: "running", startedAt: Date.now(),
+      modelUsed: model, providerUsed: runtimeProvider,
+    });
+    updateNodeData(nodeId, { status: "running" });
     addEntry({
       id: `${nodeId}-start-${Date.now()}`, timestamp: new Date().toISOString(),
       action: "hook_executed", agentId: nodeId,
@@ -633,7 +639,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
       // bash: the host approves each command (the app asks the user: CommandConsentDialog).
       const runCommand = (args: Record<string, unknown>) => runCommandTool(args, {
-        runId, agentName: data.name, workspacePath, invoke,
+        runId, agentName: data.name, workspacePath, invoke, policy: host.commandPolicy,
         askUser: (command) => host.askCommand({
           runId, agentName: data.name, command, workspacePath: workspacePath ?? "",
         }),
@@ -732,8 +738,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         }
       }
 
-      // Simulated streaming display, unless the text already streamed in live
-      if (!(streamed && loop.mode === "native")) {
+      // Simulated streaming display, unless the text already streamed in live or the host shows none
+      if (host.revealOutput !== false && !(streamed && loop.mode === "native")) {
         const chunkSize = finalText.length > 2000 ? 120 : 60;
         let accumulated = "";
         for (let i = 0; i < finalText.length; i += chunkSize) {
