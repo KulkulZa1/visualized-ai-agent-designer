@@ -45,7 +45,7 @@ fn interpreter_path(path: &Path) -> String {
 
 // `async`: run on Tauri's thread pool. A plain sync command runs on the main
 // thread and would freeze the whole window for the hook's full timeout.
-#[tauri::command(async)]
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn execute_hook(
     workspace_path: String,
     hook_path: String,
@@ -119,7 +119,7 @@ impl Drop for Registration {
 
 /// Run an agent's shell command line in the workspace folder: cmd.exe on Windows,
 /// sh elsewhere. The frontend asks the user to approve each command first.
-#[tauri::command(async)]
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn execute_command(
     workspace_path: String,
     command: String,
@@ -162,7 +162,7 @@ pub fn execute_command(
 
 /// Stop a running agent command: kill its whole process tree. False if no
 /// command with that id is running.
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn cancel_command(command_id: String) -> bool {
     let pid = RUNNING_COMMANDS.lock().ok().and_then(|mut running| running.remove(&command_id));
     if let Some(pid) = pid {

@@ -14,6 +14,7 @@ use super::chat_stream::{read_stream, AnthropicStream, OllamaStream, OpenAiStrea
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "app")]
 use tauri::ipc::{Channel, JavaScriptChannelId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -357,6 +358,7 @@ fn rejects_tools(failure: &HttpFailure) -> bool {
 /// One model turn. `provider` is "anthropic", "openai", "openai-compatible",
 /// "ollama" or "ollama-cloud"; `base_url` is the custom or Ollama endpoint. With
 /// `on_delta`, the reply streams and its text is sent to that channel as it arrives.
+#[cfg(feature = "app")]
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_turn(

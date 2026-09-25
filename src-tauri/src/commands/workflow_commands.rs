@@ -3,7 +3,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::workflow::WorkflowDef;
 use std::fs;
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn save_workflow(
     workspace_path: String,
     relative_path: String,
@@ -14,7 +14,7 @@ pub fn save_workflow(
     atomic_write(&safe, yaml.as_bytes())
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn load_workflow(workspace_path: String, relative_path: String) -> AppResult<WorkflowDef> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
     let content = fs::read_to_string(safe)?;

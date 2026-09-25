@@ -330,7 +330,7 @@ fn openai_chat_body(
     body
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn call_openai_api(
     model: String,
     system: String,
@@ -599,7 +599,7 @@ pub(crate) async fn post_anthropic(
     })
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn call_anthropic_api(
     model: String,
     system: String,
@@ -620,7 +620,7 @@ pub async fn call_anthropic_api(
 }
 
 /// Backward-compatible alias for call_anthropic_api
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn call_claude_api(
     model: String,
     system: String,
@@ -642,7 +642,7 @@ pub async fn call_claude_api(
 
 // ── Ollama ────────────────────────────────────────────────────────────────────
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn call_ollama_api(
     model: String,
     system: String,
@@ -967,7 +967,7 @@ fn is_chat_model(id: &str) -> bool {
 
 /// List models available for the given provider and credentials.
 /// Returns a sorted Vec<String> of model IDs on success.
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn list_provider_models(
     provider: String,
     api_key: String,
@@ -1114,7 +1114,7 @@ pub async fn list_provider_models(
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn get_provider_defaults() -> ProviderDefaults {
     let llm_provider = env::var("LLM_PROVIDER").unwrap_or_else(|_| "auto".to_string());
     let ollama_base_url = env::var("OLLAMA_BASE_URL").unwrap_or_else(|_| {
@@ -1155,7 +1155,7 @@ pub fn get_provider_defaults() -> ProviderDefaults {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub async fn check_provider_health(
     provider: String,
     api_key: String,
