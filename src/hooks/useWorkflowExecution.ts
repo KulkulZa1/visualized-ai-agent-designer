@@ -295,6 +295,7 @@ export function useWorkflowExecution() {
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
     const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
+    const noStreaming   = new Set<string>();         // "provider:model" that could not stream
     // Feedback-edge target → the review it is being re-run for.
     const revisionRequests = new Map<string, { from: string; text: string; reviewed: string; round: number }>();
 
@@ -549,6 +550,32 @@ export function useWorkflowExecution() {
             details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
         };
 
+        // The node's own native turns stream into its output (throttled); helpers don't.
+        let liveText = "";
+        let streamed = false;
+        let liveTimer: ReturnType<typeof setTimeout> | undefined;
+        const showLiveText = (piece: string) => {
+          liveText += piece;
+          streamed = true;
+          if (!liveTimer) {
+            liveTimer = setTimeout(() => { liveTimer = undefined; updateAgent(nodeId, { output: liveText }); }, 50);
+          }
+        };
+        const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
+          liveText = "";
+          const params = { ...providerParams, systemMsg: system, messages, tools };
+          if (noStreaming.has(nativeKey)) return callChatTurn(params, invoke);
+          let received = false;
+          try {
+            return await callChatTurn(params, invoke, (piece) => { received = true; showLiveText(piece); });
+          } catch (e) {
+            // A server that cannot stream: ask again without streaming, and stop streaming to it this run.
+            if (received || !/stream/i.test(String(e))) throw e;
+            noStreaming.add(nativeKey);
+            return callChatTurn(params, invoke);
+          }
+        };
+
         // Every file an agent writes goes into the run's change log (Changes dialog,
         // revert). A helper can finish after its run ended: never write into a newer run.
         const recordChangeBy = (agent: string) => (path: string, before: string | null, after: string) => {
@@ -609,6 +636,7 @@ export function useWorkflowExecution() {
           userMessage: baseUserMsg,
           tools: data.tools as string[],
           timeoutMessage: `${data.name} timed out after ${timeoutSeconds}s`,
+          callTurn: streamingCallTurn,
           runTool: (call) => call.name === SUBAGENT_TOOL ? subAgents.dispatch(call.args)
             : call.name === "bash" ? runCommand(call.args)
             : executeTool(call, workspacePath, invoke, data.tools as string[], recordChangeBy(data.name)),
@@ -616,6 +644,7 @@ export function useWorkflowExecution() {
           concurrentTools: [SUBAGENT_TOOL],
           maxConcurrent: MAX_CONCURRENT_SUBAGENTS,
         });
+        clearTimeout(liveTimer);
         if (loop.nativeRefused) {
           noNativeTools.add(nativeKey);
           addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -640,14 +669,16 @@ export function useWorkflowExecution() {
           }
         }
 
-        // Simulated streaming display
-        const chunkSize = finalText.length > 2000 ? 120 : 60;
-        let accumulated = "";
-        for (let i = 0; i < finalText.length; i += chunkSize) {
-          if (isRunCancelled()) break;
-          await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
-          accumulated += finalText.slice(i, i + chunkSize);
-          updateAgent(nodeId, { output: accumulated });
+        // Simulated streaming display, unless the text already streamed in live
+        if (!(streamed && loop.mode === "native")) {
+          const chunkSize = finalText.length > 2000 ? 120 : 60;
+          let accumulated = "";
+          for (let i = 0; i < finalText.length; i += chunkSize) {
+            if (isRunCancelled()) break;
+            await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
+            accumulated += finalText.slice(i, i + chunkSize);
+            updateAgent(nodeId, { output: accumulated });
+          }
         }
 
         const tokenEstimate = loop.tokenEstimate + subAgents.tokenEstimate();

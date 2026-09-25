@@ -7,12 +7,14 @@
 
 use super::api_commands::{
     generation_client, normalize_anthropic_model, normalize_ollama_model, ollama_requires_api_key,
-    post_anthropic, post_ollama, post_openai, resolve_api_key, resolve_ollama_api_key_for_endpoint,
+    resolve_api_key, resolve_ollama_api_key_for_endpoint, send_anthropic, send_ollama, send_openai,
     HttpFailure, DEFAULT_OLLAMA_BASE_URL,
 };
+use super::chat_stream::{read_stream, AnthropicStream, OllamaStream, OpenAiStream, StreamAccumulator};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::ipc::{Channel, JavaScriptChannelId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +77,12 @@ impl ChatReply {
             native_tools_supported: false,
         }
     }
+}
+
+/// A piece of the model's text as it streams in.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChatDelta {
+    pub text: String,
 }
 
 /// Tool arguments are a JSON object; anything else becomes {} so the tool
@@ -269,7 +277,7 @@ fn clean_tool_name(raw: &Value) -> String {
     name.strip_prefix("functions.").unwrap_or(name).to_string()
 }
 
-fn parse_anthropic(value: &Value) -> Result<ChatReply, String> {
+pub(crate) fn parse_anthropic(value: &Value) -> Result<ChatReply, String> {
     let blocks = value["content"].as_array().map(Vec::as_slice).unwrap_or_default();
     let text = blocks
         .iter()
@@ -285,7 +293,7 @@ fn parse_anthropic(value: &Value) -> Result<ChatReply, String> {
     reply(text, tool_calls, str_of(&value["stop_reason"]))
 }
 
-fn parse_openai(value: &Value) -> Result<ChatReply, String> {
+pub(crate) fn parse_openai(value: &Value) -> Result<ChatReply, String> {
     let choice = value["choices"]
         .get(0)
         .ok_or_else(|| "No content in OpenAI response".to_string())?;
@@ -304,7 +312,7 @@ fn parse_openai(value: &Value) -> Result<ChatReply, String> {
     reply(str_of(&message["content"]), tool_calls, str_of(&choice["finish_reason"]))
 }
 
-fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
+pub(crate) fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
     let message = &value["message"];
     let tool_calls = message["tool_calls"]
         .as_array()
@@ -320,6 +328,26 @@ fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
     reply(str_of(&message["content"]), tool_calls, str_of(&value["done_reason"]))
 }
 
+/// The provider's reply as the non-streaming API returns it: read whole, or
+/// streamed piece by piece to `on_text`.
+async fn reply_value<S: StreamAccumulator>(
+    sent: Result<reqwest::Response, HttpFailure>,
+    on_text: Option<&mut (dyn FnMut(&str) + Send + 'static)>,
+    what: &str,
+) -> Result<Value, HttpFailure> {
+    let response = sent?;
+    let status = response.status().as_u16();
+    match on_text {
+        Some(on_text) => read_stream::<S>(response, on_text)
+            .await
+            .map_err(|message| HttpFailure { status: Some(status), message }),
+        None => response.json().await.map_err(|e| HttpFailure {
+            status: Some(status),
+            message: format!("Failed to parse {what} response: {}", e.without_url()),
+        }),
+    }
+}
+
 /// A server that refuses the tool definitions (a model without tool support,
 /// vLLM without --enable-auto-tool-choice, …) answers 400/422 naming tools.
 fn rejects_tools(failure: &HttpFailure) -> bool {
@@ -327,10 +355,12 @@ fn rejects_tools(failure: &HttpFailure) -> bool {
 }
 
 /// One model turn. `provider` is "anthropic", "openai", "openai-compatible",
-/// "ollama" or "ollama-cloud"; `base_url` is the custom or Ollama endpoint.
+/// "ollama" or "ollama-cloud"; `base_url` is the custom or Ollama endpoint. With
+/// `on_delta`, the reply streams and its text is sent to that channel as it arrives.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_turn(
+    webview: tauri::Webview,
     provider: String,
     model: String,
     system: String,
@@ -340,16 +370,46 @@ pub async fn chat_turn(
     max_tokens: u32,
     reasoning_effort: Option<String>,
     base_url: Option<String>,
+    on_delta: Option<JavaScriptChannelId>,
+) -> Result<ChatReply, String> {
+    let on_text = on_delta.map(|id| {
+        let channel: Channel<ChatDelta> = id.channel_on(webview);
+        Box::new(move |text: &str| {
+            let _ = channel.send(ChatDelta { text: text.to_string() });
+        }) as Box<dyn FnMut(&str) + Send>
+    });
+    run_turn(provider, model, system, messages, tools, api_key, max_tokens, reasoning_effort, base_url, on_text).await
+}
+
+/// chat_turn without Tauri: streams to `on_text` when given.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_turn(
+    provider: String,
+    model: String,
+    system: String,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolSpec>,
+    api_key: String,
+    max_tokens: u32,
+    reasoning_effort: Option<String>,
+    base_url: Option<String>,
+    mut on_text: Option<Box<dyn FnMut(&str) + Send>>,
 ) -> Result<ChatReply, String> {
     let client = generation_client()?;
     let custom_url = base_url.as_deref().map(str::trim).filter(|u| !u.is_empty());
     let refused = |failure: &HttpFailure| !tools.is_empty() && rejects_tools(failure);
+    let streaming = on_text.is_some();
+    let on_text = on_text.as_deref_mut();
 
     match provider.as_str() {
         "anthropic" => {
             let key = resolve_api_key(&api_key, "ANTHROPIC_API_KEY")?;
-            let body = anthropic_body(&model, &system, &messages, &tools, max_tokens);
-            let value = post_anthropic(&client, &key, &body).await.map_err(|f| f.message)?;
+            let mut body = anthropic_body(&model, &system, &messages, &tools, max_tokens);
+            if streaming {
+                body["stream"] = json!(true);
+            }
+            let sent = send_anthropic(&client, &key, &body).await;
+            let value = reply_value::<AnthropicStream>(sent, on_text, "Anthropic").await.map_err(|f| f.message)?;
             parse_anthropic(&value)
         }
         "openai" | "openai-compatible" => {
@@ -365,7 +425,7 @@ pub async fn chat_turn(
             } else {
                 resolve_api_key(&api_key, "OPENAI_API_KEY")?
             };
-            let body = openai_body(
+            let mut body = openai_body(
                 &model,
                 &system,
                 &messages,
@@ -374,7 +434,11 @@ pub async fn chat_turn(
                 reasoning_effort.as_deref(),
                 custom_url.is_some(),
             );
-            match post_openai(&client, &endpoint, &key, &body).await {
+            if streaming {
+                body["stream"] = json!(true);
+            }
+            let sent = send_openai(&client, &endpoint, &key, &body).await;
+            match reply_value::<OpenAiStream>(sent, on_text, "OpenAI").await {
                 Ok(value) => parse_openai(&value),
                 // The official API supports tools; only a custom server may refuse them.
                 Err(failure) if custom_url.is_some() && refused(&failure) => Ok(ChatReply::tools_unsupported()),
@@ -385,8 +449,10 @@ pub async fn chat_turn(
             let base = custom_url.unwrap_or(DEFAULT_OLLAMA_BASE_URL);
             let key = resolve_ollama_api_key_for_endpoint(&api_key, base, ollama_requires_api_key(base))?;
             let model = normalize_ollama_model(&model);
-            let body = ollama_body(&model, &system, &messages, &tools, max_tokens);
-            match post_ollama(&client, base, key.as_deref(), &body, &model).await {
+            let mut body = ollama_body(&model, &system, &messages, &tools, max_tokens);
+            body["stream"] = json!(streaming);
+            let sent = send_ollama(&client, base, key.as_deref(), &body, &model).await;
+            match reply_value::<OllamaStream>(sent, on_text, "Ollama").await {
                 Ok(value) => parse_ollama(&value),
                 Err(failure) if refused(&failure) => Ok(ChatReply::tools_unsupported()),
                 Err(failure) => Err(failure.message),
@@ -585,7 +651,7 @@ mod tests {
 
     async fn custom_turn(status: u16, body: &'static str, tools: Vec<ToolSpec>) -> (Result<ChatReply, String>, String) {
         let (base_url, request_rx) = spawn_mock_ollama_server(status, body);
-        let reply = chat_turn(
+        let reply = run_turn(
             "openai-compatible".into(),
             "openai".into(),
             "sys".into(),
@@ -595,6 +661,7 @@ mod tests {
             256,
             None,
             Some(base_url),
+            None,
         )
         .await;
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
@@ -642,7 +709,7 @@ mod tests {
             400,
             r#"{"error":"registry.ollama.ai/library/gemma3:latest does not support tools"}"#,
         );
-        let reply = chat_turn(
+        let reply = run_turn(
             "ollama".into(),
             "gemma3".into(),
             "sys".into(),
@@ -652,9 +719,79 @@ mod tests {
             256,
             None,
             Some(base_url),
+            None,
         )
         .await
         .unwrap();
         assert!(!reply.native_tools_supported);
+    }
+
+    use std::sync::{Arc, Mutex};
+
+    fn collector() -> (Arc<Mutex<Vec<String>>>, Box<dyn FnMut(&str) + Send>) {
+        let pieces = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&pieces);
+        (pieces, Box::new(move |text: &str| sink.lock().unwrap().push(text.to_string())))
+    }
+
+    #[tokio::test]
+    async fn run_turn_streams_an_ollama_reply() {
+        let (base_url, request_rx) = spawn_mock_ollama_server(200, concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"Rea\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"ding\"},\"done\":true,\"done_reason\":\"stop\"}\n",
+        ));
+        let (pieces, on_text) = collector();
+        let reply = run_turn(
+            "ollama".into(), "llama3".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), Some(on_text),
+        )
+        .await
+        .unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+
+        assert_eq!(sent["stream"], true);
+        assert_eq!(*pieces.lock().unwrap(), ["Rea", "ding"]);
+        assert_eq!(reply.text, "Reading");
+    }
+
+    #[tokio::test]
+    async fn run_turn_reads_a_whole_reply_from_a_server_that_does_not_stream() {
+        let (base_url, _rx) = spawn_mock_ollama_server(
+            200,
+            "{\n  \"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"Hi\"}, \"finish_reason\": \"stop\"}]\n}",
+        );
+        let (pieces, on_text) = collector();
+        let reply = run_turn(
+            "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), Some(on_text),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply.text, "Hi");
+        assert!(pieces.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_turn_streams_a_custom_endpoint_reply_with_tool_calls() {
+        let (base_url, request_rx) = spawn_mock_ollama_server(200, concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"On it.\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"a.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let (pieces, on_text) = collector();
+        let reply = run_turn(
+            "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(),
+            vec![read_file_spec()], String::new(), 256, None, Some(base_url), Some(on_text),
+        )
+        .await
+        .unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+
+        assert_eq!(sent["stream"], true);
+        assert_eq!(*pieces.lock().unwrap(), ["On it."]);
+        assert_eq!(reply.tool_calls[0].args, json!({"path": "a.md"}));
     }
 }

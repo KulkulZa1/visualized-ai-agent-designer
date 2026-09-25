@@ -8,6 +8,7 @@
  * See docs/VS_CODE_EXTENSION_PLAN.md §1 for the extraction rationale.
  */
 
+import { Channel } from "@tauri-apps/api/core";
 import type { RuntimeProvider } from "@/utils/providerConfig";
 import { isRemoteOllamaUrl, shouldFallbackToOllama } from "@/utils/providerConfig";
 import type { ToolSpec } from "@/services/execution/toolExecutor";
@@ -241,13 +242,33 @@ export interface ChatTurnParams extends Omit<ProviderCallParams, "userMsg"> {
 }
 
 /** One model turn with native tool calling — same provider mapping as `callProvider`. */
-export async function callChatTurn(params: ChatTurnParams, invokeFn: InvokeFn): Promise<ChatReply> {
+/** A piece of the model's text as it streams in (chat_turn's channel). */
+export interface ChatDelta {
+  text: string;
+}
+
+/** A channel for streamed text, or null where Tauri IPC is missing (the VS Code webview). */
+function deltaChannel(onDelta: (text: string) => void): Channel<ChatDelta> | null {
+  try {
+    const channel = new Channel<ChatDelta>();
+    channel.onmessage = (delta) => onDelta(delta.text);
+    return channel;
+  } catch {
+    return null;
+  }
+}
+
+/** One model turn with native tool calling; with `onDelta`, the reply's text streams to it. */
+export async function callChatTurn(
+  params: ChatTurnParams, invokeFn: InvokeFn, onDelta?: (text: string) => void,
+): Promise<ChatReply> {
   const {
     provider, model, apiKey, requiresKey, systemMsg, messages, tools, maxTokens,
     ollamaBaseUrl, ollamaModel, ollamaApiKey, customBaseUrl, reasoningEffort,
   } = params;
+  const channel = onDelta ? deltaChannel(onDelta) : null;
   const turn = (args: Record<string, unknown>) => invokeFn<ChatReply>("chat_turn", {
-    system: systemMsg, messages, tools, maxTokens, reasoningEffort: null, baseUrl: null, ...args,
+    system: systemMsg, messages, tools, maxTokens, reasoningEffort: null, baseUrl: null, onDelta: channel, ...args,
   });
 
   if (provider === "ollama" || provider === "ollama-cloud") {

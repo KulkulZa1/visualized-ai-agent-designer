@@ -410,6 +410,52 @@ describe("useWorkflowExecution", () => {
     });
   });
 
+  it("shows a native turn's text as it streams in, then the final answer", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const seen: string[] = [];
+    mockInvokeHandler("chat_turn", async (args) => {
+      const { onDelta } = args as { onDelta: { onmessage: (d: { text: string }) => void } | null };
+      onDelta?.onmessage({ text: "Hel" });
+      onDelta?.onmessage({ text: "lo" });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      seen.push(useExecutionStore.getState().currentRun?.agents.A.output ?? "");
+      return { text: "Hello", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(seen).toEqual(["Hello"]);
+    expect(finished?.agents.A.output).toBe("Hello");
+  });
+
+  it("asks again without streaming when the server cannot stream, and stops streaming to it", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("read_workspace_file", () => "A");
+    const streamed: boolean[] = [];
+    let calls = 0;
+    mockInvokeHandler("chat_turn", async (args) => {
+      calls++;
+      const streaming = Boolean((args as { onDelta: unknown }).onDelta);
+      streamed.push(streaming);
+      if (streaming) throw new Error("Streaming is not supported by this server");
+      return calls < 3
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+            toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }] }
+        : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(streamed).toEqual([true, false, false]);
+  });
+
   it("records the files an agent edits in the run's change log", async () => {
     const node = makeNode("A");
     node.data.tools = [ToolPermission.WriteFile];
