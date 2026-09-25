@@ -115,6 +115,14 @@ describe("buildSystemMessage", () => {
     });
     expect(msg).not.toContain("Your role:");
   });
+
+  it("adds the project's instructions when given", () => {
+    const msg = buildSystemMessage({
+      agentName: "A", role: "worker", workflowName: "W", tools: [], memoryRead: [], memoryWrite: [],
+      promptContent: "Do it.", projectInstructions: "Use pnpm.",
+    });
+    expect(msg.endsWith("\n\nPROJECT INSTRUCTIONS (AGENTS.md):\nUse pnpm.")).toBe(true);
+  });
 });
 
 // ── estimateTokens ────────────────────────────────────────────────────────────

@@ -106,6 +106,8 @@ export interface SystemMessageParams {
   memoryRead: string[];
   memoryWrite: string[];
   promptContent: string;
+  /** The workspace's AGENTS.md, for agents that work in the workspace. */
+  projectInstructions?: string;
 }
 
 export function buildSystemMessage(p: SystemMessageParams): string {
@@ -116,6 +118,7 @@ export function buildSystemMessage(p: SystemMessageParams): string {
     `\nMemory keys to read: ${p.memoryRead.join(", ") || "none"}`,
     `\nMemory keys to write: ${p.memoryWrite.join(", ") || "none"}`,
     p.promptContent ? `\n\n${p.promptContent}` : "",
+    p.projectInstructions ? `\n\nPROJECT INSTRUCTIONS (AGENTS.md):\n${p.projectInstructions}` : "",
   ].join("");
 }
 

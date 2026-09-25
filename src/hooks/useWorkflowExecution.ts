@@ -54,6 +54,8 @@ import {
 } from "@/services/execution/toolExecutor";
 import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
 import { runCommandTool } from "@/services/execution/commandTool";
+import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
+import { loadProjectInstructions, usesWorkspace } from "@/services/execution/projectInstructions";
 import {
   createSubAgentRunner,
   MAX_CONCURRENT_SUBAGENTS,
@@ -290,6 +292,16 @@ export function useWorkflowExecution() {
       contextFileContent = parts.join("\n\n");
     }
 
+    // ── Project instructions (AGENTS.md at the workspace root) ─────────────────
+    const projectInstructions = workspacePath
+      ? await loadProjectInstructions((path) => readWorkspaceFile(workspacePath, path))
+      : "";
+    if (projectInstructions) {
+      addEntry({ id: `agents-md-${Date.now()}`, timestamp: new Date().toISOString(), action: "file_read",
+        path: "AGENTS.md", success: true,
+        details: `Project instructions: AGENTS.md (${projectInstructions.length.toLocaleString()} chars)` });
+    }
+
     // ── Per-run runtime state ─────────────────────────────────────────────────
     const memory        = new MemoryService();
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
@@ -473,6 +485,7 @@ export function useWorkflowExecution() {
           agentName: data.name, role: data.role, workflowName: meta.name,
           description: data.description, tools: runnableTools(data.tools as string[]),
           memoryRead: data.memoryRead, memoryWrite: data.memoryWrite, promptContent,
+          projectInstructions: usesWorkspace(data.tools as string[]) ? projectInstructions : undefined,
         });
 
         const userMsgParts: string[] = [];
@@ -605,6 +618,7 @@ export function useWorkflowExecution() {
           workflowName: meta.name,
           parentTools: data.tools as string[],
           isCancelled: isRunCancelled,
+          projectInstructions,
           runLoop: (child) => runAgentLoop({
             ...shared,
             system: child.system,
@@ -643,6 +657,22 @@ export function useWorkflowExecution() {
           onToolCall: logToolCall(""),
           concurrentTools: [SUBAGENT_TOOL],
           maxConcurrent: MAX_CONCURRENT_SUBAGENTS,
+          // Past 75% of the node's Token budget, older steps become a progress note.
+          compaction: (data.tokens?.budget ?? 0) > 0 ? {
+            budget: data.tokens.budget,
+            summarize: (text) => shared.callText(SUMMARY_INSTRUCTIONS, text),
+            onCompacted: (steps, before, after) => addEntry({
+              id: `${nodeId}-compact-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, success: true,
+              details: `↻ ${data.name}: compacted ${steps} earlier step${steps === 1 ? "" : "s"} ` +
+                `(~${before.toLocaleString()} → ~${after.toLocaleString()} tokens)`,
+            }),
+            onFailed: (e) => addEntry({
+              id: `${nodeId}-compact-fail-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, success: false,
+              details: `↻ ${data.name}: could not compact the conversation: ${String(e)}`,
+            }),
+          } : undefined,
         });
         clearTimeout(liveTimer);
         if (loop.nativeRefused) {

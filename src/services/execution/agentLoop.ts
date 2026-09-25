@@ -27,6 +27,9 @@ import {
   type NativeToolCall,
   type NativeToolResult,
 } from "@/services/model-providers/providerAdapter";
+import {
+  compactNative, compactText, historyTokens, needsCompaction, textTokens,
+} from "@/services/execution/compaction";
 
 export interface AgentLoopOptions {
   system: string;
@@ -52,6 +55,13 @@ export interface AgentLoopOptions {
   /** Tools whose calls in one turn may run at the same time (sub-agents). */
   concurrentTools?: string[];
   maxConcurrent?: number;
+  /** Summarize older steps once the conversation passes 75% of `budget` tokens. */
+  compaction?: {
+    budget: number;
+    summarize: (text: string) => Promise<string>;
+    onCompacted?: (steps: number, beforeTokens: number, afterTokens: number) => void;
+    onFailed?: (error: unknown) => void;
+  };
 }
 
 export interface AgentLoopResult {
@@ -98,6 +108,46 @@ function checkpoint(opts: AgentLoopOptions): void {
 
 function guarded<T>(opts: AgentLoopOptions, work: Promise<T>): Promise<T> {
   return beforeDeadline(work, opts.deadline, opts.timeoutMessage, opts.isCancelled);
+}
+
+/** A failed summary leaves the conversation as it is (the next call tries again),
+ *  unless the run was stopped or the node ran out of time. */
+function compactionFailed(opts: AgentLoopOptions, error: unknown): void {
+  if (opts.isCancelled() || Date.now() >= opts.deadline()) throw error;
+  opts.compaction?.onFailed?.(error);
+}
+
+async function compactNativeIfNeeded(opts: AgentLoopOptions, messages: ChatMessage[]): Promise<void> {
+  const c = opts.compaction;
+  if (!c) return;
+  const before = historyTokens(opts.system, messages);
+  if (!needsCompaction(before, c.budget)) return;
+  try {
+    const result = await compactNative(messages, c.budget, (text) => guarded(opts, c.summarize(text)));
+    if (result.steps === 0) return;
+    messages.splice(0, messages.length, ...result.messages);
+    c.onCompacted?.(result.steps, before, historyTokens(opts.system, messages));
+  } catch (e) {
+    compactionFailed(opts, e);
+  }
+}
+
+async function compactTextIfNeeded(
+  opts: AgentLoopOptions, system: string, message: string, lastStep: string, steps: number,
+): Promise<string> {
+  const c = opts.compaction;
+  if (!c || !lastStep || steps < 2) return message;
+  const before = textTokens(system, message);
+  if (!needsCompaction(before, c.budget)) return message;
+  try {
+    const compacted = await compactText(opts.userMessage, message, lastStep,
+      (text) => guarded(opts, c.summarize(text)), c.budget);
+    c.onCompacted?.(steps - 1, before, textTokens(system, compacted));
+    return compacted;
+  } catch (e) {
+    compactionFailed(opts, e);
+    return message;
+  }
 }
 
 /** Resolve a call to an offered tool and run it; refuse anything else. */
@@ -148,6 +198,7 @@ async function runNative(
 
   for (let step = 0; step < opts.maxSteps; step++) {
     checkpoint(opts);
+    await compactNativeIfNeeded(opts, messages);
     let reply: ChatReply;
     try {
       reply = await guarded(opts, opts.callTurn(opts.system, messages, defs));
@@ -176,11 +227,13 @@ async function runNative(
 async function runText(opts: AgentLoopOptions, nativeRefused: boolean): Promise<AgentLoopResult> {
   const system = [opts.system, buildToolInstructions(runnableTools(opts.tools))].filter(Boolean).join("\n\n");
   let message = opts.userMessage;
+  let lastStep = "";
   let toolCalls = 0;
   let final: string | null = null;
 
   for (let step = 0; step < opts.maxSteps; step++) {
     checkpoint(opts);
+    message = await compactTextIfNeeded(opts, system, message, lastStep, toolCalls);
     const reply = await guarded(opts, opts.callText(system, message));
     const call = parseToolCall(reply);
     if (!call) {
@@ -191,12 +244,12 @@ async function runText(opts: AgentLoopOptions, nativeRefused: boolean): Promise<
     toolCalls++;
     const result = await runOffered(opts, call);
     const before = stripToolCall(reply);
-    message =
-      `${message}\n\n` +
+    lastStep =
       `[Step ${toolCalls}: called ${call.name}]\n` +
       (before ? `${before}\n` : "") +
       `<tool_result>${result}</tool_result>\n\n` +
       `Now continue your task based on the tool result above.`;
+    message = `${message}\n\n${lastStep}`;
   }
 
   const text = final ?? `[Reached max steps (${opts.maxSteps}). Last context:\n${message.slice(-500)}]`;

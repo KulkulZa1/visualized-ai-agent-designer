@@ -68,6 +68,8 @@ beforeEach(() => {
   mockInvokeHandler("chat_turn", () => ({
     text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false,
   }));
+  // No workspace files (AGENTS.md included) unless a test registers its own reader.
+  mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
 });
 
 describe("useWorkflowExecution", () => {
@@ -408,6 +410,49 @@ describe("useWorkflowExecution", () => {
       expect(stopped?.agents.W.status).toBe("stopped");
       expect(draftCalls).toBe(2);
     });
+  });
+
+  it("gives agents that work in the workspace the project's AGENTS.md", async () => {
+    const coder = makeNode("A");
+    coder.data.tools = [ToolPermission.ReadFile];
+    const writer = makeNode("B");
+    useWorkflowStore.setState({ nodes: [coder, writer], edges: [] });
+    mockInvokeHandler("read_workspace_file", (args) => {
+      if ((args as { relativePath: string }).relativePath === "AGENTS.md") return "Use pnpm, never npm.";
+      throw new Error("not found (os error 2)");
+    });
+    const systems: Record<string, string> = {};
+    mockInvokeHandler("call_ollama_api", (args) => {
+      const a = args as { system: string };
+      systems[/^You are (\w+),/.exec(a.system)![1]] = a.system;
+      return "done";
+    });
+
+    await run();
+
+    expect(systems.A).toContain("PROJECT INSTRUCTIONS (AGENTS.md):\nUse pnpm, never npm.");
+    expect(systems.B).not.toContain("PROJECT INSTRUCTIONS");
+    expect(useAuditStore.getState().entries.some((e) => /AGENTS\.md/.test(e.details ?? ""))).toBe(true);
+  });
+
+  it("compacts a long conversation within the node's token budget and audits it", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 5;
+    node.data.tokens = { used: 0, budget: 3000 };
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("read_workspace_file", () => "x".repeat(4000));
+    let turns = 0;
+    mockInvokeHandler("chat_turn", () => (++turns < 4
+      ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: `c${turns}`, name: "read_file", args: { path: `${turns}.md` } }] }
+      : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true }));
+    mockInvokeHandler("call_ollama_api", () => "progress note");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(useAuditStore.getState().entries.some((e) => /compacted \d+ earlier step/.test(e.details ?? ""))).toBe(true);
   });
 
   it("shows a native turn's text as it streams in, then the final answer", async () => {
