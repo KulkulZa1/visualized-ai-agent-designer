@@ -22,7 +22,9 @@ import type { HookResult } from "@/types/hookResult";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
-import { definitionHash, RUN_RECORD_VERSION, savedNodeId, type RunRecord } from "@/engine/runRecord";
+import {
+  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedNodeId, type RunRecord,
+} from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -397,6 +399,38 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   const updateNodeData = (nodeId: string, data: { status: AgentNodeData["status"]; tokens?: { used: number; budget: number } }) =>
     host.events.onNodeStatus(nodeId, data.status, data.tokens);
   for (const n of nodes) updateNodeData(n.id, { status: "idle" });
+
+  // Resume: nodes saved as done, unchanged and fed only by reused nodes keep their
+  // saved results; the change log and the audit continue.
+  const reused = input.resume ? reusableNodes(input.graph, input.resume, hashes) : new Set<string>();
+  if (input.resume) {
+    const saved = input.resume;
+    run.changes = saved.changes;
+    nodes.forEach((n, i) => {
+      if (!reused.has(n.id)) return;
+      agentOutputs.set(n.id, saved.outputs[savedNodeId(i)] ?? saved.nodes[savedNodeId(i)]?.output ?? "");
+      for (const key of n.data.memoryWrite) {
+        if (key in saved.memory) memory.write(key, saved.memory[key]);
+      }
+      const route = saved.gatewayRoutes[savedNodeId(i)];
+      if (route) gatewayRoutes.set(n.id, route);
+    });
+  }
+  // A reused node shows its saved result, as if it had just run.
+  const showReused = (nodeId: string) => {
+    const i = nodes.findIndex((n) => n.id === nodeId);
+    const saved = input.resume?.nodes[savedNodeId(i)];
+    if (!saved) return;
+    addEntry({ id: `${nodeId}-reused-${Date.now()}`, timestamp: new Date().toISOString(), action: "workflow_loaded",
+      agentId: nodeId, success: true, details: `↩ ${nodes[i].data.name}: reused from the saved run (unchanged)` });
+    updateAgent(nodeId, {
+      agentId: nodeId, agentName: nodes[i].data.name, status: "done", output: saved.output,
+      startedAt: saved.startedAt, finishedAt: saved.finishedAt, modelUsed: saved.modelUsed,
+      providerUsed: saved.providerUsed, tokenEstimate: saved.tokenEstimate, revision: saved.revision,
+      subAgents: saved.subAgents,
+    });
+    updateNodeData(nodeId, { status: "done" });
+  };
 
   const buildRecord = (): RunRecord => ({
     version: RUN_RECORD_VERSION,
@@ -895,7 +929,10 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
   async function runNode(nodeId: string): Promise<void> {
     try {
-      await runWithRevisions(nodeId);
+      // A reused node neither runs nor reviews again; a revision round that
+      // targets it still runs it (revisionPath calls processNode).
+      if (reused.has(nodeId)) showReused(nodeId);
+      else await runWithRevisions(nodeId);
     } finally {
       await save(); // after every node settles, a failed one too
     }

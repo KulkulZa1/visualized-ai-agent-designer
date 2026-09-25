@@ -318,6 +318,78 @@ describe("saving the run record", () => {
   });
 });
 
+describe("resuming a saved run", () => {
+  const edges: Edge[] = [{ id: "a-b", source: "A", target: "B" }];
+  const nodes = () => {
+    const a = makeNode("A");
+    a.data.memoryWrite = ["notes"];
+    const b = makeNode("B");
+    b.data.memoryRead = ["notes"];
+    return [a, b];
+  };
+  const failB = (args: Record<string, unknown>) =>
+    (who(args) === "B" ? Promise.reject(new Error("model crashed")) : "first-A");
+
+  /** A first run in which A answers "first-A" and B fails. */
+  async function firstRun(): Promise<RunRecord> {
+    let record: RunRecord | undefined;
+    const { host } = fakeHost({ call_ollama_api: failB },
+      { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
+    await runWorkflow(runInput(nodes(), edges), host);
+    return record!;
+  }
+
+  async function secondRun(graphNodes: AgentNode[], graphEdges: Edge[], record: RunRecord) {
+    const calls: Array<{ agent: string; userMessage: string }> = [];
+    let saved: RunRecord | undefined;
+    const { host, log } = fakeHost(
+      { call_ollama_api: (args) => { calls.push({ agent: who(args), userMessage: String(args.userMessage) }); return `second-${who(args)}`; } },
+      { saveRun: async (r) => { saved = JSON.parse(JSON.stringify(r)); } },
+    );
+    const outcome = await runWorkflow(runInput(graphNodes, graphEdges, { resume: record }), host);
+    return { outcome, calls, saved: saved!, log };
+  }
+
+  it("reuses the nodes that finished unchanged, under the same run id, and runs the rest", async () => {
+    const record = await firstRun();
+
+    const { outcome, calls, saved, log } = await secondRun(nodes(), edges, record);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(calls.map((c) => c.agent)).toEqual(["B"]);
+    expect(calls[0].userMessage).toContain("[From: A]\nfirst-A");
+    expect(calls[0].userMessage).toContain("[memory:notes]\nfirst-A");
+    expect(outcome.run.id).toBe(record.runId);
+    expect(outcome.run.agents.A).toMatchObject({ status: "done", output: "first-A" });
+    expect(saved).toMatchObject({ runId: record.runId, attempts: 2, status: "done" });
+    expect(log.audit.map((e) => e.details)).toContain("↩ A: reused from the saved run (unchanged)");
+  });
+
+  it("re-runs a changed node and everything after it", async () => {
+    const record = await firstRun();
+    const changed = nodes();
+    changed[0].data.promptSource = { type: "inline", content: "A new prompt." };
+
+    const { calls } = await secondRun(changed, edges, record);
+
+    expect(calls.map((c) => c.agent)).toEqual(["A", "B"]);
+  });
+
+  it("resumes a run saved from the app's canvas ids with the workflow file's ids", async () => {
+    // The app names canvas nodes as it creates them; the saved file (and harness run) by position.
+    let record: RunRecord | undefined;
+    const canvas = nodes().map((n, i) => ({ ...n, id: `node-17-${i}` }));
+    const { host } = fakeHost({ call_ollama_api: failB },
+      { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
+    await runWorkflow(runInput(canvas, [{ id: "e", source: "node-17-0", target: "node-17-1" }]), host);
+
+    const file = nodes().map((n, i) => ({ ...n, id: `agent-${i}` }));
+    const { calls } = await secondRun(file, [{ id: "e", source: "agent-0", target: "agent-1" }], record!);
+
+    expect(calls.map((c) => c.agent)).toEqual(["B"]);
+  });
+});
+
 describe("the engine's boundary", () => {
   it("imports no React, UI store, IPC or Tauri code, so it can run outside the app", () => {
     const dir = resolve(__dirname, "../../../src/engine");
