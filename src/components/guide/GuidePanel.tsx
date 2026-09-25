@@ -157,6 +157,7 @@ const QA_LIBRARY: GuideQA[] = [
       { kind: "bold", text: "Yes, for forward-edge scheduling: " },
       { kind: "text", text: "independent branches can run concurrently up to the workflow's maxParallel limit." },
       { kind: "text", text: "Feedback edges do not create scheduling dependencies, and gateway routes skip branches that do not match the selected route." },
+      { kind: "text", text: "A node with a feedback edge reviews: when it answers REVISE (or names the edge's label), the agents from the edge's target back to it re-run with its review, at most 2 rounds." },
       { kind: "text", text: "Streaming is still simulated after each provider call returns; that is separate from branch scheduling." },
     ],
   },

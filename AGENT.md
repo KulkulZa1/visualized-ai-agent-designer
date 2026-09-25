@@ -23,7 +23,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 501 tests / 45 files |
+| `npx vitest run` | Passed, 513 tests / 46 files |
 | `cargo test` | Passed, 63 tests |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
@@ -70,7 +70,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 
 ## Honest Limitations
 
-- Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations. Gateway routing prunes skipped branches.
+- Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (`src/services/execution/routing.ts`). Gateway routing prunes skipped branches.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is simulated in the UI after a full provider response is received.
 - Context snapshots are partial and not a complete durable provider request trace.

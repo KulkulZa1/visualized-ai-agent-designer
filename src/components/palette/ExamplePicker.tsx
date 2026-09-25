@@ -185,7 +185,8 @@ export function ExamplePicker({ onClose }: ExamplePickerProps) {
             <NodeIcon name="history" size={10} color="rgba(124,158,255,0.9)"/>
             <span>
               <strong>Execution note:</strong> Independent forward-edge branches run with
-              bounded parallel scheduling; feedback edges are excluded. Provider streaming
+              bounded parallel scheduling; a REVISE verdict on a feedback edge re-runs the loop
+              (at most 2 rounds). Provider streaming
               is still simulated after each call returns.
             </span>
           </div>
