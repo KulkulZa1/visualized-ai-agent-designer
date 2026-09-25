@@ -11,6 +11,7 @@
     "check": "tsc --noEmit && vitest run",
     "build": "tsc && vite build",
     "build:core": "cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features core --bin harness-core",
+    "build:cli": "vite build --config vite.cli.config.ts",
     "preview": "vite preview",
     "tauri": "tauri",
     "harness": "node cli/harness.mjs",
