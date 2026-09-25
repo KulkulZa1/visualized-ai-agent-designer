@@ -40,7 +40,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | Canvas | `@xyflow/react` |
 | State | Zustand + zundo |
 | Validation | Zod |
-| CLI | `cli/harness.mjs`, read-only |
+| CLI | `cli/harness.mjs`: read-only commands, and `run` for headless workflow runs |
 | MCP | `mcp/server.mjs`, stdio read/test v0 |
 
 ## What Works
@@ -93,9 +93,9 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 1. Do not create `AGEND.md`; use `AGENT.md`.
 2. Do not claim mock/partial features are production-ready.
 3. Do not commit secrets or print raw API key values.
-4. Keep CLI read-only and MCP limited to read/test tools unless a permission and audit system exists.
+4. The CLI's `project`, `workflow` and `provider` commands stay read-only, and MCP stays limited to read/test tools. `harness run` executes workflows: agent commands run only if the user passed that exact command with `--allow-command`, and every command is audited.
 5. Do not add hidden cloud calls or background provider checks.
-6. Do not add command execution without the user's approval of that exact command, once or as a run grant the user chose (agent `bash` goes through `commandConsentStore`; never auto-approve anything else).
+6. Do not add command execution without the user's approval of that exact command: once, as a run grant the user chose (agent `bash` goes through `commandConsentStore`), or up front with `harness run --allow-command`. Never auto-approve anything else.
 7. Use `resolve_safe_path()` for Rust file paths.
 8. Hook execution must stay explicit and consent-gated.
 9. Prefer small, reviewable fixes over rewrites.
@@ -111,7 +111,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | `src/utils/providerConfig.ts` | Provider selection and Ollama URL/key helpers |
 | `src/services/wizard/goalTemplates.ts` | Rule-based goal templates |
 | `src/components/guide/GuidePanel.tsx` | Rule-based guide assistant |
-| `cli/harness.mjs` | Read-only CLI |
+| `cli/harness.mjs` | CLI: read-only commands, and `run` (headless runs: `src/cli/`, needs `npm run build:cli` and `npm run build:core`) |
 | `mcp/server.mjs` | MCP stdio server |
 | `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
 | `src-tauri/src/commands/process_commands.rs` | Hook execution and approved agent commands (`execute_command`) |
