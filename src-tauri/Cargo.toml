@@ -38,7 +38,7 @@ tauri-build = { version = "2", features = [], optional = true }
 [dependencies]
 # No "devtools" feature: it enables the inspector in release builds too. Debug
 # builds get DevTools regardless (lib.rs opens them under cfg(debug_assertions)).
-tauri = { version = "2", optional = true }
+tauri = { version = "2", optional = true, features = [] }
 log = "0.4"
 tauri-plugin-opener = { version = "2", optional = true }
 tauri-plugin-fs = { version = "2", optional = true }
