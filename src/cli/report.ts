@@ -5,6 +5,7 @@
 import { isFeedbackEdge, type RunEvents, type RunOutcome } from "@/engine/runWorkflow";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { lineCounts } from "@/services/execution/changeLog";
+import { AgentRole } from "@/types/agent";
 import type { AgentRun, AgentStatus, WorkflowRun } from "@/types/execution";
 
 export type Write = (line: string) => void;
@@ -36,9 +37,15 @@ function endLine(agent: AgentRun, durationMs: number | undefined): string {
 export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, err: Write): Reporter {
   const emit = (event: Record<string, unknown>) => out(JSON.stringify(event));
   const name = (nodeId: string) => graph.nodes.find((n) => n.id === nodeId)?.data.name ?? nodeId;
-  // The run's result is the output of the agents nothing runs after.
-  const hasNext = new Set(graph.edges.filter((e) => !isFeedbackEdge(e)).map((e) => e.source));
-  const finalNodes = graph.nodes.filter((n) => !hasNext.has(n.id));
+  // The run's result is the output of the agents no other agent runs after
+  // (memory and hook nodes store or check; they don't answer).
+  const agentIds = new Set(graph.nodes
+    .filter((n) => n.data.role !== AgentRole.Memory && n.data.role !== AgentRole.Hook)
+    .map((n) => n.id));
+  const hasNext = new Set(graph.edges
+    .filter((e) => !isFeedbackEdge(e) && agentIds.has(e.target))
+    .map((e) => e.source));
+  const finalNodes = graph.nodes.filter((n) => agentIds.has(n.id) && !hasNext.has(n.id));
   const agents: Record<string, AgentRun> = {};
 
   const events: RunEvents = {

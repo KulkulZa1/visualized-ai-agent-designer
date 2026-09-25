@@ -91,6 +91,22 @@ describe("createReporter", () => {
     ]);
   });
 
+  it("takes the final output from the last agents, not from memory or hook nodes after them", () => {
+    const writer = node("Writer");
+    const log = node("Log");
+    log.data.role = AgentRole.Memory;
+    const out: string[] = [];
+    const reporter = createReporter({ ...graph, nodes: [writer, log], edges: [{ id: "w-l", source: "Writer", target: "Log" }] },
+      false, (l) => out.push(l), () => {});
+
+    reporter.summary({ started: true, run: { ...run, changes: [], agents: {
+      Writer: { agentId: "Writer", agentName: "Writer", status: "done", output: "The report." },
+      Log: { agentId: "Log", agentName: "Log", status: "done", output: "Stored 1 key(s): report" },
+    } } }, 1000);
+
+    expect(out.slice(-2)).toEqual(["Final output — Writer:", "  The report."]);
+  });
+
   it("emits one JSON event per line with --json, ending with the summary", () => {
     const { reporter, out } = capture(true);
 
