@@ -136,6 +136,9 @@ These are out of scope:
   - **Run end:** the hook tracks each run's active command ids and cancels any
     that are still running when the run ends, for example when another node
     failed.
+    - *Implementation note:* not needed and not built. `runParallel` only
+      settles after in-flight nodes finish, so a run cannot end while its
+      command runs; Stop is the only case that kills.
 
 ## 3. Live streaming (native tool-calling turns)
 

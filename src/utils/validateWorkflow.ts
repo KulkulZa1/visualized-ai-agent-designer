@@ -82,11 +82,11 @@ export function validateWorkflow(nodes: AgentNode[], edges: Edge[]): ValidationR
         message: `"${d.name}" has ${d.tools.length} tools — consider restricting to what's needed.` });
     }
 
-    // Bash: each command waits for the user's approval during the run (hooks on
-    // agent nodes are not run during workflows, so they are no gate).
+    // Bash: commands wait for the user's approval during the run (hooks on agent
+    // nodes are not run during workflows, so they are no gate).
     if (d.tools.includes(ToolPermission.Bash)) {
       warnings.push({ nodeId: n.id, kind: "no_hooks_on_bash",
-        message: `"${d.name}" can run shell commands (bash): each one waits for your approval while the workflow runs.` });
+        message: `"${d.name}" can run shell commands (bash): each new command waits for your approval (once, or for the rest of the run) while the workflow runs.` });
     }
   });
 

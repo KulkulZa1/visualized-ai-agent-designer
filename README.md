@@ -19,8 +19,8 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Area | Result |
 |---|---|
 | TypeScript | `npx tsc --noEmit` passed |
-| Frontend/unit tests | `npx vitest run` passed, 538 tests / 49 files |
-| Rust tests | `cargo test` passed, 74 tests |
+| Frontend/unit tests | `npx vitest run` passed, 593 tests / 57 files |
+| Rust tests | `cargo test` passed, 86 tests |
 | Frontend build | `npm run build` passed |
 | Tauri dev app | `npm run tauri -- dev` launched `agent-workflow-builder.exe` and WebView2 |
 | Tauri package | `npm run tauri -- build` produced MSI and NSIS installers |
@@ -37,13 +37,15 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Agent independence | Logical per-node prompt/model/output/log state, not process isolation |
 | Parallel scheduling | Independent forward-edge branches run up to `executionSettings.maxParallel`; feedback edges are not dependencies |
 | Revision loops | A node with a feedback edge acts as a reviewer: a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds; downstream nodes wait for the outcome |
-| Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`) confined to the open workspace, called with the provider's native tool calling (text-protocol fallback for models without it) |
-| Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog; not sandboxed, no input, no provider keys, stopped at the agent's time limit; helpers never get it |
+| Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for exact-snippet edits) confined to the open workspace, called with the provider's native tool calling (text-protocol fallback for models without it) |
+| Changes and undo | Every file a run's agents change is listed under **Changes (N)** in the run panel, with a side-by-side diff and revert per file or all (files created by the run are deleted) |
+| Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog, once or for the rest of the run; not sandboxed, no input, no provider keys, stopped at the agent's time limit or killed on Stop; helpers never get it |
+| Long runs | Past 75% of a node's Token budget, older steps are summarized into a progress note; the workspace's `AGENTS.md` is given to agents with workspace tools |
 | Sub-agents | `subagent_dispatch` starts helper agents with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time; each helper is listed in the activity panel |
 | Hooks during runs | Only Hook-role nodes run their pre-hook; hooks on agent nodes run only manually from the Hooks tab |
 | Provider calls | Implemented for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints |
 | Gemini direct adapter | Planned/catalog only |
-| Streaming | Simulated UI chunks after full provider response |
+| Streaming | Live for native tool-calling turns (Anthropic, OpenAI-compatible, Ollama); text-protocol replies and helpers are shown after they arrive |
 | Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` | Saved and shown in the UI (labeled), not applied at runtime |
 | Context inspector | Useful preview plus partial run data; not a complete durable trace |
 | Artifact viewer | Mock placeholders; real persistence service exists but execution is not wired to it |

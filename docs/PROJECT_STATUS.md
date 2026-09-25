@@ -13,8 +13,8 @@ development and demos, but not ready for broad release.
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 538 tests / 49 files (verified 2026-09-25) |
-| `cargo test` | Passed, 74 tests (verified 2026-09-25) |
+| `npx vitest run` | Passed, 593 tests / 57 files (verified 2026-09-25) |
+| `cargo test` | Passed, 86 tests (verified 2026-09-25) |
 | `npm run build` | Passed |
 | `npm run tauri -- dev` | Launched desktop binary and WebView2 (earlier pass, not re-run) |
 | `npm run tauri -- build` | Produced MSI and NSIS installers (earlier pass, not re-run) |
@@ -31,7 +31,12 @@ Build warnings still present:
 - Canvas editor with examples, validation, auto-layout, undo/redo, and YAML load/save.
 - AuditStrip filters with kind chips, All chip, agent chips, ordering toggle, and empty states.
 - Dependency-aware bounded parallel workflow execution with per-node prompt/model/output/status.
-- Agent shell commands (`bash`) with per-command approval: the user approves each exact command before it runs in the workspace folder.
+- Agent shell commands (`bash`): the user approves each exact command, once or for the rest of the run, before it runs in the workspace folder; Stop kills a running command.
+- Coding core:
+  - `edit_file` edits, and a diff and revert of a run's file changes (Changes dialog).
+  - Live streaming for native tool calls.
+  - Compaction of long conversations within the node's Token budget.
+  - `AGENTS.md` project instructions.
 - Provider adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
 - Ollama Cloud support for `https://ollama.com/api`, `gemma4:31b-cloud`, and endpoint-scoped credentials.
 - Rule-based Workflow Wizard with templates for blog automation, purchasing, research, coding, finance/logistics/MATLAB-related planning, and Harness Studio self-improvement.
@@ -45,13 +50,13 @@ Build warnings still present:
 - Independent forward-edge branches can run concurrently up to `executionSettings.maxParallel`.
 - Parallel scheduling is JavaScript async concurrency, not OS process isolation.
 - Agents are not isolated OS processes.
-- Streaming is simulated.
+- Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives.
 - Context snapshots are partial and not a complete durable request trace.
 - Artifact inspector uses mock placeholders during execution.
 - API keys are stored in localStorage/env, not OS keychain.
 - Gemini is catalog/planned only.
 - MCP write tools and workflow execution are not implemented.
-- Agent shell commands (`bash`/`run_command`) run only after the user approves each one; approved commands are not sandboxed, and Stop does not kill one that is already running.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command (once, or for the rest of the run); approved commands are not sandboxed.
 - Pre/post hooks on agent nodes do not run during workflow runs; only Hook-role nodes run their pre-hook.
 - Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
 - The VS Code extension is an experimental scaffold; most commands do not work yet.
@@ -90,7 +95,7 @@ Earlier fixes:
 4. More E2E coverage for bounded parallel execution, cancellation, and gateway routing.
 5. Durable run traces and artifacts.
 6. E2E UI automation and screenshot capture that does not depend on manual inspection.
-7. Agent shell commands run unsandboxed once approved: decide on a sandbox or an allowlist, and kill a running command on Stop.
+7. Agent shell commands run unsandboxed once approved: decide on a sandbox or an allowlist.
 
 See `docs/DEPLOYMENT_READINESS.md` for the detailed checklist.
 

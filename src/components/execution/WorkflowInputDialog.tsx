@@ -413,7 +413,7 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
           background: "var(--surface)",
         }}>
           <span style={{ flex: 1, fontSize: 10, color: "var(--hint)" }}>
-            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · {executionModeLabel} · streaming simulated
+            {nodes.length} agent{nodes.length !== 1 ? "s" : ""} · {executionModeLabel} · live streaming for native tool calls
           </span>
           <button onClick={onCancel} style={{
             padding: "7px 16px", border: "1px solid var(--border-md)", borderRadius: 5,

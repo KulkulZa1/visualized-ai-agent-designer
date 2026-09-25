@@ -101,7 +101,7 @@ Press **Ctrl+G** → click **CLAUDE.md** → see a preview → it's written to y
 - **Role** — determines glyph, color, and behavior
 - **Provider + Model** — select provider first, then model. Use "Load from API" to fetch live model lists (Ollama, OpenRouter).
 - **Temperature** — 0 = precise/deterministic, 2 = highly creative
-- **Token budget** — how many tokens this node is allowed to consume
+- **Token budget** — the conversation size the node works within: past 75%, older steps are summarized into a progress note (0 turns this off)
 - **Max steps** — maximum tool calls before the node stops
 - **Timeout** — hard wall-clock limit in seconds
 
@@ -121,7 +121,7 @@ Two modes:
 Checkboxes for all 17 tool permissions. Each shows a **risk level** (low / medium / high).
 
 > **Security principle:** grant only the tools the agent actually needs.
-> With the `bash` tool, a dialog asks you to approve each command before it runs. An approved command runs in
+> With the `bash` tool, a dialog asks you to approve each command (once, or for the rest of the run) before it runs. An approved command runs in
 > the workspace folder with your permissions (no sandbox). Hooks attached to agent nodes (such as
 > `destructive_guard.sh`) do not run during workflow runs, so they cannot guard tool calls.
 
@@ -305,7 +305,7 @@ Before running any workflow, verify:
 
 - [ ] All hook scripts are yours or from a trusted source
 - [ ] API keys are in Settings or OS environment variables (never in `.harness.yaml`; `.env` files are not loaded)
-- [ ] `fs.write` / `fs.append` / `bash` are only granted to nodes that truly need them (you approve each `bash` command, and an approved one is not sandboxed)
+- [ ] `fs.write` / `fs.append` / `bash` are only granted to nodes that truly need them (you approve each `bash` command or allow it for the run, and an approved one is not sandboxed)
 - [ ] Consent required is **on** for any hook that touches production systems
 - [ ] Hooks attached to agent nodes (e.g. `path_scope.py`) are not relied on as guards; they only run manually from the Hooks tab
 - [ ] Check the audit strip after every run

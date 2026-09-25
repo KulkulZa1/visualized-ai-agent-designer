@@ -186,8 +186,8 @@ export function ExamplePicker({ onClose }: ExamplePickerProps) {
             <span>
               <strong>Execution note:</strong> Independent forward-edge branches run with
               bounded parallel scheduling; a REVISE verdict on a feedback edge re-runs the loop
-              (at most 2 rounds). Provider streaming
-              is still simulated after each call returns.
+              (at most 2 rounds). Agents that call tools natively
+              stream their replies live.
             </span>
           </div>
         </div>

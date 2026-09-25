@@ -10,6 +10,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Native tool calling** — agents with runnable tools call them through the provider's native tool calling (new Rust `chat_turn` command for Anthropic, OpenAI and compatible endpoints, and Ollama): JSON-schema tool definitions, a real message history, and every tool call of a turn answered. Models or servers that refuse tool definitions fall back to the `<tool_call>` text protocol for the rest of the run; so does the VS Code extension, whose invoke shim lacks the command.
 - **Sub-agents** — `subagent_dispatch` now starts helper agents while a node runs: each gets a fresh context, a subset of its parent's tools and the parent's provider, model, deadline and Stop, and its final report comes back as the tool result; several dispatches in one turn run in parallel. One level deep, at most 5 per node run and 3 at a time. The activity panel lists each helper (status, task, tools, time, report or error; a helper still working when the run is stopped shows as stopped); starts, reports and tool calls are also in the audit log.
 
+### Added (coding core)
+- **`edit_file`**: agents with `fs.write` also get `edit_file`, which replaces an exact snippet.
+  - The snippet must occur once, unless `replace_all` is set.
+  - It tolerates CRLF files.
+  - A mismatch returns an explanation the model can act on.
+- **Changes and undo**: every `fs.write`, `fs.append` and `edit_file` of a run, by nodes and their helpers, is recorded.
+  - **Changes (N)** in the run panel opens a side-by-side Monaco diff, using the offline bundle.
+  - It reverts one file or all of them. A file the run created is deleted with the new, workspace-confined `delete_workspace_file`.
+  - A file changed since the agent's last write is only overwritten after confirmation.
+  - Changes made by shell commands are not tracked.
+- **"Allow for this run"**: the approval dialog now offers Deny (focused), "Allow for this run" and "Allow once".
+  - A run grant covers that exact command text, for any agent, until the run ends. The dialog warns that it runs again even if the agent changes what it runs.
+  - The audit log says how each command was approved.
+- **Stop kills running commands**: Stop now kills a running command's process tree at once (new `cancel_command`: `taskkill /T /F` on Windows, a process group on Unix). Before, the command ran on until the node's time limit.
+- **Live streaming**: agents that call tools natively show their reply live as it arrives (Anthropic, OpenAI-compatible and Ollama streaming).
+  - A server that cannot stream, or ignores `stream: true`, still works.
+  - The text-protocol fallback and helpers still show replies after they arrive.
+- **Compaction**: past 75% of a node's Token budget, older steps are summarized into a progress note by one extra model call. The newest tool exchange is kept verbatim. Each compaction is audited.
+- **AGENTS.md**: the workspace's `AGENTS.md` (max 32 KB) is added as project instructions for agents and helpers that have a workspace tool.
+
 ### Added (command approval)
 - **Agents can run shell commands, with your approval**: the `bash`/`run_command` tool works again, and each command needs its own approval.
   - The approval dialog shows the agent, the exact command and the workspace folder. Only **Allow** runs the command; Deny has the focus and Esc denies.
@@ -22,6 +42,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Feedback edges loop** — when a node with outgoing feedback edges answers REVISE (or names a feedback edge's label, e.g. `rust-fix`), the agents from each fired edge's target back to that node re-run with its review, what it read that they don't see themselves (so a gateway's bare `{"route":"revise"}` still carries the critique behind it) and their previous output, and the node reviews again: at most 2 rounds per node per run, then the run continues with the latest version. Downstream nodes and gateway routing use the final round; rounds appear in the audit log and on each re-run agent's record (`revision`). Labels must match exactly, so ordinary prose cannot start a loop.
 
 ### Changed
+- **The Token budget now applies**: the Role-tab Token budget used to be display-only. Once a conversation passes 75% of it, older steps are summarized (see Compaction above), which adds a model call.
+  - Nodes on the default budget (16k) now compact at about 12k tokens.
+  - Raise the budget for agents that read large files; 0 turns compaction off.
+- **The run dialog, guide and example notes no longer say streaming is simulated.** Native tool-calling turns stream live.
 - **Examples that list `bash`** — in Spec to PR and both Harness Studio projects (Self-Development, Active Project), agents can now run commands: a dialog asks you to approve each one. Before, these calls were refused.
 - **Examples with feedback edges now loop** — Self-Critic, Spec-to-PR, Parallel Research, Purchasing Decision and the Harness Studio project re-run agents when their reviewer asks for changes, which adds model calls. Self-Critic's Loop Gate ("REVISE+iter<3") is now honored with a bound of 2 rounds; its `iter_counter` hook does not count rounds.
 - **Only offered tools run** — an agent can no longer run a tool it was not given (read tools were never checked), and the system prompt's "Allowed tools" names only tools that actually run.

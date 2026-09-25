@@ -35,7 +35,7 @@ npm run dev
 
 Verified behavior: this creates a 7-node / 8-edge workflow and the run dialog
 shows the current execution mode, for example `bounded parallel up to 4`, plus
-`streaming simulated`.
+`live streaming for native tool calls`.
 
 ## Provider Setup
 
@@ -85,7 +85,7 @@ by kind and agent.
 | Canvas, examples, YAML validation | Real |
 | Provider calls | Real when configured |
 | CLI and MCP | Real read/test surfaces |
-| Streaming | Simulated |
+| Streaming | Real for native tool calls; text-protocol replies shown after they arrive |
 | Context inspector | Partial preview/run state |
 | Artifacts | Mock placeholders until run persistence is wired |
 | API key storage | localStorage/env, not OS keychain |

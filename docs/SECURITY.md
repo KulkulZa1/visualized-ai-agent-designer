@@ -7,11 +7,13 @@ Updated: 2026-09-25
 Harness Studio is a local desktop app with optional cloud provider calls. It
 can execute local hook scripts only through the audited Rust command path.
 A model-issued `bash`/`run_command` call runs only after the user approves that
-exact command in a dialog. It then runs in the open workspace folder (cmd.exe on
+exact command in a dialog, once or for the rest of the run (a grant covers only
+that exact text). It then runs in the open workspace folder (cmd.exe on
 Windows, sh elsewhere) with the user's privileges: it is **not sandboxed** and
 can reach outside the workspace. The approval is the only barrier. The
 `execute_inline_command` IPC command stays removed. Model-issued
-`fs.write`/`fs.append` calls do write files, confined to the open workspace.
+`fs.write`/`fs.append`/`edit_file` calls do write files, confined to the open
+workspace; a run's changes can be reverted from the Changes dialog.
 CLI is read-only. MCP is read/test-only.
 
 ## Main Risks
@@ -24,8 +26,8 @@ CLI is read-only. MCP is read/test-only.
 | Frontend shell access | `shell:allow-execute` and `shell:allow-kill` removed from default Tauri capabilities | Remove unused shell plugin dependency later if no feature needs it |
 | Debug tooling | DevTools are not enabled in release builds (tauri `devtools` feature removed); debug builds still open them | None |
 | Hidden cloud calls | No hidden provider calls added; health checks are explicit run/setup actions and a run's preflight contacts only providers that run will use; the billing-error fallback only goes to a local Ollama server | Show exact payload previews before remote calls |
-| Prompt injection | Model output runs as a command only after the user approves that exact command (no blanket approval). Model-issued `fs.write`/`fs.append` calls (for nodes granted those tools) do write files inside the open workspace | Add prompt-injection warnings and redaction for persisted traces |
-| Agent shell commands | Approval dialog per command: it shows the agent, the command and the folder; Deny has the focus, Esc denies, and a click outside does nothing. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token). The command runs in the workspace folder without provider API keys or input, and is stopped at the node's remaining time. A network-share workspace is refused on Windows, because cmd.exe would run the command in `C:\Windows`. Sub-agents never get `bash`; Stop, or the end of the run, denies pending approvals. Approvals, denials and results are audited | No sandbox or allowlist: an approved command has the user's privileges. Stop does not kill a command that is already running. The macOS/Linux `sh` path is untested |
+| Prompt injection | Model output runs as a command only after the user approves that exact command, once or for the rest of the run (no blanket approval: a grant covers only that exact text). Model-issued `fs.write`/`fs.append` calls (for nodes granted those tools) do write files inside the open workspace | Add prompt-injection warnings and redaction for persisted traces |
+| Agent shell commands | Approval dialog per command: it shows the agent, the command and the folder; Deny has the focus, Esc denies, and a click outside does nothing. "Allow for this run" grants that exact command text until the run ends; the dialog warns that it then runs again even if the agent changes what it runs (for example package.json scripts). The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token). The command runs in the workspace folder without provider API keys or input, and is stopped at the node's remaining time. A network-share workspace is refused on Windows, because cmd.exe would run the command in `C:\Windows`. Stop kills a running command's process tree (`cancel_command`). Sub-agents never get `bash`; Stop, or the end of the run, denies pending approvals and ends the run's grants. Approvals, denials and results are audited | No sandbox or allowlist: an approved command has the user's privileges. The macOS/Linux `sh` path and its process-group kill are untested |
 | MCP command injection | `run_tests.filter` validates characters and rejects traversal before spawning | Keep MCP test tools bounded |
 | Tool and sub-agent escalation | An agent runs only the tools offered to it (read tools included); the system prompt names only those. `subagent_dispatch` helpers get a subset of their parent's tools, cannot start helpers themselves, share the parent's deadline and Stop, and are capped at 5 per node run (3 at a time) | A single helper cannot be stopped on its own (Stop ends the whole run) |
 
@@ -102,4 +104,4 @@ persistence.
 5. Redaction pass for persisted snapshots/artifacts before enabling durable run
    traces by default.
 6. Agent shell commands run unsandboxed once approved: decide on a sandbox or an
-   allowlist, and kill a running command on Stop.
+   allowlist.
