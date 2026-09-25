@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
+import type { RunRecord } from "@/engine/runRecord";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import type { AgentRun } from "@/types/execution";
@@ -268,6 +269,52 @@ describe("runWorkflow", () => {
     await runWorkflow(runInput(nodes), host);
 
     expect(log.audit.map((e) => e.details)).toContain("A: command denied (not in --allow-command): npm test");
+  });
+});
+
+describe("saving the run record", () => {
+  const chain = (): [AgentNode[], Edge[]] => [[makeNode("A"), makeNode("B")], [{ id: "a-b", source: "A", target: "B" }]];
+
+  it("saves the record at the start, after each node and at the end", async () => {
+    const records: RunRecord[] = [];
+    const { host } = fakeHost({ call_ollama_api: (args) => `out-${who(args)}` },
+      { saveRun: async (record) => { records.push(JSON.parse(JSON.stringify(record))); } });
+
+    const outcome = await runWorkflow(runInput(...chain()), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(records.length).toBeGreaterThanOrEqual(4); // start, A, B, end
+    expect(records[0]).toMatchObject({
+      version: 1, runId: outcome.run.id, status: "running", attempts: 1, task: "Ship it",
+      workflow: { name: "W", path: null, hash: null },
+    });
+    const last = records.at(-1)!;
+    expect(last).toMatchObject({ status: "done", outputs: { "agent-0": "out-A", "agent-1": "out-B" } });
+    expect(last.nodes["agent-0"]).toMatchObject({
+      agent: "A", status: "done", output: "out-A", modelUsed: "qwen2.5-coder:7b",
+      definitionHash: expect.stringMatching(/^[0-9a-f]{14}$/),
+    });
+    expect(last.audit.some((e) => e.details?.startsWith("▶ A"))).toBe(true);
+  });
+
+  it("keeps provider keys out of the record", async () => {
+    let record: RunRecord | undefined;
+    const { host } = fakeHost({}, { saveRun: async (r) => { record = r; } });
+    const input = runInput([makeNode("A")]);
+    input.provider = { ...input.provider, apiKey: "sk-ant-secret", openaiApiKey: "sk-secret", ollamaApiKey: "ol-secret", customApiKey: "c-secret" };
+
+    await runWorkflow(input, host);
+
+    expect(JSON.stringify(record)).not.toMatch(/secret/);
+  });
+
+  it("reports a failing save once, and the run goes on", async () => {
+    const { host, log } = fakeHost({}, { saveRun: async () => { throw new Error("disk full"); } });
+
+    const outcome = await runWorkflow(runInput(...chain()), host);
+
+    expect(outcome.started && outcome.run.status).toBe("done");
+    expect(log.audit.filter((e) => e.details === "Could not save the run record: Error: disk full")).toHaveLength(1);
   });
 });
 

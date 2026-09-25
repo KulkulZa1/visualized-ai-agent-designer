@@ -22,6 +22,7 @@ import type { HookResult } from "@/types/hookResult";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
+import { definitionHash, RUN_RECORD_VERSION, savedNodeId, type RunRecord } from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -93,6 +94,10 @@ export interface RunInput {
   /** Agents' file tools, commands and hooks work only inside it. */
   workspacePath: string | null;
   continueOnError: boolean;
+  /** The workflow file the graph came from, for the run record (harness run: its path and SHA-256). */
+  workflowFile?: { path: string | null; hash: string | null };
+  /** A saved run to resume (harness run --resume): same run id; unchanged finished nodes are reused. */
+  resume?: RunRecord;
 }
 
 /** A node that finished, for the app's context snapshots. */
@@ -129,6 +134,9 @@ export interface RunHost {
   commandPolicy?: string;
   /** false: no progressive reveal of each final answer (the app shows one; harness run does not). */
   revealOutput?: boolean;
+  /** Saves the run record (.harness/runs/<id>/run.json) after the start, after each node and at the end.
+   *  A failure is reported once; the run goes on. */
+  saveRun?: (record: RunRecord) => Promise<void>;
 }
 
 /** A run that never started (the provider preflight failed), or the finished run. */
@@ -233,7 +241,12 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     llmProvider, ollamaBaseUrl, ollamaModel,
   } = input.provider;
   const invoke = <T>(cmd: string, args?: Record<string, unknown>) => host.invoke<T>(cmd, args);
-  const addEntry = (entry: AuditEntry) => host.events.onAudit(entry);
+  // Every audit entry of the run, for its record; a resumed run continues the saved list.
+  const auditLog: AuditEntry[] = [...(input.resume?.audit ?? [])];
+  const addEntry = (entry: AuditEntry) => {
+    auditLog.push(entry);
+    host.events.onAudit(entry);
+  };
   // Async like the IPC wrappers they stand in for: a synchronous throw still rejects.
   const readWorkspaceFile = async (ws: string, relativePath: string) =>
     invoke<string>("read_workspace_file", { workspacePath: ws, relativePath });
@@ -337,6 +350,14 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       details: `Project instructions: AGENTS.md (${projectInstructions.length.toLocaleString()} chars)` });
   }
 
+  // What shapes each node's work, for the record and for resume.
+  const hashes = new Map<string, string>();
+  for (const n of nodes) {
+    const prompt = await resolvePromptContent(n.data.promptSource, workspacePath, readWorkspaceFile)
+      .catch((e) => `unreadable: ${String(e)}`);
+    hashes.set(n.id, definitionHash(n.data, prompt));
+  }
+
   // ── Per-run runtime state ─────────────────────────────────────────────────
   const memory        = new MemoryService();
   const agentOutputs  = new Map<string, string>(); // nodeId → output text
@@ -363,7 +384,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     return parts;
   };
 
-  const runId = `run-${Date.now()}`;
+  const runId = input.resume?.runId ?? `run-${Date.now()}`;
+  const attempts = (input.resume?.attempts ?? 0) + 1;
   const run: WorkflowRun = { id: runId, workflowName: meta.name, startedAt: Date.now(), status: "running", agents: {} };
   host.events.onRunStarted(runId, meta.name);
   const isRunCancelled = () => host.isCancelled();
@@ -375,6 +397,54 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   const updateNodeData = (nodeId: string, data: { status: AgentNodeData["status"]; tokens?: { used: number; budget: number } }) =>
     host.events.onNodeStatus(nodeId, data.status, data.tokens);
   for (const n of nodes) updateNodeData(n.id, { status: "idle" });
+
+  const buildRecord = (): RunRecord => ({
+    version: RUN_RECORD_VERSION,
+    runId,
+    workflow: { name: meta.name, path: input.workflowFile?.path ?? null, hash: input.workflowFile?.hash ?? null },
+    task: config.userInput,
+    provider: { llmProvider, ollamaBaseUrl, ollamaModel, customApiUrl, customApiModel },
+    status: run.status,
+    startedAt: input.resume?.startedAt ?? run.startedAt,
+    finishedAt: run.finishedAt,
+    attempts,
+    nodes: Object.fromEntries(nodes.map((n, i) => {
+      const agent = run.agents[n.id];
+      return [savedNodeId(i), {
+        agent: n.data.name, status: agent?.status ?? "idle", output: agent?.output, error: agent?.error,
+        startedAt: agent?.startedAt, finishedAt: agent?.finishedAt, modelUsed: agent?.modelUsed,
+        providerUsed: agent?.providerUsed, tokenEstimate: agent?.tokenEstimate, revision: agent?.revision,
+        subAgents: agent?.subAgents, definitionHash: hashes.get(n.id) ?? "",
+      }];
+    })),
+    outputs: Object.fromEntries(nodes.flatMap((n, i) => {
+      const output = agentOutputs.get(n.id);
+      return output === undefined ? [] : [[savedNodeId(i), output]];
+    })),
+    memory: memory.dump(),
+    gatewayRoutes: Object.fromEntries(nodes.flatMap((n, i) => {
+      const route = gatewayRoutes.get(n.id);
+      return route === undefined ? [] : [[savedNodeId(i), route]];
+    })),
+    changes: run.changes ?? [],
+    audit: [...auditLog],
+  });
+  // Saves go out one at a time, in order. A failure is reported once; the run goes on.
+  let saving = Promise.resolve();
+  let saveFailed = false;
+  const save = (): Promise<void> => {
+    const saveRun = host.saveRun;
+    if (!saveRun) return saving;
+    const record = buildRecord();
+    saving = saving.then(() => saveRun(record)).catch((e) => {
+      if (saveFailed) return;
+      saveFailed = true;
+      addEntry({ id: `run-record-${Date.now()}`, timestamp: new Date().toISOString(), action: "workflow_loaded",
+        agentId: "system", success: false, details: `Could not save the run record: ${String(e)}` });
+    });
+    return saving;
+  };
+  await save();
 
   // ── Per-node async processor (called by parallel scheduler) ──────────────
   async function processNode(nodeId: string): Promise<void> {
@@ -787,7 +857,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // A node whose verdict fires its feedback edges re-runs the path from each
   // target back to itself, then reviews again (at most MAX_REVISION_ROUNDS times).
   // The scheduler awaits this, so downstream nodes see the final result.
-  async function runNode(nodeId: string): Promise<void> {
+  async function runWithRevisions(nodeId: string): Promise<void> {
     await processNode(nodeId);
     const name = nodes.find((n) => n.id === nodeId)?.data.name ?? nodeId;
     for (let round = 1; ; round++) {
@@ -823,6 +893,14 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     }
   }
 
+  async function runNode(nodeId: string): Promise<void> {
+    try {
+      await runWithRevisions(nodeId);
+    } finally {
+      await save(); // after every node settles, a failed one too
+    }
+  }
+
   // ── Parallel execution (replaces sequential for-loop) ────────────────────
   const maxParallel = executionSettings.maxParallel || 4;
   let failed = false;
@@ -854,6 +932,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   const status = failed ? "error" : isRunCancelled() ? "cancelled" : anyFailed ? "error" : "done";
   run.status = status;
   run.finishedAt = Date.now();
+  await save();
   host.events.onRunFinished(status);
   return { started: true, run };
 }
