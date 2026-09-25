@@ -17,6 +17,7 @@ import { createSnapshot } from "@/services/context-builder/snapshotService";
 import type { Artifact } from "@/types/inspection";
 import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import { runWorkflow, type RunHost } from "@/engine/runWorkflow";
+import { writeRunRecord } from "@/engine/runRecord";
 
 // Set synchronously when a run starts so a second Run click during the async
 // provider preflight (before isRunning flips) is rejected too.
@@ -28,6 +29,7 @@ export function useWorkflowExecution() {
   const meta              = useWorkflowStore((s) => s.meta);
   const executionSettings = useWorkflowStore((s) => s.executionSettings);
   const updateNodeData    = useWorkflowStore((s) => s.updateNodeData);
+  const filePath          = useWorkflowStore((s) => s.filePath);
   const workspacePath     = useWorkspaceStore((s) => s.workspacePath);
   const {
     currentRun, apiKey, openaiApiKey, ollamaApiKey,
@@ -62,6 +64,12 @@ export function useWorkflowExecution() {
         },
         workspacePath,
         continueOnError,
+        // The record names the workflow file relative to the workspace, as harness run does.
+        workflowFile: {
+          path: filePath && workspacePath && filePath.startsWith(`${workspacePath}/`)
+            ? filePath.slice(workspacePath.length + 1) : filePath,
+          hash: null,
+        },
       }, appHost());
       if (!outcome.started) reportError(outcome.error);
     } finally {
@@ -115,6 +123,8 @@ export function useWorkflowExecution() {
             ...(error === undefined ? {} : { metadata: { error } }) },
         ).catch(console.error);
       },
+      // With a workspace open, every run is saved to .harness/runs/<id>/run.json.
+      saveRun: workspacePath ? (record) => writeRunRecord(invoke, workspacePath, record) : undefined,
     };
   }
 
