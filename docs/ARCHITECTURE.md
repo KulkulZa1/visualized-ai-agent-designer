@@ -17,7 +17,7 @@ Updated: 2026-09-25
 ## Current Runtime Architecture
 
 - `workflowStore` holds graph state and serializes/deserializes workflow YAML.
-- `useWorkflowExecution.ts` runs workflows through the dependency-aware `runParallel()` scheduler.
+- `src/engine/runWorkflow.ts` runs workflows through the dependency-aware `runParallel()` scheduler. The `useWorkflowExecution` hook gives it the canvas and settings, and a host that updates the stores.
 - Provider calls go through `src/services/model-providers/providerAdapter.ts` and Rust IPC commands.
 - Rust commands own filesystem access, workflow load/save, audit writes, provider calls, and hook execution.
 - CLI and MCP are separate Node entrypoints; they do not require a Tauri runtime.

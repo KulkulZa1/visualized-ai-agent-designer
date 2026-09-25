@@ -105,7 +105,8 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 
 | File | Purpose |
 |---|---|
-| `src/hooks/useWorkflowExecution.ts` | Workflow runner (uses `runParallel`) |
+| `src/engine/runWorkflow.ts` | Workflow run engine (uses `runParallel`); no React, stores or Tauri |
+| `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
 | `src/services/model-providers/providerAdapter.ts` | Provider call adapter |
 | `src/utils/providerConfig.ts` | Provider selection and Ollama URL/key helpers |
 | `src/services/wizard/goalTemplates.ts` | Rule-based goal templates |
