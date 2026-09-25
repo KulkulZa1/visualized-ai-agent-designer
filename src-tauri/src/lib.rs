@@ -6,6 +6,9 @@ mod commands;
 mod error;
 mod models;
 
+/// harness-core's stdin/stdout loop (`src/bin/harness-core.rs`).
+pub use commands::core_server::serve_stdio;
+
 #[cfg(feature = "app")]
 use commands::{
     api_commands::{
