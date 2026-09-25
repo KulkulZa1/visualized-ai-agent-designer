@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -98,6 +98,25 @@ pub fn execute_hook(
     )
 }
 
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Agent commands that are running, by the id the frontend gave them: the
+/// shell's process id, for cancel_command.
+static RUNNING_COMMANDS: LazyLock<Mutex<HashMap<String, u32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Takes a command out of RUNNING_COMMANDS when it ends, however it ends.
+struct Registration(Option<String>);
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if let (Some(id), Ok(mut running)) = (&self.0, RUNNING_COMMANDS.lock()) {
+            running.remove(id);
+        }
+    }
+}
+
 /// Run an agent's shell command line in the workspace folder: cmd.exe on Windows,
 /// sh elsewhere. The frontend asks the user to approve each command first.
 #[tauri::command(async)]
@@ -107,6 +126,8 @@ pub fn execute_command(
     consent_granted: bool,
     // The time the agent has left, bounded to 1 s–1 h.
     timeout_secs: u64,
+    // Lets cancel_command stop it (Stop in the UI).
+    command_id: Option<String>,
 ) -> AppResult<HookResult> {
     if !consent_granted {
         return Err(AppError::Other(
@@ -124,7 +145,12 @@ pub fn execute_command(
     shell.current_dir(&dir).stdin(Stdio::null());
 
     let timeout = Duration::from_secs(timeout_secs.clamp(1, 3600));
-    match wait_with_timeout(shell, timeout) {
+    let registration = Registration(command_id);
+    match wait_with_timeout(shell, timeout, |pid| {
+        if let (Some(id), Ok(mut running)) = (&registration.0, RUNNING_COMMANDS.lock()) {
+            running.insert(id.clone(), pid);
+        }
+    }) {
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(AppError::Other(format!(
             "Command timed out after {} s",
@@ -134,10 +160,44 @@ pub fn execute_command(
     }
 }
 
+/// Stop a running agent command: kill its whole process tree. False if no
+/// command with that id is running.
+#[tauri::command]
+pub fn cancel_command(command_id: String) -> bool {
+    let pid = RUNNING_COMMANDS.lock().ok().and_then(|mut running| running.remove(&command_id));
+    if let Some(pid) = pid {
+        kill_tree(pid);
+    }
+    pid.is_some()
+}
+
+/// Kill a process and everything it started: killing only the shell leaves its
+/// children running.
+fn kill_tree(pid: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Agent commands start in their own process group (shell_command).
+        let _ = Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn shell_command(command: &str, dir: &str) -> AppResult<Command> {
     use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     // cmd.exe cannot use a network path as its working folder: it would run the
     // command in C:\Windows instead.
@@ -163,6 +223,8 @@ fn shell_command(command: &str, dir: &str) -> AppResult<Command> {
 fn shell_command(command: &str, _dir: &str) -> AppResult<Command> {
     let mut shell = keyless_command("sh");
     shell.args(["-c", command]);
+    // Its own process group, so kill_tree can end everything it started.
+    std::os::unix::process::CommandExt::process_group(&mut shell, 0);
     Ok(shell)
 }
 
@@ -221,7 +283,7 @@ fn run_command_with_timeout(
 ) -> AppResult<HookResult> {
     let mut command = keyless_command(program);
     command.args(args).current_dir(current_dir).envs(env_vars);
-    wait_with_timeout(command, timeout)
+    wait_with_timeout(command, timeout, |_| {})
         .map_err(|e| AppError::HookExecution(e.to_string()))?
         .ok_or_else(|| {
             AppError::HookExecution(format!("Hook timeout after {}ms", timeout.as_millis()))
@@ -229,13 +291,18 @@ fn run_command_with_timeout(
 }
 
 /// Run to completion and collect the output; `None` if it ran past `timeout`
-/// (the process tree is killed).
-fn wait_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Option<HookResult>> {
+/// (the process tree is killed). `on_spawn` gets the process id.
+fn wait_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    on_spawn: impl FnOnce(u32),
+) -> std::io::Result<Option<HookResult>> {
     let start = Instant::now();
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    on_spawn(child.id());
 
     let (stdout, stdout_reader) = drain(child.stdout.take());
     let (stderr, stderr_reader) = drain(child.stderr.take());
@@ -257,13 +324,7 @@ fn wait_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result
         }
 
         if start.elapsed() >= timeout {
-            // Kill the whole tree: killing only the shell leaves its children running.
-            #[cfg(target_os = "windows")]
-            let _ = Command::new("taskkill")
-                .args(["/T", "/F", "/PID", &child.id().to_string()])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            kill_tree(child.id());
             let _ = child.kill();
             let _ = child.wait();
             return Ok(None);
@@ -415,7 +476,7 @@ mod tests {
     }
 
     fn run_in(dir: &Path, command: &str, timeout_secs: u64) -> AppResult<HookResult> {
-        execute_command(dir.to_string_lossy().to_string(), command.to_string(), true, timeout_secs)
+        execute_command(dir.to_string_lossy().to_string(), command.to_string(), true, timeout_secs, None)
     }
 
     #[test]
@@ -426,6 +487,7 @@ mod tests {
             "echo ran> marker.txt".to_string(),
             false,
             10,
+            None,
         );
 
         assert!(matches!(result, Err(AppError::Other(message)) if message.contains("approval")));
@@ -544,5 +606,36 @@ mod tests {
         assert!(
             matches!(result, Err(AppError::HookExecution(message)) if message.contains("timeout"))
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cancel_command_kills_a_running_command() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let started = Instant::now();
+        let runner = thread::spawn(move || {
+            execute_command(path, "ping -n 30 127.0.0.1 >nul".to_string(), true, 60,
+                Some("cancel-test".to_string()))
+        });
+        while !RUNNING_COMMANDS.lock().unwrap().contains_key("cancel-test") {
+            assert!(started.elapsed() < Duration::from_secs(10), "the command never started");
+            thread::sleep(Duration::from_millis(20));
+        }
+
+        assert!(cancel_command("cancel-test".to_string()));
+        let output = runner.join().unwrap().unwrap();
+
+        assert_ne!(output.exit_code, 0);
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn cancel_command_ignores_unknown_and_finished_commands() {
+        assert!(!cancel_command("no-such-command".to_string()));
+        let dir = tempdir().unwrap();
+        execute_command(dir.path().to_string_lossy().to_string(), "echo done".to_string(), true, 10,
+            Some("finished-test".to_string())).unwrap();
+        assert!(!cancel_command("finished-test".to_string()));
     }
 }

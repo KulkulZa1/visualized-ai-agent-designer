@@ -558,7 +558,7 @@ export function useWorkflowExecution() {
 
         // bash: each command waits for the user's approval (CommandConsentDialog).
         const runCommand = (args: Record<string, unknown>) => runCommandTool(args, {
-          agentName: data.name, workspacePath, invoke,
+          runId, agentName: data.name, workspacePath, invoke,
           askUser: (command) => useCommandConsentStore.getState().request({
             runId, agentName: data.name, command, workspacePath: workspacePath ?? "",
           }),

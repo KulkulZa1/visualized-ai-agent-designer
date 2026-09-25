@@ -11,7 +11,7 @@
 
 import { beforeDeadline } from "@/services/execution/agentLoop";
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
-import type { CommandDecision } from "@/store/commandConsentStore";
+import type { CommandApproval } from "@/store/commandConsentStore";
 import type { HookResult } from "@/types/hookResult";
 
 // Per stream; test runners print their summary at the end, so the end is kept.
@@ -22,12 +22,18 @@ const REPORT_GRACE_MS = 5000;
 // Long enough for real commands, short enough to read in full before approving.
 const MAX_COMMAND_CHARS = 2000;
 
+const APPROVED: Record<Exclude<CommandApproval, "deny">, string> = {
+  allow: "approved once", "allow-run": "approved for this run", granted: "allowed for this run",
+};
+let nextCommandId = 0;
+
 export interface CommandToolOptions {
+  runId: string;
   agentName: string;
   workspacePath: string | null;
   invoke: InvokeFn;
   /** Ask the user to approve this exact command line. */
-  askUser: (command: string) => Promise<CommandDecision>;
+  askUser: (command: string) => Promise<CommandApproval>;
   /** The node's deadline (epoch ms). */
   deadline: () => number;
   /** Move the deadline later by the time spent waiting for the user. */
@@ -67,30 +73,37 @@ export async function runCommandTool(args: Record<string, unknown>, opts: Comman
   if (!opts.workspacePath) return "[error] No workspace open — commands run in the workspace folder.";
 
   const asked = Date.now();
-  const decision = await opts.askUser(command);
+  const approval = await opts.askUser(command);
   opts.extendDeadline(Date.now() - asked);
   if (opts.isCancelled()) throw new Error("Run stopped");
-  if (decision !== "allow") {
+  if (approval === "deny") {
     opts.onAudit(`${opts.agentName}: command denied by the user: ${command}`, false);
     return `[error] The user denied this command, so it was not run: ${command}. ` +
       "Do not ask for it again; continue without it or explain what you needed it for.";
   }
 
+  const commandId = `${opts.runId}-cmd-${++nextCommandId}`;
   try {
     const result = await beforeDeadline(
       opts.invoke<HookResult>("execute_command", {
-        workspacePath: opts.workspacePath, command, consentGranted: true,
+        workspacePath: opts.workspacePath, command, consentGranted: true, commandId,
         timeoutSecs: Math.max(1, Math.ceil((opts.deadline() - Date.now()) / 1000)),
       }),
       () => opts.deadline() + REPORT_GRACE_MS,
       `${command} did not finish within ${opts.agentName}'s time limit`,
       opts.isCancelled,
     );
-    opts.onAudit(`${opts.agentName} ran: ${command} (exit ${result.exitCode}, ${result.durationMs} ms)`,
+    opts.onAudit(
+      `${opts.agentName} ran: ${command} (${APPROVED[approval]}; exit ${result.exitCode}, ${result.durationMs} ms)`,
       result.exitCode === 0);
     return formatResult(command, result);
   } catch (e) {
-    if (opts.isCancelled()) throw e;
+    if (opts.isCancelled()) {
+      // Stop: end the command now instead of at the time limit.
+      opts.invoke("cancel_command", { commandId }).catch(() => {});
+      opts.onAudit(`${opts.agentName}: command stopped: ${command}`, false);
+      throw e;
+    }
     opts.onAudit(`${opts.agentName}: command failed: ${command}: ${String(e)}`, false);
     return `[error] ${command} failed: ${String(e)}`;
   }

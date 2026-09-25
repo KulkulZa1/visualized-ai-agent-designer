@@ -6,7 +6,7 @@ const ask = (runId: string, command: string) =>
   useCommandConsentStore.getState().request({ runId, agentName: "Tester", command, workspacePath: "/ws" });
 
 beforeEach(() => {
-  useCommandConsentStore.setState({ queue: [] });
+  useCommandConsentStore.setState({ queue: [], grants: {} });
   useExecutionStore.setState({ currentRun: null, isRunning: false });
 });
 
@@ -45,6 +45,30 @@ describe("commandConsentStore", () => {
     useExecutionStore.getState().cancelRun();
 
     await expect(pending).resolves.toBe("deny");
+    expect(useCommandConsentStore.getState().queue).toEqual([]);
+  });
+
+  it("runs a command allowed for this run again without asking, until the run ends", async () => {
+    const first = ask("run-1", "npm test");
+    useCommandConsentStore.getState().answer(useCommandConsentStore.getState().queue[0].id, "allow-run");
+    await expect(first).resolves.toBe("allow-run");
+
+    await expect(ask("run-1", "npm test")).resolves.toBe("granted");
+    const other = ask("run-1", "npm test -- --watch");
+    expect(useCommandConsentStore.getState().queue.map((r) => r.command)).toEqual(["npm test -- --watch"]);
+
+    useCommandConsentStore.getState().denyRun("run-1");
+    await expect(other).resolves.toBe("deny");
+    void ask("run-1", "npm test");
+    expect(useCommandConsentStore.getState().queue.map((r) => r.command)).toEqual(["npm test"]);
+  });
+
+  it("also runs the same command waiting from another agent once it is allowed for the run", async () => {
+    const a = ask("run-1", "npm test");
+    const b = ask("run-1", "npm test");
+    useCommandConsentStore.getState().answer(useCommandConsentStore.getState().queue[0].id, "allow-run");
+    await expect(a).resolves.toBe("allow-run");
+    await expect(b).resolves.toBe("granted");
     expect(useCommandConsentStore.getState().queue).toEqual([]);
   });
 });

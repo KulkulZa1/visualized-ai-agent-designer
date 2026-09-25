@@ -465,7 +465,7 @@ describe("useWorkflowExecution", () => {
       return useCommandConsentStore.getState().queue[0];
     }
 
-    beforeEach(() => useCommandConsentStore.setState({ queue: [] }));
+    beforeEach(() => useCommandConsentStore.setState({ queue: [], grants: {} }));
 
     it("runs an agent's command once the user approves it and gives the agent the result", async () => {
       const { messages, executed } = commandNode();
@@ -501,6 +501,26 @@ describe("useWorkflowExecution", () => {
 
       expect(executed).not.toHaveBeenCalled();
       expect(useCommandConsentStore.getState().queue).toEqual([]);
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
+    });
+
+    it("kills a command that is running when Stop is pressed", async () => {
+      commandNode();
+      mockInvokeHandler("execute_command", () => new Promise(() => {}));
+      const cancelled = vi.fn(() => true);
+      mockInvokeHandler("cancel_command", cancelled);
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      await act(async () => {
+        const running = result.current.executeWorkflow(undefined, vi.fn());
+        const request = await waitForApprovalPrompt();
+        useCommandConsentStore.getState().answer(request.id, "allow");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        useExecutionStore.getState().cancelRun();
+        await running;
+      });
+
+      expect(cancelled).toHaveBeenCalledWith({ commandId: expect.stringMatching(/-cmd-\d+$/) });
       expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
     });
 

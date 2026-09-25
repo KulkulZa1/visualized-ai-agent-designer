@@ -6,7 +6,7 @@ import { useCommandConsentStore } from "@/store/commandConsentStore";
 const ask = (command: string) =>
   useCommandConsentStore.getState().request({ runId: "run-1", agentName: "Test Runner", command, workspacePath: "D:/ws" });
 
-beforeEach(() => useCommandConsentStore.setState({ queue: [] }));
+beforeEach(() => useCommandConsentStore.setState({ queue: [], grants: {} }));
 
 describe("CommandConsentDialog", () => {
   it("renders nothing while no command is waiting", () => {
@@ -14,7 +14,7 @@ describe("CommandConsentDialog", () => {
     expect(container.innerHTML).toBe("");
   });
 
-  it("shows the waiting command, who asks and where it runs, and runs it on Allow", async () => {
+  it("shows the waiting command, who asks and where it runs, and runs it on Allow once", async () => {
     render(<CommandConsentDialog />);
     let answer!: Promise<string>;
     act(() => { answer = ask("npm test -- --run"); });
@@ -23,7 +23,7 @@ describe("CommandConsentDialog", () => {
     expect(screen.getByText("npm test -- --run")).toBeTruthy();
     expect(screen.getByRole("alertdialog").textContent).toContain("D:/ws");
 
-    act(() => { fireEvent.click(screen.getByRole("button", { name: "Allow" })); });
+    act(() => { fireEvent.click(screen.getByRole("button", { name: "Allow once" })); });
 
     await expect(answer).resolves.toBe("allow");
     expect(screen.queryByRole("alertdialog")).toBeNull();
@@ -43,5 +43,16 @@ describe("CommandConsentDialog", () => {
     act(() => { fireEvent.keyDown(window, { key: "Escape" }); });
     await expect(second).resolves.toBe("deny");
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("allows a command for the rest of the run, with a warning", async () => {
+    render(<CommandConsentDialog />);
+    let answer!: Promise<string>;
+    act(() => { answer = ask("npm test"); });
+    expect(screen.getByRole("alertdialog").textContent).toContain("package.json");
+
+    act(() => { fireEvent.click(screen.getByRole("button", { name: "Allow for this run" })); });
+
+    await expect(answer).resolves.toBe("allow-run");
   });
 });

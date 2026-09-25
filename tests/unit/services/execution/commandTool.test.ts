@@ -11,6 +11,7 @@ function options(over: Partial<CommandToolOptions> = {}) {
   let deadline = Date.now() + 90_000;
   const audit: Array<{ details: string; success: boolean }> = [];
   const opts: CommandToolOptions = {
+    runId: "run-1",
     agentName: "Tester",
     workspacePath: "/ws",
     invoke: vi.fn(async () => result({ stdout: "2 passed" })) as unknown as InvokeFn,
@@ -33,6 +34,7 @@ describe("runCommandTool", () => {
     expect(opts.askUser).toHaveBeenCalledWith("npm test");
     expect(opts.invoke).toHaveBeenCalledWith("execute_command", {
       workspacePath: "/ws", command: "npm test", consentGranted: true, timeoutSecs: 90,
+      commandId: expect.stringMatching(/^run-1-cmd-\d+$/),
     });
     expect(text).toContain("exit code 0");
     expect(text).toContain("2 passed");
@@ -118,5 +120,28 @@ describe("runCommandTool", () => {
 
     await expect(runCommandTool({ command: "npm test" }, opts)).rejects.toThrow("Run stopped");
     expect(opts.invoke).not.toHaveBeenCalled();
+  });
+
+  it("says in the audit log how the command was approved", async () => {
+    const { opts, audit } = options({ askUser: vi.fn(async () => "granted" as const) });
+    await runCommandTool({ command: "npm test" }, opts);
+    expect(audit[0].details).toContain("allowed for this run");
+  });
+
+  it("kills a running command when the run is stopped", async () => {
+    let stopped = false;
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const invoke = vi.fn((cmd: string, args: Record<string, unknown>) => {
+      calls.push([cmd, args]);
+      if (cmd === "execute_command") { stopped = true; return new Promise(() => {}); }
+      return Promise.resolve(true);
+    }) as unknown as InvokeFn;
+    const { opts, audit } = options({ invoke, isCancelled: () => stopped });
+
+    await expect(runCommandTool({ command: "npm test" }, opts)).rejects.toThrow("Run stopped");
+
+    const started = calls.find(([cmd]) => cmd === "execute_command")![1];
+    expect(calls).toContainEqual(["cancel_command", { commandId: started.commandId }]);
+    expect(audit.at(-1)).toEqual({ details: expect.stringContaining("stopped"), success: false });
   });
 });
