@@ -420,6 +420,9 @@ export function RoleTab({ nodeId }: { nodeId: string }) {
             <span style={{ fontFamily: MONO }}>{(d.tokens.budget / 1000).toFixed(0)}k</span>
             <span>200k</span>
           </div>
+          <div style={{ fontSize: 10, color: "var(--hint)", marginTop: 4 }}>
+            Past 75% of the budget, older steps are summarized into a progress note (0 = never).
+          </div>
         </Fld>
         <Fld label="Temperature">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

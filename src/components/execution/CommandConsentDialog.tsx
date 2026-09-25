@@ -64,12 +64,16 @@ export function CommandConsentDialog() {
           </div>
         </div>
 
-        <div style={{
-          display: "flex", justifyContent: "flex-end", gap: 8, padding: "12px 18px",
-          borderTop: "1px solid var(--border)", background: "var(--surface)",
-        }}>
-          <button autoFocus onClick={() => answer(current.id, "deny")} style={button(false)}>Deny</button>
-          <button onClick={() => answer(current.id, "allow")} style={button(true)}>Allow</button>
+        <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", background: "var(--surface)" }}>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+            <strong>Allow for this run</strong> runs this exact command again without asking, even if the agent
+            changes what it runs (for example package.json scripts).
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button autoFocus onClick={() => answer(current.id, "deny")} style={button(false)}>Deny</button>
+            <button onClick={() => answer(current.id, "allow-run")} style={button(false)}>Allow for this run</button>
+            <button onClick={() => answer(current.id, "allow")} style={button(true)}>Allow once</button>
+          </div>
         </div>
       </div>
     </div>

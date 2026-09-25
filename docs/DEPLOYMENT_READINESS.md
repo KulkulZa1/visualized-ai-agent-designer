@@ -21,8 +21,8 @@ rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 538 tests / 49 files (2026-09-25) |
-| Rust tests | `npm run test:rust` | Passed, 74 Rust tests (2026-09-25) |
+| Frontend tests | `npx vitest run` | Passed, 593 tests / 57 files (2026-09-25) |
+| Rust tests | `npm run test:rust` | Passed, 86 Rust tests (2026-09-25) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |
@@ -67,14 +67,14 @@ Installer outputs:
 | Feature | Current state | Required action |
 |---|---|---|
 | Agent independence | Logical per-node state only, not process isolation | Add run-level persisted records and clearer UI labeling |
-| Streaming | Simulated chunks after full response | Implement provider streaming/SSE |
+| Streaming | Real for native tool-calling turns (`chat_turn` streams Anthropic SSE, OpenAI-compatible SSE and Ollama NDJSON); the text-protocol fallback and helper agents still show each reply after it arrives, typed out in chunks | Stream the text-protocol path too |
 | Context snapshots | Partial and not a complete request/response trace | Capture actual system/user messages, tool results, provider metadata |
 | Artifacts | Mock placeholders in inspector; service exists but run loop is not wired (MCP `list_artifacts` is empty for app runs) | Persist generated artifacts per run/source node |
 | API key storage | localStorage/env development path | Add OS keychain/Stronghold |
 | Gemini | Catalog/planned only | Implement or keep disabled |
 | MCP write tools | Not implemented by design | Add only after permission/audit system |
 | Unapplied settings | Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime | Implement each setting or remove it from the UI |
-| Agent shell tool | `bash`/`run_command` run after the user approves each command. Not sandboxed; Stop does not kill a command that is already running (it ends at the node's time limit); the macOS/Linux `sh` path is not tested | Sandbox or allowlist; kill on Stop; test on macOS/Linux |
+| Agent shell tool | `bash`/`run_command` run after the user approves the exact command, once or for the rest of the run. Not sandboxed. Stop kills a running command's process tree. The macOS/Linux `sh` path and its process-group kill are not tested | Sandbox or allowlist; test on macOS/Linux |
 | Agent-node hooks | Pre/post hooks on agent nodes run only manually from the Hooks tab; hooks get no per-call input | Design a hook protocol before running them in workflows |
 | VS Code extension | Experimental scaffold; most commands do not work (command-name mismatches with the webview). The host confines file access to the open workspace folder and sends the stored OpenAI key only to api.openai.com | Fix command wiring, then smoke-test in VS Code |
 
@@ -87,8 +87,8 @@ Installer outputs:
 | MCP secrets | Does not read or print raw keys; `get_recent_logs` returns audit-log entries with best-effort (not guaranteed) secret redaction |
 | MCP path safety | `validate_workflow` rejects `..` and paths outside the project; `list_artifacts`/`get_recent_logs` workspace paths must stay inside the project |
 | MCP test filter | Unsafe shell characters and filters starting with `-` rejected before spawning test command; `npx` runs with `--no-install` |
-| Agent shell execution | Per-command approval: the dialog shows the agent, the exact command and the folder; Deny has the focus and Esc denies. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token) and runs the line in the workspace folder (cmd.exe on Windows, sh elsewhere) without provider API keys or input, until the node's remaining time runs out. Sub-agents never get `bash`; Stop denies pending approvals. Approvals, denials and results go to `.harness/audit.log.jsonl`. Not sandboxed. `execute_inline_command` stays removed |
-| Agent file writes | `fs.write`/`fs.append` calls from model output do write files, confined to the open workspace by `resolve_safe_path()` (which resolves the deepest existing ancestor, so a symlink/junction cannot redirect writes outside) |
+| Agent shell execution | Per-command approval: the dialog shows the agent, the exact command and the folder; Deny has the focus and Esc denies. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token) and runs the line in the workspace folder (cmd.exe on Windows, sh elsewhere) without provider API keys or input, until the node's remaining time runs out. "Allow for this run" grants that exact command text until the run ends, with a warning that it runs again even if the agent changes what it runs. Stop kills a running command (`cancel_command`: `taskkill /T /F`, a process group on Unix). Sub-agents never get `bash`; Stop denies pending approvals. Approvals (once / for this run / under a grant), denials and results go to `.harness/audit.log.jsonl`. Not sandboxed. `execute_inline_command` stays removed |
+| Agent file writes | `fs.write`/`fs.append`/`edit_file` calls from model output do write files, confined to the open workspace by `resolve_safe_path()` (which resolves the deepest existing ancestor, so a symlink/junction cannot redirect writes outside). Each run's changes can be reverted from the Changes dialog; a file the run created is deleted with `delete_workspace_file` (workspace-confined, files only), and a file changed since the agent's last write is only overwritten after confirmation |
 | Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook; hooks with `requireConsent` are not run automatically (the node fails and the run stops); agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |
 | Tauri shell permissions | `shell:allow-execute` and `shell:allow-kill` removed from default capabilities |
@@ -119,7 +119,7 @@ capture.
 4. Durable run logs, snapshots, and artifact persistence.
 5. E2E browser/Tauri smoke tests for first-run, workflow creation, settings, run failure, logs, inspector, and bounded parallel fan-out.
 6. Durable scheduler trace events for queued/running/skipped/blocked nodes.
-7. Per-command consent system before re-enabling agent shell execution.
+7. Agent shell commands run unsandboxed once approved: decide on a sandbox or an allowlist.
 
 ## Next Verification Before Release
 

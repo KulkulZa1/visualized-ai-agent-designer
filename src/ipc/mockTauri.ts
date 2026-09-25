@@ -10,3 +10,8 @@ export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<
   if (handler) return Promise.resolve(handler(args) as T);
   return Promise.reject(new Error(`No mock handler for command: ${cmd}`));
 }
+
+/** Stand-in for Tauri's Channel: a test's command handler calls `onmessage`. */
+export class Channel<T> {
+  onmessage: (message: T) => void = () => {};
+}

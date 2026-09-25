@@ -23,8 +23,8 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 538 tests / 49 files |
-| `cargo test` | Passed, 74 tests |
+| `npx vitest run` | Passed, 593 tests / 57 files |
+| `cargo test` | Passed, 86 tests |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
@@ -49,7 +49,12 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 - Rule-based Workflow Wizard / Create from Goal, including blog automation and Harness Studio self-improvement templates.
 - Rule-based Guide Assistant. It makes no live AI calls.
 - Provider settings and adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
-- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback.
+- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for nodes with `fs.write`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback.
+- Coding core:
+  - Every file a run's agents write is in the run's change log (`changeLog.ts`). The Changes dialog shows a diff and reverts per file or all (`revertChanges.ts`, Rust `delete_workspace_file`).
+  - Native tool-calling turns stream live (`chat_stream.rs`).
+  - Past 75% of a node's Token budget, older steps become a progress note (`compaction.ts`).
+  - The workspace's `AGENTS.md` is given to agents with workspace tools (`projectInstructions.ts`).
 - Sub-agents: `subagent_dispatch` (`src/services/execution/subAgents.ts`) starts helpers with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time. Helpers are recorded on the node's run (`AgentRun.subAgents`) and listed in `AgentActivityPanel`.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
 - Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
@@ -72,13 +77,13 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 
 - Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (`src/services/execution/routing.ts`). Gateway routing prunes skipped branches.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
-- Streaming is simulated in the UI after a full provider response is received.
+- Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).
 - Context snapshots are partial and not a complete durable provider request trace.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
-- Agent shell commands (`bash`/`run_command`) run only after the user approves each exact command (`commandConsentStore` + `CommandConsentDialog`, Rust `execute_command`). Keep it that way: no auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed, and Stop does not kill a command that is already running (it ends at the node's time limit).
+- Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command: once, or for the rest of the run ("Allow for this run" grants that exact text). This goes through `commandConsentStore` + `CommandConsentDialog` and the Rust `execute_command`. Keep it that way: no other auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed. Stop kills a running command's process tree (`cancel_command`).
 - During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. Hooks marked `requireConsent` are not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
 - The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).
@@ -90,7 +95,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 3. Do not commit secrets or print raw API key values.
 4. Keep CLI read-only and MCP limited to read/test tools unless a permission and audit system exists.
 5. Do not add hidden cloud calls or background provider checks.
-6. Do not add command execution without explicit per-command user approval (agent `bash` goes through `commandConsentStore`; never auto-approve).
+6. Do not add command execution without the user's approval of that exact command, once or as a run grant the user chose (agent `bash` goes through `commandConsentStore`; never auto-approve anything else).
 7. Use `resolve_safe_path()` for Rust file paths.
 8. Hook execution must stay explicit and consent-gated.
 9. Prefer small, reviewable fixes over rewrites.
@@ -115,7 +120,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 
 ## Next Best Work
 
-1. Replace simulated streaming with real provider streaming (SSE from Tauri).
+1. Git-native runs: a worktree per run, a diff that includes command-made changes, commit/PR.
 2. Persist real per-run artifacts and context traces into `.harness/artifacts/`.
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
 4. Add installer smoke tests on a clean Windows user profile.

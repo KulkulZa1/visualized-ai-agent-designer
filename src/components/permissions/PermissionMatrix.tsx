@@ -13,9 +13,9 @@ const ALL_TOOLS = Object.values(ToolPermission);
 const RISK_COLOR = { low: "var(--green)", medium: "var(--accent)", high: "var(--red)" };
 
 const TOOL_DESCRIPTIONS: Partial<Record<ToolPermission, string>> = {
-  [ToolPermission.WriteFile]: "Overwrite files in the workspace. Agents with this tool can modify any file.",
+  [ToolPermission.WriteFile]: "Write and edit files in the workspace (fs.write and edit_file). Agents with this tool can modify any workspace file.",
   [ToolPermission.FsAppend]: "Append to files in the workspace.",
-  [ToolPermission.Bash]: "Run shell commands in the workspace. You approve each command before it runs.",
+  [ToolPermission.Bash]: "Run shell commands in the workspace. You approve each command (once, or for the rest of the run) before it runs.",
   [ToolPermission.SubagentDispatch]: "Spawn subagents — high blast radius. Requires audit trail.",
   [ToolPermission.Git]: "Run git commands in the workspace.",
   [ToolPermission.Test]: "Run test suites and report results.",
@@ -91,7 +91,7 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
               <span>
                 <strong>{bashNodes.length} node{bashNodes.length > 1 ? "s list" : " lists"} the bash tool:</strong>{" "}
                 {bashNodes.map((n) => n.data.name).join(", ")}.
-                Each command they want to run waits for your approval and then runs with your permissions (no sandbox).
+                Each new command they want to run waits for your approval (once, or for the rest of the run) and then runs with your permissions (no sandbox).
               </span>
             </div>
           );

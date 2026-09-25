@@ -159,16 +159,16 @@ Grant only the tools each agent actually needs.
 | `git` | medium | Read git history, diff |
 | `web_fetch` | medium | Fetch a URL |
 | `todo_write` | medium | Write to a todo list |
-| `fs.write` | medium | Write/overwrite a file |
+| `fs.write` | medium | Write/overwrite a file; also gives the agent `edit_file` (replace an exact snippet) |
 | `test` | medium | Run a test suite |
 | `puppeteer` | medium | Browser automation |
-| `bash` | high | Run a shell command line in the workspace (the user approves each one) |
+| `bash` | high | Run a shell command line in the workspace (the user approves each one, or allows it for the run) |
 | `subagent_dispatch` | high | Spawn sub-agents |
 
-At runtime only `read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, and
-`fs.append` execute, all confined to the open workspace, plus `bash`: each
-command runs in the workspace folder (cmd.exe on Windows, sh elsewhere) only
-after the user approves it, and is not sandboxed. The other values currently
+At runtime only `read_file`/`fs.read`, `list_files`, `grep`, `fs.write` (with
+`edit_file`), and `fs.append` execute, all confined to the open workspace, plus
+`bash`: each command runs in the workspace folder (cmd.exe on Windows, sh
+elsewhere) only after the user approves it, and is not sandboxed. The other values currently
 have no executor (a call returns an error).
 
 ### tokens

@@ -393,14 +393,14 @@ pub(crate) struct HttpFailure {
     pub message: String,
 }
 
-/// POST a Chat Completions request, retrying rate limits and temporary server
-/// errors (after 1 s, 2 s, 4 s). Returns the parsed JSON body.
-pub(crate) async fn post_openai(
+/// Send a Chat Completions request, retrying rate limits and temporary server
+/// errors (after 1 s, 2 s, 4 s). Returns the successful response with its body unread.
+pub(crate) async fn send_openai(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     body: &serde_json::Value,
-) -> Result<serde_json::Value, HttpFailure> {
+) -> Result<reqwest::Response, HttpFailure> {
     let delays = [1u64, 2, 4];
     let mut last_err = String::new();
 
@@ -424,10 +424,7 @@ pub(crate) async fn post_openai(
         let fail = |message: String| HttpFailure { status: Some(status), message };
 
         if response.status().is_success() {
-            return response
-                .json()
-                .await
-                .map_err(|e| fail(format!("Failed to parse OpenAI response: {}", e.without_url())));
+            return Ok(response);
         }
 
         let text = response.text().await.unwrap_or_default();
@@ -450,6 +447,21 @@ pub(crate) async fn post_openai(
     }
 
     Err(HttpFailure { status: None, message: last_err })
+}
+
+/// POST a Chat Completions request (send_openai) and parse the JSON body.
+pub(crate) async fn post_openai(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, HttpFailure> {
+    let response = send_openai(client, endpoint, api_key, body).await?;
+    let status = response.status().as_u16();
+    response.json().await.map_err(|e| HttpFailure {
+        status: Some(status),
+        message: format!("Failed to parse OpenAI response: {}", e.without_url()),
+    })
 }
 
 // ── Anthropic / Claude ────────────────────────────────────────────────────────
@@ -513,13 +525,13 @@ async fn anthropic_call_inner(
         .ok_or_else(|| "No text content in Anthropic response".to_string())
 }
 
-/// POST a Messages API request, retrying rate limits and temporary server
-/// errors (after 1 s, 2 s, 4 s). Returns the parsed JSON body.
-pub(crate) async fn post_anthropic(
+/// Send a Messages API request, retrying rate limits and temporary server errors
+/// (after 1 s, 2 s, 4 s). Returns the successful response with its body unread.
+pub(crate) async fn send_anthropic(
     client: &reqwest::Client,
     api_key: &str,
     body: &serde_json::Value,
-) -> Result<serde_json::Value, HttpFailure> {
+) -> Result<reqwest::Response, HttpFailure> {
     let delays = [1u64, 2, 4];
     let mut last_err = String::new();
 
@@ -545,10 +557,7 @@ pub(crate) async fn post_anthropic(
         let fail = |message: String| HttpFailure { status: Some(status), message };
 
         if response.status().is_success() {
-            return response
-                .json()
-                .await
-                .map_err(|e| fail(format!("Failed to parse Anthropic response: {e}")));
+            return Ok(response);
         }
 
         let text = response.text().await.unwrap_or_default();
@@ -574,6 +583,20 @@ pub(crate) async fn post_anthropic(
     }
 
     Err(HttpFailure { status: None, message: last_err })
+}
+
+/// POST a Messages API request (send_anthropic) and parse the JSON body.
+pub(crate) async fn post_anthropic(
+    client: &reqwest::Client,
+    api_key: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, HttpFailure> {
+    let response = send_anthropic(client, api_key, body).await?;
+    let status = response.status().as_u16();
+    response.json().await.map_err(|e| HttpFailure {
+        status: Some(status),
+        message: format!("Failed to parse Anthropic response: {e}"),
+    })
 }
 
 #[tauri::command]
@@ -666,7 +689,7 @@ pub async fn call_ollama_api(
     }
 }
 
-/// POST to Ollama's `/api/chat` (no retries). Returns the parsed JSON body.
+/// POST an /api/chat request (send_ollama) and parse the JSON body.
 pub(crate) async fn post_ollama(
     client: &reqwest::Client,
     base_url: &str,
@@ -674,6 +697,23 @@ pub(crate) async fn post_ollama(
     body: &serde_json::Value,
     model: &str,
 ) -> Result<serde_json::Value, HttpFailure> {
+    let response = send_ollama(client, base_url, api_key, body, model).await?;
+    let status = response.status().as_u16();
+    response.json().await.map_err(|e| HttpFailure {
+        status: Some(status),
+        message: format!("Failed to parse Ollama response: {e}"),
+    })
+}
+
+/// Send Ollama's `/api/chat` request (no retries). Returns the successful
+/// response with its body unread.
+pub(crate) async fn send_ollama(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    body: &serde_json::Value,
+    model: &str,
+) -> Result<reqwest::Response, HttpFailure> {
     let url = ollama_api_endpoint(base_url, "chat");
     let mut request = client
         .post(&url)
@@ -709,10 +749,7 @@ pub(crate) async fn post_ollama(
         return Err(fail(format!("Ollama {status}: {safe_text}")));
     }
 
-    response
-        .json()
-        .await
-        .map_err(|e| fail(format!("Failed to parse Ollama response: {e}")))
+    Ok(response)
 }
 
 // ── Provider health check ─────────────────────────────────────────────────────

@@ -11,6 +11,7 @@
 
 import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
 import { runnableTools, toolForNativeName } from "@/services/execution/toolExecutor";
+import { usesWorkspace } from "@/services/execution/projectInstructions";
 import type { AgentLoopResult } from "@/services/execution/agentLoop";
 import type { SubAgentRecord } from "@/types/execution";
 
@@ -36,6 +37,8 @@ export interface SubAgentRunnerOptions {
   onUpdate?: (record: SubAgentRecord) => void;
   /** True once the run is stopped: a helper ending then is "stopped", not failed. */
   isCancelled?: () => boolean;
+  /** The workspace's AGENTS.md, for helpers that work in the workspace. */
+  projectInstructions?: string;
 }
 
 const HELPER_INSTRUCTIONS =
@@ -71,6 +74,7 @@ export function createSubAgentRunner(opts: SubAgentRunnerOptions) {
       agentName: name, role: "worker", workflowName: opts.workflowName,
       description: `Helper started by ${opts.parentName}.`,
       tools, memoryRead: [], memoryWrite: [], promptContent: HELPER_INSTRUCTIONS,
+      projectInstructions: usesWorkspace(tools) ? opts.projectInstructions : undefined,
     });
 
     const record: SubAgentRecord = {

@@ -39,7 +39,7 @@ describe("runAgentLoop — native tool calls", () => {
     const result = await runAgentLoop(opts);
 
     expect(result).toMatchObject({ text: "done", toolCalls: 2, mode: "native", nativeRefused: false });
-    expect(callTurn.mock.calls[0][2].map((t: { name: string }) => t.name)).toEqual(["read_file", "fs_write"]);
+    expect(callTurn.mock.calls[0][2].map((t: { name: string }) => t.name)).toEqual(["read_file", "fs_write", "edit_file"]);
     expect(opts.runTool).toHaveBeenNthCalledWith(1, { name: "read_file", args: { path: "x" } });
     expect(opts.runTool).toHaveBeenNthCalledWith(2, { name: "fs.write", args: { path: "y", content: "z" } });
     expect(callTurn.mock.calls[1][1]).toEqual([
@@ -223,5 +223,63 @@ describe("runAgentLoop — concurrent tools", () => {
     await runAgentLoop(options({ callTurn, runTool, concurrentTools: ["subagent_dispatch"], maxConcurrent: 3 }));
 
     expect(state.peak).toBe(1);
+  });
+});
+
+describe("runAgentLoop — compaction", () => {
+  const big = "x".repeat(4000);
+
+  it("summarizes older steps once the conversation passes the budget, then carries on", async () => {
+    let turn = 0;
+    const callTurn = vi.fn(async (_system: string, _messages: unknown[]) => (++turn < 4
+      ? reply({ toolCalls: [{ id: `c${turn}`, name: "read_file", args: { path: `${turn}.md` } }] })
+      : reply({ text: "done" })));
+    const summarize = vi.fn(async () => "note");
+    const onCompacted = vi.fn();
+
+    const result = await runAgentLoop(options({
+      callTurn, runTool: vi.fn(async () => big),
+      compaction: { budget: 3000, summarize, onCompacted },
+    }));
+
+    expect(result.text).toBe("done");
+    expect(summarize).toHaveBeenCalled();
+    expect(onCompacted).toHaveBeenCalledWith(expect.any(Number), expect.any(Number), expect.any(Number));
+    const lastMessages = callTurn.mock.calls.at(-1)![1] as Array<{ role: string; text?: string }>;
+    expect(lastMessages).toHaveLength(3);
+    expect(lastMessages[0].text).toContain("PROGRESS SO FAR");
+  });
+
+  it("carries on uncompacted when the summary call fails", async () => {
+    let turn = 0;
+    const callTurn = vi.fn(async () => (++turn < 3
+      ? reply({ toolCalls: [{ id: `c${turn}`, name: "read_file", args: { path: "a.md" } }] })
+      : reply({ text: "done" })));
+    const onFailed = vi.fn();
+
+    const result = await runAgentLoop(options({
+      callTurn, runTool: vi.fn(async () => big),
+      compaction: { budget: 1000, summarize: vi.fn(async () => { throw new Error("busy"); }), onFailed },
+    }));
+
+    expect(result.text).toBe("done");
+    expect(onFailed).toHaveBeenCalled();
+  });
+
+  it("compacts the text protocol too", async () => {
+    let step = 0;
+    const callText = vi.fn(async (_system: string, _message: string) => (++step < 4
+      ? `<tool_call>{"name":"read_file","args":{"path":"${step}.md"}}</tool_call>`
+      : "done"));
+    const summarize = vi.fn(async () => "note");
+
+    const result = await runAgentLoop(options({
+      preferText: true, callText, runTool: vi.fn(async () => big),
+      compaction: { budget: 3000, summarize },
+    }));
+
+    expect(result.text).toBe("done");
+    expect(summarize).toHaveBeenCalled();
+    expect(callText.mock.calls.at(-1)![1]).toContain("PROGRESS SO FAR");
   });
 });

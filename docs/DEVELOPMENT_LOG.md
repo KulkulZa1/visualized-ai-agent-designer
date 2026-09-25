@@ -1,5 +1,47 @@
 ﻿# Development Log
 
+## 2026-09-25 - Coding Core (toward Codex-level coding)
+
+- **Goal:** the six-item checklist the user chose. Spec: `docs/superpowers/specs/2026-09-25-coding-core-design.md`. There was one plan per part in `docs/superpowers/plans/`, built test-first with one commit per part.
+- **Edits and undo:**
+  - `edit_file` comes with `fs.write` and replaces an exact snippet that must occur once, unless `replace_all` is set. It tolerates CRLF.
+  - A per-run change log (`WorkflowRun.changes`) records every file write, by nodes and their helpers.
+  - The Changes dialog shows a Monaco diff and reverts per file or all. Created files are deleted with the new `delete_workspace_file`, and a file changed since the agent's last write is only overwritten after confirmation.
+- **Commands:**
+  - "Allow for this run" grants the exact command text until the run ends; a waiting duplicate runs too.
+  - `cancel_command` kills a running command's process tree on Stop.
+  - The spec's kill at run end was dropped: `runParallel` only settles after in-flight nodes finish, so a run cannot end while its command runs.
+- **Streaming:**
+  - With a channel, `chat_turn` streams: OpenAI-compatible SSE, Anthropic SSE, Ollama NDJSON. `chat_stream.rs` rebuilds the non-streaming JSON, so the existing parsers read it.
+  - Lines are buffered whole, so text split mid-character decodes correctly.
+  - A server that ignores `stream: true` and sends one JSON body is still read. That gap was found while testing, before the live run, with a test first.
+  - The node's own native turns show live text (throttled to 50 ms). A server that can't stream falls back for the rest of the run.
+- **Long runs:**
+  - Compaction starts past 75% of the node's Token budget, which is now applied. One extra call writes a progress note; the newest tool exchange stays verbatim.
+  - `AGENTS.md` (max 32 KB) goes to agents and helpers that have a workspace tool.
+- **Live checks** against the free keyless endpoint `https://text.pollinations.ai/openai` (gpt-oss-20b, synthetic data):
+  - *Streaming:* a temporary `#[ignore]` test called the real `run_turn`. It received 13 separate text pieces (`"1"`, `"\n"`, `"2"`, …) and rebuilt the full reply correctly.
+  - *Coding loop:* headless, through the real run loop, `run_turn` and `execute_command` over a temporary localhost bridge, in a synthetic repo with an off-by-one `sum()` and a `node:test` file plus `AGENTS.md`. A stand-in user allowed `node --test` for the run. The run was `done` in 125 s:
+    1. `AGENTS.md` was in the agent's system message (audited).
+    2. `bash node --test` raised one prompt, answered "allow for this run". It exited 1 (0 of 2 passing).
+    3. The model read `math.js`.
+    4. It called `edit_file` with exact `old_string`/`new_string` (`i = 1` → `i = 0`).
+    5. `node --test` ran again with no prompt, audited as "allowed for this run". It exited 0 (2 of 2 passing).
+    6. The model reported the cause correctly.
+    7. The change log held `math.js` (before/after, agent Coder), and revert restored the original byte for byte.
+  - The bridge did not carry streaming back to the UI, so live text in the UI is covered by unit tests only.
+- **Not verified:** a click-through in the desktop window; the macOS/Linux `sh` path and its process-group kill.
+- **Known gaps:**
+  - Helpers don't compact.
+  - `loadProjectInstructions` treats every read error as "no AGENTS.md".
+  - Esc in the approval dialog also closes an open Changes dialog. Deny is the safe default.
+  - After compaction the token estimate counts only the compacted history.
+- **Verification:**
+  - `npx tsc --noEmit` passed.
+  - `npx vitest run`: 593 tests / 57 files.
+  - `cargo test --manifest-path src-tauri/Cargo.toml`: 86 tests.
+  - `cargo check` has no warnings, and `npm run build` passed.
+
 ## 2026-09-25 - Agent Shell Commands With Per-Command Approval
 
 - `bash`/`run_command` works again. Each command needs the user's approval: `commandConsentStore` holds the queue, `CommandConsentDialog` asks, and `src/services/execution/commandTool.ts` runs the tool.

@@ -55,11 +55,25 @@ Inside a node, `src/services/execution/agentLoop.ts` runs the model ⇄ tool loo
   provider, model, deadline and Stop; each report returns as the tool result.
   One level deep, at most 5 per node run and 3 at a time. Each helper is recorded
   on the node's run (`AgentRun.subAgents`) and listed in the activity panel.
+- **Streaming**: with a channel, Rust `chat_turn` uses the provider's streaming
+  API and sends text as it arrives; `chat_stream.rs` rebuilds the non-streaming
+  JSON from the events, so the usual parsers read it. A node's own native turns
+  stream into its output; helpers and the text protocol don't. A server that
+  cannot stream is asked again without streaming for the rest of the run.
+- **Compaction** (`compaction.ts`): before a model call, once the conversation
+  passes 75% of the node's Token budget, older steps become a progress note the
+  model writes; the newest tool exchange stays verbatim.
+- **Project instructions** (`projectInstructions.ts`): the workspace's
+  `AGENTS.md` (max 32 KB) is added to the system message of agents and helpers
+  with a workspace tool.
+- **Change log** (`changeLog.ts`, `revertChanges.ts`): every `fs.write`,
+  `fs.append` and `edit_file` of a run is recorded (content before the run and
+  latest); the Changes dialog shows a diff and reverts per file or all.
 
 Important boundaries:
 
 - This is JavaScript async concurrency inside the renderer, not OS process isolation.
-- Provider streaming is still simulated after a full provider response returns.
+- Text-protocol replies (and helpers') are still shown after they arrive, typed out in chunks.
 - The scheduler now rejects pure forward cycles instead of silently finishing.
 
 ## Provider Model
@@ -101,14 +115,15 @@ Partial/mock:
   30 s for manual runs from the Hooks tab). Hook processes do not inherit provider API keys.
   During workflow runs only Hook-role nodes run their pre-hook.
 - Agent shell commands (`bash`/`run_command`, `src/services/execution/commandTool.ts`)
-  run only after the user approves each exact command (`commandConsentStore`,
-  `CommandConsentDialog`). Time spent waiting for the answer does not count
-  against the node's time. The Rust `execute_command` runs the line in the
+  run only after the user approves each exact command, once or for the rest of
+  the run (`commandConsentStore`, `CommandConsentDialog`). Time spent waiting
+  for the answer does not count against the node's time. Stop kills a running
+  command's process tree (`cancel_command`). The Rust `execute_command` runs the line in the
   workspace folder (Windows: `cmd.exe /d /s /c` in a cmd started after
   `chcp 65001`, so output is UTF-8; elsewhere `sh -c`), without provider keys
   or input, until the node's remaining time runs out. It is not sandboxed.
   `execute_inline_command` stays removed.
-- Agent file tools (read, list, grep, `fs.write`, `fs.append`) are confined to
+- Agent file tools (read, list, grep, `fs.write`, `fs.append`, `edit_file`) are confined to
   the open workspace, and an agent can only run the tools offered to it. A
   sub-agent gets a subset of its parent's tools (never `bash`) and cannot start
   sub-agents.

@@ -69,7 +69,7 @@ If fan-out still appears serial:
 - check whether the branches actually share upstream dependencies;
 - check whether a gateway route skipped a branch;
 - check whether provider calls are slow and only one branch is ready at a time;
-- remember that provider streaming is still simulated after each full response.
+- remember that only native tool-calling turns stream live; text-protocol replies appear after each full response.
 
 ### Hook node fails with consent message
 

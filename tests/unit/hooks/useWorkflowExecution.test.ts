@@ -68,6 +68,8 @@ beforeEach(() => {
   mockInvokeHandler("chat_turn", () => ({
     text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false,
   }));
+  // No workspace files (AGENTS.md included) unless a test registers its own reader.
+  mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
 });
 
 describe("useWorkflowExecution", () => {
@@ -410,6 +412,123 @@ describe("useWorkflowExecution", () => {
     });
   });
 
+  it("gives agents that work in the workspace the project's AGENTS.md", async () => {
+    const coder = makeNode("A");
+    coder.data.tools = [ToolPermission.ReadFile];
+    const writer = makeNode("B");
+    useWorkflowStore.setState({ nodes: [coder, writer], edges: [] });
+    mockInvokeHandler("read_workspace_file", (args) => {
+      if ((args as { relativePath: string }).relativePath === "AGENTS.md") return "Use pnpm, never npm.";
+      throw new Error("not found (os error 2)");
+    });
+    const systems: Record<string, string> = {};
+    mockInvokeHandler("call_ollama_api", (args) => {
+      const a = args as { system: string };
+      systems[/^You are (\w+),/.exec(a.system)![1]] = a.system;
+      return "done";
+    });
+
+    await run();
+
+    expect(systems.A).toContain("PROJECT INSTRUCTIONS (AGENTS.md):\nUse pnpm, never npm.");
+    expect(systems.B).not.toContain("PROJECT INSTRUCTIONS");
+    expect(useAuditStore.getState().entries.some((e) => /AGENTS\.md/.test(e.details ?? ""))).toBe(true);
+  });
+
+  it("compacts a long conversation within the node's token budget and audits it", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 5;
+    node.data.tokens = { used: 0, budget: 3000 };
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("read_workspace_file", () => "x".repeat(4000));
+    let turns = 0;
+    mockInvokeHandler("chat_turn", () => (++turns < 4
+      ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+          toolCalls: [{ id: `c${turns}`, name: "read_file", args: { path: `${turns}.md` } }] }
+      : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true }));
+    mockInvokeHandler("call_ollama_api", () => "progress note");
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(useAuditStore.getState().entries.some((e) => /compacted \d+ earlier step/.test(e.details ?? ""))).toBe(true);
+  });
+
+  it("shows a native turn's text as it streams in, then the final answer", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const seen: string[] = [];
+    mockInvokeHandler("chat_turn", async (args) => {
+      const { onDelta } = args as { onDelta: { onmessage: (d: { text: string }) => void } | null };
+      onDelta?.onmessage({ text: "Hel" });
+      onDelta?.onmessage({ text: "lo" });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      seen.push(useExecutionStore.getState().currentRun?.agents.A.output ?? "");
+      return { text: "Hello", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(seen).toEqual(["Hello"]);
+    expect(finished?.agents.A.output).toBe("Hello");
+  });
+
+  it("asks again without streaming when the server cannot stream, and stops streaming to it", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.ReadFile];
+    node.data.maxSteps = 3;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    mockInvokeHandler("read_workspace_file", () => "A");
+    const streamed: boolean[] = [];
+    let calls = 0;
+    mockInvokeHandler("chat_turn", async (args) => {
+      calls++;
+      const streaming = Boolean((args as { onDelta: unknown }).onDelta);
+      streamed.push(streaming);
+      if (streaming) throw new Error("Streaming is not supported by this server");
+      return calls < 3
+        ? { text: "", finishReason: "tool_calls", nativeToolsSupported: true,
+            toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" } }] }
+        : { text: "done", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    });
+
+    const finished = await run();
+
+    expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
+    expect(streamed).toEqual([true, false, false]);
+  });
+
+  it("records the files an agent edits in the run's change log", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.WriteFile];
+    node.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const files: Record<string, string> = { "src/a.ts": "const x = 1;\n" };
+    mockInvokeHandler("read_workspace_file", (args) => {
+      const path = (args as { relativePath: string }).relativePath;
+      if (path in files) return files[path];
+      throw new Error("IO error: not found (os error 2)");
+    });
+    mockInvokeHandler("write_workspace_file", (args) => {
+      const a = args as { relativePath: string; content: string };
+      files[a.relativePath] = a.content;
+    });
+    let calls = 0;
+    mockInvokeHandler("call_ollama_api", () => (++calls === 1
+      ? '<tool_call>{"name":"edit_file","args":{"path":"src/a.ts","old_string":"x = 1","new_string":"x = 2"}}</tool_call>'
+      : "done"));
+
+    const finished = await run();
+
+    expect(files["src/a.ts"]).toBe("const x = 2;\n");
+    expect(finished?.changes).toEqual([
+      { path: "src/a.ts", before: "const x = 1;\n", after: "const x = 2;\n", agents: ["A"], edits: 1 },
+    ]);
+  });
+
   describe("shell commands", () => {
     /** Node A runs `npm test` with bash, then answers from the result. */
     function commandNode(timeoutSeconds = 300) {
@@ -437,7 +556,7 @@ describe("useWorkflowExecution", () => {
       return useCommandConsentStore.getState().queue[0];
     }
 
-    beforeEach(() => useCommandConsentStore.setState({ queue: [] }));
+    beforeEach(() => useCommandConsentStore.setState({ queue: [], grants: {} }));
 
     it("runs an agent's command once the user approves it and gives the agent the result", async () => {
       const { messages, executed } = commandNode();
@@ -473,6 +592,26 @@ describe("useWorkflowExecution", () => {
 
       expect(executed).not.toHaveBeenCalled();
       expect(useCommandConsentStore.getState().queue).toEqual([]);
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
+    });
+
+    it("kills a command that is running when Stop is pressed", async () => {
+      commandNode();
+      mockInvokeHandler("execute_command", () => new Promise(() => {}));
+      const cancelled = vi.fn(() => true);
+      mockInvokeHandler("cancel_command", cancelled);
+      const { result } = renderHook(() => useWorkflowExecution());
+
+      await act(async () => {
+        const running = result.current.executeWorkflow(undefined, vi.fn());
+        const request = await waitForApprovalPrompt();
+        useCommandConsentStore.getState().answer(request.id, "allow");
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        useExecutionStore.getState().cancelRun();
+        await running;
+      });
+
+      expect(cancelled).toHaveBeenCalledWith({ commandId: expect.stringMatching(/-cmd-\d+$/) });
       expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
     });
 

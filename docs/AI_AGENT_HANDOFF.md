@@ -12,8 +12,8 @@ mocked or incomplete behavior.
 Verified in this pass:
 
 - TypeScript: `npx tsc --noEmit` passed.
-- Unit tests: `npx vitest run` passed, 538 tests in 49 files.
-- Rust tests: `cargo test` passed, 74 tests.
+- Unit tests: `npx vitest run` passed, 593 tests in 57 files.
+- Rust tests: `cargo test` passed, 86 tests.
 - Web build: `npm run build` passed with a known large chunk warning.
 - Tauri dev launch (earlier pass, not re-run): `npm run tauri -- dev` launched the desktop binary and WebView2.
 - Tauri packaging (earlier pass, not re-run): `npm run tauri -- build` produced MSI and NSIS installers.
@@ -32,7 +32,7 @@ Verified in this pass:
 - Rule-based guide assistant shell. It does not make live AI calls.
 - Read-only CLI v0.
 - Read/test MCP v0 with 8 tools: project status, workflow listing, workflow validation, test runners, provider metadata, artifact file metadata, and recent audit-log entries (best-effort secret redaction).
-- Agent file tools (read, list, grep, `fs.write`, `fs.append`) confined to the open workspace.
+- Agent file tools (read, list, grep, `fs.write`, `fs.append`, `edit_file`) confined to the open workspace; each run's file changes can be reviewed as a diff and reverted.
 - MCP path-safety checks and safe test-filter validation.
 - Hook execution consent guard in Rust and workflow error handling for hook failures.
 
@@ -40,12 +40,12 @@ Verified in this pass:
 
 - Parallel scheduling is renderer-level JavaScript async concurrency, not OS process isolation.
 - Parallel scheduler traces are not yet persisted as durable timeline events.
-- Streaming output is simulated in the UI; provider streaming is not wired end-to-end.
+- Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives.
 - Artifact persistence is partial/mock-oriented and not a durable run artifact system.
 - Context snapshots are useful for inspection but are not a complete durable trace system.
 - OS keychain or Stronghold storage for provider keys is not implemented.
 - MCP write tools are intentionally absent until permissioning and audit are stronger.
-- Agent shell commands (`bash`/`run_command`) run only after the user approves each one; approved commands are not sandboxed, and Stop does not kill one that is already running.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command, once or for the rest of the run. Approved commands are not sandboxed. Stop kills a running command's process tree.
 - Pre/post hooks on agent nodes do not run during workflow runs (manual Hooks-tab runs only); only Hook-role nodes run their pre-hook.
 - Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
 - The VS Code extension is an experimental scaffold; most commands do not work yet.
@@ -65,7 +65,7 @@ routes are skipped. Do not describe this as OS/process isolation.
 
 - Do not add secrets to source, docs, examples, logs, CLI output, or MCP output.
 - Do not add hidden cloud calls.
-- Do not add command execution without explicit per-command user approval (agent `bash` goes through `commandConsentStore`; never auto-approve).
+- Do not add command execution without the user's approval of that exact command, once or as a run grant the user chose (agent `bash` goes through `commandConsentStore`; never auto-approve anything else).
 - Do not add MCP write tools without an explicit permission and audit design.
 - Do not claim mock or partial features are production-ready.
 - Do not create `AGEND.md`; use `AGENT.md`.

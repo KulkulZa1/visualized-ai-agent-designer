@@ -179,7 +179,7 @@ function TabConcepts() {
         <Concept glyph="▣" color="#b88bd9" name="Memory" desc="Stores key/value pairs that other agents can read across the run." />
         <Concept glyph="✕" color="#d97757" name="Hook" desc="Runs its pre-execution hook script when the run reaches it. Hooks marked 'require consent' are not run automatically; the run stops there." />
         <Concept glyph="⊕" color="#5fbf7f" name="Aggregator" desc="Collects outputs from multiple upstream agents and combines them." />
-        <Concept glyph="⬡" color="#7c9eff" name="Tool Caller" desc="Calls workspace file tools (read, list, grep, write) as part of a chain. Shell commands (bash) run only after you approve each one." />
+        <Concept glyph="⬡" color="#7c9eff" name="Tool Caller" desc="Calls workspace file tools (read, list, grep, write) as part of a chain. Shell commands (bash) run only after you approve them." />
       </div>
 
       <div style={{ marginBottom: 14 }}>

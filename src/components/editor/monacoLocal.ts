@@ -12,7 +12,7 @@
  */
 import * as monaco from "monaco-editor";
 import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import Editor, { loader } from "@monaco-editor/react";
+import Editor, { DiffEditor, loader } from "@monaco-editor/react";
 
 self.MonacoEnvironment = {
   // Markdown/YAML only need the base editor worker (no language services).
@@ -22,3 +22,4 @@ self.MonacoEnvironment = {
 loader.config({ monaco });
 
 export default Editor;
+export { DiffEditor };

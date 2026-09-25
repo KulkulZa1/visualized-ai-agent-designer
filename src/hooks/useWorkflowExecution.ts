@@ -54,6 +54,8 @@ import {
 } from "@/services/execution/toolExecutor";
 import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
 import { runCommandTool } from "@/services/execution/commandTool";
+import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
+import { loadProjectInstructions, usesWorkspace } from "@/services/execution/projectInstructions";
 import {
   createSubAgentRunner,
   MAX_CONCURRENT_SUBAGENTS,
@@ -290,11 +292,22 @@ export function useWorkflowExecution() {
       contextFileContent = parts.join("\n\n");
     }
 
+    // ── Project instructions (AGENTS.md at the workspace root) ─────────────────
+    const projectInstructions = workspacePath
+      ? await loadProjectInstructions((path) => readWorkspaceFile(workspacePath, path))
+      : "";
+    if (projectInstructions) {
+      addEntry({ id: `agents-md-${Date.now()}`, timestamp: new Date().toISOString(), action: "file_read",
+        path: "AGENTS.md", success: true,
+        details: `Project instructions: AGENTS.md (${projectInstructions.length.toLocaleString()} chars)` });
+    }
+
     // ── Per-run runtime state ─────────────────────────────────────────────────
     const memory        = new MemoryService();
     const agentOutputs  = new Map<string, string>(); // nodeId → output text
     const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
     const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
+    const noStreaming   = new Set<string>();         // "provider:model" that could not stream
     // Feedback-edge target → the review it is being re-run for.
     const revisionRequests = new Map<string, { from: string; text: string; reviewed: string; round: number }>();
 
@@ -472,6 +485,7 @@ export function useWorkflowExecution() {
           agentName: data.name, role: data.role, workflowName: meta.name,
           description: data.description, tools: runnableTools(data.tools as string[]),
           memoryRead: data.memoryRead, memoryWrite: data.memoryWrite, promptContent,
+          projectInstructions: usesWorkspace(data.tools as string[]) ? projectInstructions : undefined,
         });
 
         const userMsgParts: string[] = [];
@@ -549,9 +563,42 @@ export function useWorkflowExecution() {
             details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
         };
 
+        // The node's own native turns stream into its output (throttled); helpers don't.
+        let liveText = "";
+        let streamed = false;
+        let liveTimer: ReturnType<typeof setTimeout> | undefined;
+        const showLiveText = (piece: string) => {
+          liveText += piece;
+          streamed = true;
+          if (!liveTimer) {
+            liveTimer = setTimeout(() => { liveTimer = undefined; updateAgent(nodeId, { output: liveText }); }, 50);
+          }
+        };
+        const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
+          liveText = "";
+          const params = { ...providerParams, systemMsg: system, messages, tools };
+          if (noStreaming.has(nativeKey)) return callChatTurn(params, invoke);
+          let received = false;
+          try {
+            return await callChatTurn(params, invoke, (piece) => { received = true; showLiveText(piece); });
+          } catch (e) {
+            // A server that cannot stream: ask again without streaming, and stop streaming to it this run.
+            if (received || !/stream/i.test(String(e))) throw e;
+            noStreaming.add(nativeKey);
+            return callChatTurn(params, invoke);
+          }
+        };
+
+        // Every file an agent writes goes into the run's change log (Changes dialog,
+        // revert). A helper can finish after its run ended: never write into a newer run.
+        const recordChangeBy = (agent: string) => (path: string, before: string | null, after: string) => {
+          if (useExecutionStore.getState().currentRun?.id !== runId) return;
+          useExecutionStore.getState().recordFileChange(path, before, after, agent);
+        };
+
         // bash: each command waits for the user's approval (CommandConsentDialog).
         const runCommand = (args: Record<string, unknown>) => runCommandTool(args, {
-          agentName: data.name, workspacePath, invoke,
+          runId, agentName: data.name, workspacePath, invoke,
           askUser: (command) => useCommandConsentStore.getState().request({
             runId, agentName: data.name, command, workspacePath: workspacePath ?? "",
           }),
@@ -571,13 +618,14 @@ export function useWorkflowExecution() {
           workflowName: meta.name,
           parentTools: data.tools as string[],
           isCancelled: isRunCancelled,
+          projectInstructions,
           runLoop: (child) => runAgentLoop({
             ...shared,
             system: child.system,
             userMessage: child.userMessage,
             tools: child.tools,
             timeoutMessage: `Sub-agent "${child.name}" ran past ${data.name}'s ${timeoutSeconds}s limit`,
-            runTool: (call) => executeTool(call, workspacePath, invoke, child.tools),
+            runTool: (call) => executeTool(call, workspacePath, invoke, child.tools, recordChangeBy(child.name)),
             onToolCall: logToolCall(`↳ ${child.name} — `),
           }),
           onEvent: (details, success) => {
@@ -602,13 +650,31 @@ export function useWorkflowExecution() {
           userMessage: baseUserMsg,
           tools: data.tools as string[],
           timeoutMessage: `${data.name} timed out after ${timeoutSeconds}s`,
+          callTurn: streamingCallTurn,
           runTool: (call) => call.name === SUBAGENT_TOOL ? subAgents.dispatch(call.args)
             : call.name === "bash" ? runCommand(call.args)
-            : executeTool(call, workspacePath, invoke, data.tools as string[]),
+            : executeTool(call, workspacePath, invoke, data.tools as string[], recordChangeBy(data.name)),
           onToolCall: logToolCall(""),
           concurrentTools: [SUBAGENT_TOOL],
           maxConcurrent: MAX_CONCURRENT_SUBAGENTS,
+          // Past 75% of the node's Token budget, older steps become a progress note.
+          compaction: (data.tokens?.budget ?? 0) > 0 ? {
+            budget: data.tokens.budget,
+            summarize: (text) => shared.callText(SUMMARY_INSTRUCTIONS, text),
+            onCompacted: (steps, before, after) => addEntry({
+              id: `${nodeId}-compact-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, success: true,
+              details: `↻ ${data.name}: compacted ${steps} earlier step${steps === 1 ? "" : "s"} ` +
+                `(~${before.toLocaleString()} → ~${after.toLocaleString()} tokens)`,
+            }),
+            onFailed: (e) => addEntry({
+              id: `${nodeId}-compact-fail-${Date.now()}`, timestamp: new Date().toISOString(),
+              action: "workflow_loaded", agentId: nodeId, success: false,
+              details: `↻ ${data.name}: could not compact the conversation: ${String(e)}`,
+            }),
+          } : undefined,
         });
+        clearTimeout(liveTimer);
         if (loop.nativeRefused) {
           noNativeTools.add(nativeKey);
           addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -633,14 +699,16 @@ export function useWorkflowExecution() {
           }
         }
 
-        // Simulated streaming display
-        const chunkSize = finalText.length > 2000 ? 120 : 60;
-        let accumulated = "";
-        for (let i = 0; i < finalText.length; i += chunkSize) {
-          if (isRunCancelled()) break;
-          await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
-          accumulated += finalText.slice(i, i + chunkSize);
-          updateAgent(nodeId, { output: accumulated });
+        // Simulated streaming display, unless the text already streamed in live
+        if (!(streamed && loop.mode === "native")) {
+          const chunkSize = finalText.length > 2000 ? 120 : 60;
+          let accumulated = "";
+          for (let i = 0; i < finalText.length; i += chunkSize) {
+            if (isRunCancelled()) break;
+            await new Promise<void>((r) => setTimeout(r, finalText.length > 2000 ? 15 : 25));
+            accumulated += finalText.slice(i, i + chunkSize);
+            updateAgent(nodeId, { output: accumulated });
+          }
         }
 
         const tokenEstimate = loop.tokenEstimate + subAgents.tokenEstimate();

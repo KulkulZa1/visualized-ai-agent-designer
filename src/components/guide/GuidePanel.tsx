@@ -158,16 +158,16 @@ const QA_LIBRARY: GuideQA[] = [
       { kind: "text", text: "independent branches can run concurrently up to the workflow's maxParallel limit." },
       { kind: "text", text: "Feedback edges do not create scheduling dependencies, and gateway routes skip branches that do not match the selected route." },
       { kind: "text", text: "A node with a feedback edge reviews: when it answers REVISE (or names the edge's label), the agents from the edge's target back to it re-run with its review, at most 2 rounds." },
-      { kind: "text", text: "Streaming is still simulated after each provider call returns; that is separate from branch scheduling." },
+      { kind: "text", text: "Agents that call tools natively stream their replies live; that is separate from branch scheduling." },
     ],
   },
   {
     q: "Is streaming real or simulated?",
     triggers: ["stream", "streaming", "live", "real time"],
     answer: [
-      { kind: "bold", text: "Currently simulated. " },
-      { kind: "text", text: "The provider call returns the full text upfront; the UI then displays it in chunks via setTimeout for visual effect." },
-      { kind: "text", text: "Real SSE/streaming from providers is on the roadmap for Phase 6." },
+      { kind: "bold", text: "Real for native tool calls. " },
+      { kind: "text", text: "An agent whose model calls tools natively shows its reply live as it arrives (Anthropic, OpenAI-compatible and Ollama)." },
+      { kind: "text", text: "The text-protocol fallback and helper agents still show each reply after it arrives, typed out in chunks for effect." },
     ],
   },
   {

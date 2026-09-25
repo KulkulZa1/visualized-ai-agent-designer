@@ -34,6 +34,18 @@ export interface AgentRun {
   revision?: number;
 }
 
+/** A file the run's agents changed with fs.write, fs.append or edit_file. */
+export interface FileChange {
+  /** Workspace-relative, "/" separators. */
+  path: string;
+  /** Content before the run first changed it; null if the run created the file. */
+  before: string | null;
+  after: string;
+  /** Names of the agents that changed it. */
+  agents: string[];
+  edits: number;
+}
+
 export interface WorkflowRun {
   id: string;
   workflowName: string;
@@ -41,4 +53,6 @@ export interface WorkflowRun {
   finishedAt?: number;
   status: "running" | "done" | "error" | "cancelled";
   agents: Record<string, AgentRun>;
+  /** Files changed by this run's agents (Changes dialog, revert). */
+  changes?: FileChange[];
 }
