@@ -1,5 +1,29 @@
 ﻿# Development Log
 
+## 2026-09-25 - Agent Shell Commands With Per-Command Approval
+
+- `bash`/`run_command` works again. Each command needs the user's approval: `commandConsentStore` holds the queue, `CommandConsentDialog` asks, and `src/services/execution/commandTool.ts` runs the tool.
+  - The dialog shows the agent, the exact command and the workspace folder. Deny has the focus, Esc denies, and a click outside does nothing.
+  - Time spent waiting for the answer does not count against the node's time: the loop's deadline became a getter, and `beforeDeadline` re-arms when it moves.
+  - Stop, or the end of the run, denies pending approvals. Sub-agents never get the tool.
+  - Commands with control or invisible characters (bidi overrides, zero-width spaces), or longer than 2000 characters, are refused before asking. The dialog shows the whole command above its buttons, so what the user approves is what runs.
+- Rust `execute_command` (`process_commands.rs`):
+  - It requires `consentGranted` and an existing workspace folder, and refuses a network share on Windows.
+  - It runs the line with no input, without provider keys, and stops at the node's remaining time (1 s–1 h).
+  - On Windows the line goes through `cmd.exe /d /s /c` in a cmd started after `chcp 65001`, with the line passed in a delayed-expansion variable.
+  - Probe results on this Korean-locale machine: `chcp` in the same cmd still printed cp949 (a cmd keeps the code page it started with). The nested cmd printed UTF-8, and quotes, `&`, `|`, `^`, `%` and `!` came through as typed.
+  - I chose cmd over Windows PowerShell 5.1 because 5.1 rejects `&&`.
+- Live check against the free keyless endpoint `https://text.pollinations.ai/openai` (gpt-oss-20b, synthetic data). It was a headless run through the real run loop, the Rust `chat_turn` and the Rust `execute_command`, over a temporary localhost bridge.
+  - Setup: a "Test Runner" node with `bash` and `read_file`, and a temp workspace holding one `node:test` file (2 passing tests, 1 failing). A stand-in user approved only `node --test`.
+  - Command: the model called `bash` natively with `node --test`, the prompt showed the agent, the command and the folder, and after approval the command exited 1 in 319 ms with 236 s allowed. The UTF-8 output was intact (`ℹ pass 2`, `✖ fail 1`).
+  - Result: the model read the test file and reported 2 passed and 1 failed, naming `adds numeric strings` (`'23' !== 5`). Run `done` in 70 s; the `command_executed` entry reached the audit file.
+- Not verified: a click-through in the desktop window, and the macOS/Linux `sh` path.
+- Verification:
+  - `npx tsc --noEmit` passed.
+  - `npx vitest run`: 538 tests / 49 files.
+  - `cargo test --manifest-path src-tauri/Cargo.toml`: 74 tests.
+  - `npm run build` passed.
+
 ## 2026-09-25 - Revision Loops
 
 - Feedback edges now loop (`src/services/execution/routing.ts`, the `runNode` wrapper in `useWorkflowExecution.ts`). A node with outgoing feedback edges is a reviewer. When its verdict is REVISE, or it names a feedback edge's label, the path from each fired edge's target back to the reviewer re-runs, and then the reviewer runs again. This happens at most `MAX_REVISION_ROUNDS` (2) times, after which the run continues with the latest version. The scheduler awaits the loop, so downstream nodes and gateway routing see the final round.

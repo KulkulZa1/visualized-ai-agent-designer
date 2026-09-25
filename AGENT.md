@@ -17,14 +17,14 @@ provider/model choices, CLI/MCP access, and safety boundaries.
 
 ## Current Verified Baseline
 
-Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
+Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 `npm run tauri -- build` rows come from an earlier pass and were not re-run).
 
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 513 tests / 46 files |
-| `cargo test` | Passed, 63 tests |
+| `npx vitest run` | Passed, 538 tests / 49 files |
+| `cargo test` | Passed, 74 tests |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
@@ -78,7 +78,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
-- Agent shell execution is disabled: `bash`/`run_command` calls are refused and not advertised to the model. Re-enabling needs a per-command consent system.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves each exact command (`commandConsentStore` + `CommandConsentDialog`, Rust `execute_command`). Keep it that way: no auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed, and Stop does not kill a command that is already running (it ends at the node's time limit).
 - During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. Hooks marked `requireConsent` are not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
 - The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).
@@ -90,7 +90,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 3. Do not commit secrets or print raw API key values.
 4. Keep CLI read-only and MCP limited to read/test tools unless a permission and audit system exists.
 5. Do not add hidden cloud calls or background provider checks.
-6. Do not add arbitrary command execution.
+6. Do not add command execution without explicit per-command user approval (agent `bash` goes through `commandConsentStore`; never auto-approve).
 7. Use `resolve_safe_path()` for Rust file paths.
 8. Hook execution must stay explicit and consent-gated.
 9. Prefer small, reviewable fixes over rewrites.
@@ -108,7 +108,7 @@ Last execution pass: 2026-09-24 (the `npm run tauri -- dev` and
 | `cli/harness.mjs` | Read-only CLI |
 | `mcp/server.mjs` | MCP stdio server |
 | `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
-| `src-tauri/src/commands/process_commands.rs` | Hook execution |
+| `src-tauri/src/commands/process_commands.rs` | Hook execution and approved agent commands (`execute_command`) |
 | `docs/DEPLOYMENT_READINESS.md` | Current readiness source of truth |
 | `docs/AIRGAPPED.md` | Offline / air-gapped deployment runbook |
 | `scripts/build-installer.ps1` | Installer build; `-Offline` embeds WebView2 |

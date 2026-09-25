@@ -1,6 +1,6 @@
 ﻿# Deployment Readiness
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 This is the source of truth for what is verified, partial, mocked, or blocked.
 
@@ -21,8 +21,8 @@ rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 513 tests / 46 files (2026-09-24) |
-| Rust tests | `npm run test:rust` | Passed, 63 Rust tests (2026-09-24) |
+| Frontend tests | `npx vitest run` | Passed, 538 tests / 49 files (2026-09-25) |
+| Rust tests | `npm run test:rust` | Passed, 74 Rust tests (2026-09-25) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |
@@ -74,7 +74,7 @@ Installer outputs:
 | Gemini | Catalog/planned only | Implement or keep disabled |
 | MCP write tools | Not implemented by design | Add only after permission/audit system |
 | Unapplied settings | Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime | Implement each setting or remove it from the UI |
-| Agent shell tool | `bash`/`run_command` disabled: refused and not advertised to the model | Per-command consent system before re-enabling |
+| Agent shell tool | `bash`/`run_command` run after the user approves each command. Not sandboxed; Stop does not kill a command that is already running (it ends at the node's time limit); the macOS/Linux `sh` path is not tested | Sandbox or allowlist; kill on Stop; test on macOS/Linux |
 | Agent-node hooks | Pre/post hooks on agent nodes run only manually from the Hooks tab; hooks get no per-call input | Design a hook protocol before running them in workflows |
 | VS Code extension | Experimental scaffold; most commands do not work (command-name mismatches with the webview). The host confines file access to the open workspace folder and sends the stored OpenAI key only to api.openai.com | Fix command wiring, then smoke-test in VS Code |
 
@@ -87,7 +87,7 @@ Installer outputs:
 | MCP secrets | Does not read or print raw keys; `get_recent_logs` returns audit-log entries with best-effort (not guaranteed) secret redaction |
 | MCP path safety | `validate_workflow` rejects `..` and paths outside the project; `list_artifacts`/`get_recent_logs` workspace paths must stay inside the project |
 | MCP test filter | Unsafe shell characters and filters starting with `-` rejected before spawning test command; `npx` runs with `--no-install` |
-| Agent shell execution | Disabled: `bash`/`run_command` calls are refused and not advertised to the model; `execute_inline_command` IPC removed |
+| Agent shell execution | Per-command approval: the dialog shows the agent, the exact command and the folder; Deny has the focus and Esc denies. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token) and runs the line in the workspace folder (cmd.exe on Windows, sh elsewhere) without provider API keys or input, until the node's remaining time runs out. Sub-agents never get `bash`; Stop denies pending approvals. Approvals, denials and results go to `.harness/audit.log.jsonl`. Not sandboxed. `execute_inline_command` stays removed |
 | Agent file writes | `fs.write`/`fs.append` calls from model output do write files, confined to the open workspace by `resolve_safe_path()` (which resolves the deepest existing ancestor, so a symlink/junction cannot redirect writes outside) |
 | Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook; hooks with `requireConsent` are not run automatically (the node fails and the run stops); agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |

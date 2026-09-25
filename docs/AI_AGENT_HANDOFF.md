@@ -7,13 +7,13 @@ running, and inspecting multi-agent workflow definitions. The current goal is to
 make the product strong enough to help develop and debug itself, without hiding
 mocked or incomplete behavior.
 
-## Current Verified Baseline (2026-09-24)
+## Current Verified Baseline (2026-09-25)
 
 Verified in this pass:
 
 - TypeScript: `npx tsc --noEmit` passed.
-- Unit tests: `npx vitest run` passed, 513 tests in 46 files.
-- Rust tests: `cargo test` passed, 63 tests.
+- Unit tests: `npx vitest run` passed, 538 tests in 49 files.
+- Rust tests: `cargo test` passed, 74 tests.
 - Web build: `npm run build` passed with a known large chunk warning.
 - Tauri dev launch (earlier pass, not re-run): `npm run tauri -- dev` launched the desktop binary and WebView2.
 - Tauri packaging (earlier pass, not re-run): `npm run tauri -- build` produced MSI and NSIS installers.
@@ -45,7 +45,7 @@ Verified in this pass:
 - Context snapshots are useful for inspection but are not a complete durable trace system.
 - OS keychain or Stronghold storage for provider keys is not implemented.
 - MCP write tools are intentionally absent until permissioning and audit are stronger.
-- Agent shell execution (`bash`/`run_command`) is disabled until a per-command consent system exists.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves each one; approved commands are not sandboxed, and Stop does not kill one that is already running.
 - Pre/post hooks on agent nodes do not run during workflow runs (manual Hooks-tab runs only); only Hook-role nodes run their pre-hook.
 - Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
 - The VS Code extension is an experimental scaffold; most commands do not work yet.
@@ -65,7 +65,7 @@ routes are skipped. Do not describe this as OS/process isolation.
 
 - Do not add secrets to source, docs, examples, logs, CLI output, or MCP output.
 - Do not add hidden cloud calls.
-- Do not add arbitrary command execution.
+- Do not add command execution without explicit per-command user approval (agent `bash` goes through `commandConsentStore`; never auto-approve).
 - Do not add MCP write tools without an explicit permission and audit design.
 - Do not claim mock or partial features are production-ready.
 - Do not create `AGEND.md`; use `AGENT.md`.

@@ -162,13 +162,14 @@ Grant only the tools each agent actually needs.
 | `fs.write` | medium | Write/overwrite a file |
 | `test` | medium | Run a test suite |
 | `puppeteer` | medium | Browser automation |
-| `bash` | high | Execute shell commands (disabled: refused at runtime) |
+| `bash` | high | Run a shell command line in the workspace (the user approves each one) |
 | `subagent_dispatch` | high | Spawn sub-agents |
 
 At runtime only `read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, and
-`fs.append` execute, all confined to the open workspace. `bash` is refused until
-a per-command consent system exists; the other values currently have no executor
-(a call returns an error).
+`fs.append` execute, all confined to the open workspace, plus `bash`: each
+command runs in the workspace folder (cmd.exe on Windows, sh elsewhere) only
+after the user approves it, and is not sandboxed. The other values currently
+have no executor (a call returns an error).
 
 ### tokens
 

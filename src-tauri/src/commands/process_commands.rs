@@ -98,6 +98,74 @@ pub fn execute_hook(
     )
 }
 
+/// Run an agent's shell command line in the workspace folder: cmd.exe on Windows,
+/// sh elsewhere. The frontend asks the user to approve each command first.
+#[tauri::command(async)]
+pub fn execute_command(
+    workspace_path: String,
+    command: String,
+    consent_granted: bool,
+    // The time the agent has left, bounded to 1 s–1 h.
+    timeout_secs: u64,
+) -> AppResult<HookResult> {
+    if !consent_granted {
+        return Err(AppError::Other(
+            "Running a command requires the user's approval.".to_string(),
+        ));
+    }
+    let dir = Path::new(&workspace_path)
+        .canonicalize()
+        .ok()
+        .filter(|dir| dir.is_dir())
+        .ok_or_else(|| AppError::Other(format!("Workspace folder not found: {workspace_path}")))?;
+    let dir = interpreter_path(&dir);
+    let mut shell = shell_command(&command, &dir)?;
+    // No input: a command that asks a question gets end-of-file instead of waiting.
+    shell.current_dir(&dir).stdin(Stdio::null());
+
+    let timeout = Duration::from_secs(timeout_secs.clamp(1, 3600));
+    match wait_with_timeout(shell, timeout) {
+        Ok(Some(result)) => Ok(result),
+        Ok(None) => Err(AppError::Other(format!(
+            "Command timed out after {} s",
+            timeout.as_secs()
+        ))),
+        Err(e) => Err(AppError::Other(format!("Could not start the command: {e}"))),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn shell_command(command: &str, dir: &str) -> AppResult<Command> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // cmd.exe cannot use a network path as its working folder: it would run the
+    // command in C:\Windows instead.
+    if dir.starts_with(r"\\") {
+        return Err(AppError::Other(
+            "Commands cannot run in a workspace on a network share.".to_string(),
+        ));
+    }
+    let mut shell = keyless_command("cmd.exe");
+    // The line runs as typed (/s /c "…", as Node's `shell: true`; /d skips AutoRun)
+    // in a cmd started after `chcp 65001`, so cmd's own output (echo, "not
+    // recognized") is UTF-8: a cmd keeps the code page it started with. The line is
+    // passed in a variable that is expanded (!…!) only after the outer cmd has
+    // parsed its own line, so its & | > and quotes reach the inner cmd unchanged.
+    shell
+        .env("HARNESS_AGENT_COMMAND", command)
+        .raw_arg("/d /v:on /s /c \"chcp 65001>nul & cmd /d /s /c \"!HARNESS_AGENT_COMMAND!\"\"")
+        .creation_flags(CREATE_NO_WINDOW);
+    Ok(shell)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_command(command: &str, _dir: &str) -> AppResult<Command> {
+    let mut shell = keyless_command("sh");
+    shell.args(["-c", command]);
+    Ok(shell)
+}
+
 /// Per-stream cap on captured output; anything beyond it is read and discarded.
 const MAX_CAPTURED_BYTES: usize = 1024 * 1024;
 /// After the child exits, how long to keep collecting output from pipes that a
@@ -134,6 +202,16 @@ fn captured_text(captured: &Captured) -> String {
         .unwrap_or_default()
 }
 
+/// Child processes (hooks, agent commands) must not inherit the app's provider
+/// keys. A hook's explicit `env`, applied later, may still set one deliberately.
+fn keyless_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    for key in PROVIDER_KEY_ENV_VARS {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn run_command_with_timeout(
     program: &str,
     args: &[String],
@@ -141,42 +219,41 @@ fn run_command_with_timeout(
     env_vars: &HashMap<String, String>,
     timeout: Duration,
 ) -> AppResult<HookResult> {
+    let mut command = keyless_command(program);
+    command.args(args).current_dir(current_dir).envs(env_vars);
+    wait_with_timeout(command, timeout)
+        .map_err(|e| AppError::HookExecution(e.to_string()))?
+        .ok_or_else(|| {
+            AppError::HookExecution(format!("Hook timeout after {}ms", timeout.as_millis()))
+        })
+}
+
+/// Run to completion and collect the output; `None` if it ran past `timeout`
+/// (the process tree is killed).
+fn wait_with_timeout(mut command: Command, timeout: Duration) -> std::io::Result<Option<HookResult>> {
     let start = Instant::now();
-    let mut command = Command::new(program);
-    // Hook processes must not inherit the app's provider keys. A hook's explicit
-    // `env` (applied below) may still set one deliberately.
-    for key in PROVIDER_KEY_ENV_VARS {
-        command.env_remove(key);
-    }
     let mut child = command
-        .args(args)
-        .current_dir(current_dir)
-        .envs(env_vars)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| AppError::HookExecution(e.to_string()))?;
+        .spawn()?;
 
     let (stdout, stdout_reader) = drain(child.stdout.take());
     let (stderr, stderr_reader) = drain(child.stderr.take());
 
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(|e| AppError::HookExecution(e.to_string()))?
-        {
+        if let Some(status) = child.try_wait()? {
             let grace_end = (Instant::now() + PIPE_GRACE).min(start + timeout);
             while !(stdout_reader.is_finished() && stderr_reader.is_finished())
                 && Instant::now() < grace_end
             {
                 thread::sleep(Duration::from_millis(10));
             }
-            return Ok(HookResult {
+            return Ok(Some(HookResult {
                 exit_code: status.code().unwrap_or(-1),
                 stdout: captured_text(&stdout),
                 stderr: captured_text(&stderr),
                 duration_ms: start.elapsed().as_millis() as u64,
-            });
+            }));
         }
 
         if start.elapsed() >= timeout {
@@ -189,10 +266,7 @@ fn run_command_with_timeout(
                 .status();
             let _ = child.kill();
             let _ = child.wait();
-            return Err(AppError::HookExecution(format!(
-                "Hook timeout after {}ms",
-                timeout.as_millis()
-            )));
+            return Ok(None);
         }
 
         thread::sleep(Duration::from_millis(25));
@@ -338,6 +412,122 @@ mod tests {
 
         assert!(output.stdout.contains("done"));
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    fn run_in(dir: &Path, command: &str, timeout_secs: u64) -> AppResult<HookResult> {
+        execute_command(dir.to_string_lossy().to_string(), command.to_string(), true, timeout_secs)
+    }
+
+    #[test]
+    fn execute_command_requires_explicit_consent() {
+        let dir = tempdir().unwrap();
+        let result = execute_command(
+            dir.path().to_string_lossy().to_string(),
+            "echo ran> marker.txt".to_string(),
+            false,
+            10,
+        );
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("approval")));
+        assert!(!dir.path().join("marker.txt").exists());
+    }
+
+    #[test]
+    fn execute_command_runs_in_the_workspace_folder() {
+        let dir = tempdir().unwrap();
+        let output = run_in(dir.path(), "echo ran> marker.txt", 10).unwrap();
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        assert!(dir.path().join("marker.txt").exists());
+    }
+
+    #[test]
+    fn execute_command_reports_the_exit_code() {
+        let dir = tempdir().unwrap();
+        assert_eq!(run_in(dir.path(), "exit 3", 10).unwrap().exit_code, 3);
+    }
+
+    #[test]
+    fn execute_command_reports_an_unknown_command_as_a_failure() {
+        let dir = tempdir().unwrap();
+        let output = run_in(dir.path(), "no-such-command-7f3a", 10).unwrap();
+
+        assert_ne!(output.exit_code, 0);
+        // cmd's own message is localized ("not recognized"): it must arrive as UTF-8.
+        assert!(!output.stderr.contains('\u{FFFD}'), "stderr: {:?}", output.stderr);
+    }
+
+    #[test]
+    fn execute_command_runs_the_line_as_typed() {
+        // Quotes and && reach the shell unchanged: no argument escaping on the way.
+        let dir = tempdir().unwrap();
+        let output = run_in(dir.path(), r#"echo "a  b" && echo second"#, 10).unwrap();
+
+        assert!(output.stdout.contains("second"), "stdout: {:?}", output.stdout);
+        #[cfg(target_os = "windows")]
+        assert!(output.stdout.contains(r#""a  b""#), "stdout: {:?}", output.stdout);
+        #[cfg(not(target_os = "windows"))]
+        assert!(output.stdout.contains("a  b"), "stdout: {:?}", output.stdout);
+    }
+
+    #[test]
+    fn execute_command_output_is_utf8() {
+        let dir = tempdir().unwrap();
+        let output = run_in(dir.path(), "echo 한글 출력", 10).unwrap();
+
+        assert!(output.stdout.contains("한글 출력"), "stdout: {:?}", output.stdout);
+    }
+
+    #[test]
+    fn execute_command_gives_the_command_no_input() {
+        // A command that asks a question must not wait for an answer.
+        let dir = tempdir().unwrap();
+        #[cfg(target_os = "windows")]
+        let line = "set /p answer=Continue? & echo after";
+        #[cfg(not(target_os = "windows"))]
+        let line = "read answer; echo after";
+        let started = Instant::now();
+        let output = run_in(dir.path(), line, 10).unwrap();
+
+        assert!(output.stdout.contains("after"), "stdout: {:?}", output.stdout);
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn execute_command_stops_at_the_time_limit() {
+        let dir = tempdir().unwrap();
+        let started = Instant::now();
+        let result = run_in(dir.path(), "ping -n 8 127.0.0.1 >nul", 1);
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn execute_command_needs_an_existing_workspace_folder() {
+        let dir = tempdir().unwrap();
+        let result = run_in(&dir.path().join("gone"), "echo hi", 10);
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("not found")));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn commands_do_not_run_in_a_network_folder() {
+        // cmd.exe would run them in C:\Windows instead.
+        assert!(shell_command("echo hi", r"\\server\share\project").is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn agent_commands_do_not_inherit_provider_api_keys() {
+        std::env::set_var("OLLAMA_REMOTE_API_KEY", "probe-secret-must-not-leak");
+        let dir = tempdir().unwrap();
+        let output = run_in(dir.path(), "echo key=%OLLAMA_REMOTE_API_KEY%", 10);
+        std::env::remove_var("OLLAMA_REMOTE_API_KEY");
+
+        assert!(!output.unwrap().stdout.contains("probe-secret-must-not-leak"));
     }
 
     #[test]

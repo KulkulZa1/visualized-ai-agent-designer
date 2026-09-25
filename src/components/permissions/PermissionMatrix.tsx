@@ -15,7 +15,7 @@ const RISK_COLOR = { low: "var(--green)", medium: "var(--accent)", high: "var(--
 const TOOL_DESCRIPTIONS: Partial<Record<ToolPermission, string>> = {
   [ToolPermission.WriteFile]: "Overwrite files in the workspace. Agents with this tool can modify any file.",
   [ToolPermission.FsAppend]: "Append to files in the workspace.",
-  [ToolPermission.Bash]: "Run arbitrary shell commands. Use only for trusted workflows with a hook gate.",
+  [ToolPermission.Bash]: "Run shell commands in the workspace. You approve each command before it runs.",
   [ToolPermission.SubagentDispatch]: "Spawn subagents — high blast radius. Requires audit trail.",
   [ToolPermission.Git]: "Run git commands in the workspace.",
   [ToolPermission.Test]: "Run test suites and report results.",
@@ -91,7 +91,7 @@ export function PermissionMatrix({ onClose }: PermissionMatrixProps) {
               <span>
                 <strong>{bashNodes.length} node{bashNodes.length > 1 ? "s list" : " lists"} the bash tool:</strong>{" "}
                 {bashNodes.map((n) => n.data.name).join(", ")}.
-                Agent-issued shell commands are disabled at runtime, so these calls will fail — remove the permission.
+                Each command they want to run waits for your approval and then runs with your permissions (no sandbox).
               </span>
             </div>
           );

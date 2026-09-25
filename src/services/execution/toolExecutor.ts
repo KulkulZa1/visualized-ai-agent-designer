@@ -10,9 +10,11 @@
  *   fs.write / write_file   — overwrite a file
  *   fs.append / append_file — append to a file
  *
- * Execute tools: bash / run_command are DISABLED. Agent-issued shell commands
- * are refused (never sent to the backend) until a real permission system exists;
- * the tool is not advertised to the model.
+ * Execute tool (requires "bash" in node's allowedTools):
+ *   bash / run_command — run a shell command line in the workspace. It runs only
+ *   through a workflow node, after the user approves that exact command
+ *   (services/execution/commandTool.ts); executeTool itself never runs it, and
+ *   sub-agents never get it.
  */
 
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
@@ -72,6 +74,14 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
       content: "Text to append",
     },
   },
+  bash: {
+    name: "bash",
+    description:
+      "Run one command line in the workspace folder (cmd.exe on Windows, sh elsewhere) and get its exit code " +
+      "and output, e.g. to run the tests. The user must approve each command before it runs; a denied " +
+      "command is not run. It gets no input and stops at your time limit.",
+    args: { command: "The command line, e.g. npm test" },
+  },
 };
 
 // Run by the agent loop (services/execution/subAgents.ts), not by executeTool.
@@ -106,6 +116,7 @@ const REQUIRED_ARGS: Record<string, string[]> = {
   grep: ["path", "pattern"],
   "fs.write": ["path", "content"],
   "fs.append": ["path", "content"],
+  bash: ["command"],
   subagent_dispatch: ["task"],
 };
 
@@ -387,8 +398,8 @@ export async function executeTool(
     // ── Execute tools ────────────────────────────────────────────────────────
 
     if (name === "bash" || name === "run_command") {
-      return `[error] ${name} is disabled: agent-issued shell commands are not executed ` +
-        "(there is no per-command consent system yet). Ask the user to run the command instead.";
+      return `[error] ${name} is not available here: commands run only as a workflow agent's tool, ` +
+        "after the user approves each one.";
     }
 
     return `[error] Tool "${name}" is not available or not safe to execute automatically.`;

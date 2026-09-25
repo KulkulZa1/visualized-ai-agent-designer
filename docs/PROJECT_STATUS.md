@@ -1,6 +1,6 @@
 ﻿# Project Status
 
-Updated: 2026-09-24
+Updated: 2026-09-25
 
 Project: Harness Studio, a Tauri desktop workflow builder for multi-agent AI
 systems.
@@ -13,8 +13,8 @@ development and demos, but not ready for broad release.
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 513 tests / 46 files (verified 2026-09-24) |
-| `cargo test` | Passed, 63 tests (verified 2026-09-24) |
+| `npx vitest run` | Passed, 538 tests / 49 files (verified 2026-09-25) |
+| `cargo test` | Passed, 74 tests (verified 2026-09-25) |
 | `npm run build` | Passed |
 | `npm run tauri -- dev` | Launched desktop binary and WebView2 (earlier pass, not re-run) |
 | `npm run tauri -- build` | Produced MSI and NSIS installers (earlier pass, not re-run) |
@@ -31,6 +31,7 @@ Build warnings still present:
 - Canvas editor with examples, validation, auto-layout, undo/redo, and YAML load/save.
 - AuditStrip filters with kind chips, All chip, agent chips, ordering toggle, and empty states.
 - Dependency-aware bounded parallel workflow execution with per-node prompt/model/output/status.
+- Agent shell commands (`bash`) with per-command approval: the user approves each exact command before it runs in the workspace folder.
 - Provider adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
 - Ollama Cloud support for `https://ollama.com/api`, `gemma4:31b-cloud`, and endpoint-scoped credentials.
 - Rule-based Workflow Wizard with templates for blog automation, purchasing, research, coding, finance/logistics/MATLAB-related planning, and Harness Studio self-improvement.
@@ -50,7 +51,7 @@ Build warnings still present:
 - API keys are stored in localStorage/env, not OS keychain.
 - Gemini is catalog/planned only.
 - MCP write tools and workflow execution are not implemented.
-- Agent shell execution (`bash`/`run_command`) is disabled until a per-command consent system exists.
+- Agent shell commands (`bash`/`run_command`) run only after the user approves each one; approved commands are not sandboxed, and Stop does not kill one that is already running.
 - Pre/post hooks on agent nodes do not run during workflow runs; only Hook-role nodes run their pre-hook.
 - Temperature, per-node fallback model, gateway `condition`, prompt `{{variables}}`, and workflow-level `timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved but not applied at runtime.
 - The VS Code extension is an experimental scaffold; most commands do not work yet.
@@ -89,7 +90,7 @@ Earlier fixes:
 4. More E2E coverage for bounded parallel execution, cancellation, and gateway routing.
 5. Durable run traces and artifacts.
 6. E2E UI automation and screenshot capture that does not depend on manual inspection.
-7. Per-command consent system before re-enabling agent shell execution.
+7. Agent shell commands run unsandboxed once approved: decide on a sandbox or an allowlist, and kill a running command on Stop.
 
 See `docs/DEPLOYMENT_READINESS.md` for the detailed checklist.
 

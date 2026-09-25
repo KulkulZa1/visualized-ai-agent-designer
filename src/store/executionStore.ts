@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { WorkflowRun, AgentRun } from "@/types/execution";
+import { useCommandConsentStore } from "@/store/commandConsentStore";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -133,6 +134,8 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
       currentRun: { ...currentRun, status: "cancelled", finishedAt: Date.now() },
       isRunning: false,
     });
+    // A command still waiting for approval must not run after Stop.
+    useCommandConsentStore.getState().denyRun(currentRun.id);
   },
 
   setLlmProvider: (p) => {

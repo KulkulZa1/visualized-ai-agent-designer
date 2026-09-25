@@ -73,9 +73,10 @@ describe("buildToolInstructions", () => {
     expect(instructions).toContain("WRITE / EXECUTE TOOLS");
   });
 
-  it("does not advertise bash to the model: agent shell execution is disabled", () => {
-    expect(buildToolInstructions(["bash"])).toBe("");
-    expect(buildToolInstructions(["fs.write", "bash"])).not.toContain("bash");
+  it("offers bash when listed, saying each command needs the user's approval", () => {
+    const instructions = buildToolInstructions(["bash"]);
+    expect(instructions).toContain("• bash:");
+    expect(instructions).toContain("approve");
   });
 
   it("separates read and write sections when both present", () => {
@@ -289,7 +290,7 @@ describe("executeTool — bash", () => {
   });
 
   it.each(["bash", "run_command"])("never runs %s commands, even when bash is allowed", async (name) => {
-    // Agent-issued shell execution is disabled until a real permission system exists.
+    // Commands run only through a workflow node's approval prompt (commandTool.ts).
     const invoke = vi.fn() as unknown as InvokeFn;
     const result = await executeTool(
       { name, args: { command: "echo test" } },
@@ -298,7 +299,7 @@ describe("executeTool — bash", () => {
       ["bash"],
     );
     expect(result).toContain("[error]");
-    expect(result).toContain("disabled");
+    expect(result).toContain("approves");
     expect(invoke).not.toHaveBeenCalled();
   });
 });
@@ -356,7 +357,13 @@ describe("executeTool — list_files", () => {
 describe("runnableTools / toolDefinitions", () => {
   it("keeps only the tools that actually run", () => {
     expect(runnableTools(["read_file", "todo_write", "web_search", "fs.append", "bash"]))
-      .toEqual(["read_file", "fs.append"]);
+      .toEqual(["read_file", "fs.append", "bash"]);
+  });
+
+  it("offers bash with a required command line", () => {
+    const [bash] = toolDefinitions(["bash"]);
+    expect(bash.name).toBe("bash");
+    expect(bash.parameters).toMatchObject({ type: "object", required: ["command"] });
   });
 
   it("offers runnable tools as JSON-schema definitions with provider-safe names", () => {
