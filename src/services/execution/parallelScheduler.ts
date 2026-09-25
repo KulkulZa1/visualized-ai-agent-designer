@@ -38,7 +38,7 @@ export interface SchedulerOptions {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function isForwardEdge(e: Edge): boolean {
+export function isForwardEdge(e: Edge): boolean {
   const kind = (e.data as EdgeData | undefined)?.edgeKind;
   return kind !== "feedback" && e.type !== "feedback";
 }
