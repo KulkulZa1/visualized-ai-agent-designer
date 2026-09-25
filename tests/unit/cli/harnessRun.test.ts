@@ -67,6 +67,8 @@ describe("harness run", () => {
     const run = harnessRun(workspace({ Coder: ["wrote the fix"], Reviewer: ["Looks good."] }), ["--task", "Fix the bug"]);
 
     expect(run.status, run.stderr).toBe(0);
+    // The app's warning is about its approval dialog; harness run has --allow-command instead.
+    expect(run.stderr).toContain('"Coder" can run shell commands (bash): only the commands passed with --allow-command run.');
     expect(run.stdout).toContain("▶ Coder started (qwen2.5-coder:7b via ollama)");
     expect(run.stdout).toMatch(/✓ Coder done \(\d+\.\d s\)/);
     expect(run.stdout).toContain("Final output — Reviewer:\n  Looks good.");

@@ -133,7 +133,13 @@ export async function runHarness(argv: string[]): Promise<number> {
   const graph = defToGraph(loaded.def);
   if (args.maxParallel) graph.executionSettings = { ...graph.executionSettings, maxParallel: args.maxParallel };
   const validation = validateWorkflow(graph.nodes, graph.edges);
-  for (const warning of validation.warnings) err(`warning: ${warning.message}`);
+  for (const warning of validation.warnings) {
+    // The app's bash warning is about its approval dialog; here commands need --allow-command.
+    const name = graph.nodes.find((n) => n.id === warning.nodeId)?.data.name;
+    err(`warning: ${warning.kind === "no_hooks_on_bash" && name
+      ? `"${name}" can run shell commands (bash): only the commands passed with --allow-command run.`
+      : warning.message}`);
+  }
   if (!validation.valid) {
     for (const problem of validation.errors) err(`harness run: ${problem.message}`);
     return EXIT.usage;
