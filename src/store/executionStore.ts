@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { WorkflowRun, AgentRun } from "@/types/execution";
 import { useCommandConsentStore } from "@/store/commandConsentStore";
+import { recordChange } from "@/services/execution/changeLog";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
@@ -26,6 +27,8 @@ interface ExecutionActions {
   startRun: (workflowName: string) => string;
   updateAgent: (agentId: string, partial: Partial<AgentRun>) => void;
   finishRun: (status: "done" | "error" | "cancelled") => void;
+  recordFileChange: (path: string, before: string | null, after: string, agent: string) => void;
+  forgetFileChange: (path: string) => void;
   setApiKey: (key: string) => void;
   setOpenaiApiKey: (key: string) => void;
   setOllamaApiKey: (key: string) => void;
@@ -96,6 +99,18 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
         : null,
       isRunning: false,
     })),
+
+  recordFileChange: (path, before, after, agent) =>
+    set((state) => state.currentRun
+      ? { currentRun: { ...state.currentRun,
+          changes: recordChange(state.currentRun.changes ?? [], path, before, after, agent) } }
+      : {}),
+
+  forgetFileChange: (path) =>
+    set((state) => state.currentRun
+      ? { currentRun: { ...state.currentRun,
+          changes: (state.currentRun.changes ?? []).filter((c) => c.path !== path) } }
+      : {}),
 
   setApiKey: (key) => {
     try { localStorage.setItem("harness_api_key", key); } catch {}

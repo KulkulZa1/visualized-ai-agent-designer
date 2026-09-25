@@ -39,7 +39,7 @@ describe("runAgentLoop — native tool calls", () => {
     const result = await runAgentLoop(opts);
 
     expect(result).toMatchObject({ text: "done", toolCalls: 2, mode: "native", nativeRefused: false });
-    expect(callTurn.mock.calls[0][2].map((t: { name: string }) => t.name)).toEqual(["read_file", "fs_write"]);
+    expect(callTurn.mock.calls[0][2].map((t: { name: string }) => t.name)).toEqual(["read_file", "fs_write", "edit_file"]);
     expect(opts.runTool).toHaveBeenNthCalledWith(1, { name: "read_file", args: { path: "x" } });
     expect(opts.runTool).toHaveBeenNthCalledWith(2, { name: "fs.write", args: { path: "y", content: "z" } });
     expect(callTurn.mock.calls[1][1]).toEqual([

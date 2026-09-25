@@ -410,6 +410,34 @@ describe("useWorkflowExecution", () => {
     });
   });
 
+  it("records the files an agent edits in the run's change log", async () => {
+    const node = makeNode("A");
+    node.data.tools = [ToolPermission.WriteFile];
+    node.data.maxSteps = 2;
+    useWorkflowStore.setState({ nodes: [node], edges: [] });
+    const files: Record<string, string> = { "src/a.ts": "const x = 1;\n" };
+    mockInvokeHandler("read_workspace_file", (args) => {
+      const path = (args as { relativePath: string }).relativePath;
+      if (path in files) return files[path];
+      throw new Error("IO error: not found (os error 2)");
+    });
+    mockInvokeHandler("write_workspace_file", (args) => {
+      const a = args as { relativePath: string; content: string };
+      files[a.relativePath] = a.content;
+    });
+    let calls = 0;
+    mockInvokeHandler("call_ollama_api", () => (++calls === 1
+      ? '<tool_call>{"name":"edit_file","args":{"path":"src/a.ts","old_string":"x = 1","new_string":"x = 2"}}</tool_call>'
+      : "done"));
+
+    const finished = await run();
+
+    expect(files["src/a.ts"]).toBe("const x = 2;\n");
+    expect(finished?.changes).toEqual([
+      { path: "src/a.ts", before: "const x = 1;\n", after: "const x = 2;\n", agents: ["A"], edits: 1 },
+    ]);
+  });
+
   describe("shell commands", () => {
     /** Node A runs `npm test` with bash, then answers from the result. */
     function commandNode(timeoutSeconds = 300) {

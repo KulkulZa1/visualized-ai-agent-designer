@@ -9,6 +9,7 @@
  * Write tools (require "fs.write" or "fs.append" in node's allowedTools):
  *   fs.write / write_file   — overwrite a file
  *   fs.append / append_file — append to a file
+ *   edit_file               — replace an exact snippet (comes with fs.write)
  *
  * Execute tool (requires "bash" in node's allowedTools):
  *   bash / run_command — run a shell command line in the workspace. It runs only
@@ -19,6 +20,7 @@
 
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
 import type { FileTreeEntry } from "@/types/filesystem";
+import { applyEdit } from "@/services/execution/editFile";
 
 // ── Tool definitions ──────────────────────────────────────────────────────────
 
@@ -74,6 +76,19 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
       content: "Text to append",
     },
   },
+  edit_file: {
+    name: "edit_file",
+    description:
+      "Replace an exact piece of text in an existing workspace file. old_string must match the file exactly " +
+      "(whitespace and indentation included) and occur once, unless replace_all is true. " +
+      "Use it to change existing files; use fs.write to create a file.",
+    args: {
+      path: "Relative path from workspace root",
+      old_string: "The exact text to replace",
+      new_string: "The replacement text",
+      replace_all: "(optional) true to replace every occurrence",
+    },
+  },
   bash: {
     name: "bash",
     description:
@@ -116,12 +131,14 @@ const REQUIRED_ARGS: Record<string, string[]> = {
   grep: ["path", "pattern"],
   "fs.write": ["path", "content"],
   "fs.append": ["path", "content"],
+  edit_file: ["path", "old_string", "new_string"],
   bash: ["command"],
   subagent_dispatch: ["task"],
 };
 
 // Arguments that are not plain strings.
 const ARG_SCHEMAS: Record<string, Record<string, Record<string, unknown>>> = {
+  edit_file: { replace_all: { type: "boolean" } },
   subagent_dispatch: { tools: { type: "array", items: { type: "string" } } },
 };
 
@@ -129,9 +146,12 @@ function toolDef(tool: string): ToolDef | undefined {
   return SAFE_TOOL_DEFS[tool] ?? WRITE_EXEC_TOOL_DEFS[tool] ?? AGENT_TOOL_DEFS[tool];
 }
 
-/** The node's tools that actually run; the others (web_search, …) never execute. */
+/** The node's tools that actually run; the others (web_search, …) never execute.
+ *  Editing is part of writing: a node with fs.write also gets edit_file. */
 export function runnableTools(allowedTools: string[]): string[] {
-  return allowedTools.filter((t) => toolDef(t) !== undefined);
+  const tools = allowedTools.filter((t) => toolDef(t) !== undefined);
+  if (tools.includes("fs.write") && !tools.includes("edit_file")) tools.push("edit_file");
+  return tools;
 }
 
 /** Provider tool names may only use [a-zA-Z0-9_-]: "fs.read" is offered as "fs_read". */
@@ -261,24 +281,49 @@ function resolveCanonical(toolName: string): string {
   return TOOL_ALIASES[toolName] ?? toolName;
 }
 
-function isToolAllowed(toolName: string, allowedTools: string[]): boolean {
+/** The node permission a tool needs; edit_file comes with fs.write. */
+function permissionFor(toolName: string): string {
   const canonical = resolveCanonical(toolName);
-  return allowedTools.includes(toolName) || allowedTools.includes(canonical);
+  return canonical === "edit_file" ? "fs.write" : canonical;
+}
+
+function isToolAllowed(toolName: string, allowedTools: string[]): boolean {
+  return allowedTools.includes(toolName) || allowedTools.includes(permissionFor(toolName));
 }
 
 const WRITE_EXEC_TOOLS = new Set([
   "fs.write", "write_file",
   "fs.append", "append_file",
+  "edit_file",
   "bash", "run_command",
 ]);
 
+/** A Rust io error for a missing file or folder: "(os error 2)" / "(os error 3)"
+ *  end the message whatever the OS language. */
+export function isNotFound(error: unknown): boolean {
+  return /\(os error [23]\)/.test(String(error));
+}
+
 // ── Tool executor ─────────────────────────────────────────────────────────────
+
+/** Told about every file an agent changes: its content before (null if new) and after. */
+export type FileChangeListener = (path: string, before: string | null, after: string) => void;
+
+/** The file's content, null if it does not exist, undefined if it cannot be read. */
+async function readBefore(invokeFn: InvokeFn, workspacePath: string, path: string): Promise<string | null | undefined> {
+  try {
+    return await invokeFn<string>("read_workspace_file", { workspacePath, relativePath: path });
+  } catch (e) {
+    return isNotFound(e) ? null : undefined;
+  }
+}
 
 export async function executeTool(
   call: ToolCall,
   workspacePath: string | null,
   invokeFn: InvokeFn,
   allowedTools: string[] = [],
+  onChange?: FileChangeListener,
 ): Promise<string> {
   if (!workspacePath) {
     return "[error] No workspace open — open a workspace folder first.";
@@ -288,8 +333,7 @@ export async function executeTool(
 
   // Guard: write/exec tools require explicit allowedTools permission
   if (WRITE_EXEC_TOOLS.has(name) && !isToolAllowed(name, allowedTools)) {
-    const canonical = resolveCanonical(name);
-    return `[error] Tool "${name}" is not enabled for this agent. Enable "${canonical}" in the Permission Matrix.`;
+    return `[error] Tool "${name}" is not enabled for this agent. Enable "${permissionFor(name)}" in the Permission Matrix.`;
   }
 
   try {
@@ -359,11 +403,14 @@ export async function executeTool(
       const path = argText(args.path);
       if (!path) return "[error] fs.write requires a 'path' argument.";
       const content = argText(args.content);
+      // The old content is only read when someone records changes.
+      const before = onChange ? await readBefore(invokeFn, workspacePath, path.trim()) : undefined;
       await invokeFn<void>("write_workspace_file", {
         workspacePath,
         relativePath: path.trim(),
         content,
       });
+      if (before !== undefined) onChange?.(path.trim(), before, content);
       return `Written: ${path} (${content.length} chars)`;
     }
 
@@ -375,24 +422,44 @@ export async function executeTool(
       // non-UTF-8 file) must not turn the append into an overwrite. Rust io
       // errors end in "(os error 2)" (not found) / "(os error 3)" (no such
       // directory) regardless of the OS language.
-      let existing: string;
+      let existing: string | null;
       try {
         existing = await invokeFn<string>("read_workspace_file", {
           workspacePath,
           relativePath: path.trim(),
         });
       } catch (e) {
-        if (!/\(os error [23]\)/.test(String(e))) {
+        if (!isNotFound(e)) {
           return `[error] fs.append could not read ${path}; nothing was written: ${String(e)}`;
         }
-        existing = "";
+        existing = null;
       }
+      const after = (existing ?? "") + toAppend;
       await invokeFn<void>("write_workspace_file", {
         workspacePath,
         relativePath: path.trim(),
-        content: existing + toAppend,
+        content: after,
       });
+      onChange?.(path.trim(), existing, after);
       return `Appended to: ${path} (+${toAppend.length} chars)`;
+    }
+
+    if (name === "edit_file") {
+      const path = argText(args.path).trim();
+      if (!path) return "[error] edit_file requires a 'path' argument.";
+      let before: string;
+      try {
+        before = await invokeFn<string>("read_workspace_file", { workspacePath, relativePath: path });
+      } catch (e) {
+        if (isNotFound(e)) return `[error] ${path} does not exist. Use fs.write to create it.`;
+        throw e;
+      }
+      const replaceAll = args.replace_all === true || args.replace_all === "true";
+      const edit = applyEdit(before, argText(args.old_string), argText(args.new_string), replaceAll);
+      if (!edit.ok) return `[error] ${edit.error}`;
+      await invokeFn<void>("write_workspace_file", { workspacePath, relativePath: path, content: edit.content });
+      onChange?.(path, before, edit.content);
+      return `Edited: ${path} (${edit.replacements} replacement${edit.replacements === 1 ? "" : "s"})`;
     }
 
     // ── Execute tools ────────────────────────────────────────────────────────

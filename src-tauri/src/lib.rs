@@ -10,7 +10,8 @@ use commands::{
     audit_commands::write_audit_entry,
     chat_turn::chat_turn,
     fs_commands::{
-        list_workspace_files, open_workspace_dialog, read_workspace_file, write_workspace_file,
+        delete_workspace_file, list_workspace_files, open_workspace_dialog, read_workspace_file,
+        write_workspace_file,
     },
     process_commands::{execute_command, execute_hook},
     workflow_commands::{load_workflow, save_workflow},
@@ -50,6 +51,7 @@ pub fn run() {
             list_workspace_files,
             read_workspace_file,
             write_workspace_file,
+            delete_workspace_file,
             save_workflow,
             load_workflow,
             write_audit_entry,

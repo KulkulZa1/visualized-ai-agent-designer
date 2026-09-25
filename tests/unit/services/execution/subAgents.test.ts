@@ -49,7 +49,7 @@ describe("createSubAgentRunner", () => {
     await subAgents.dispatch({ task: "t", tools: ["read_file", "bash", "subagent_dispatch", "web_search"] });
     await subAgents.dispatch({ task: "t" });
     expect(loop.mock.calls[0][0].tools).toEqual(["read_file"]);
-    expect(loop.mock.calls[1][0].tools).toEqual(["read_file", "fs.write"]);
+    expect(loop.mock.calls[1][0].tools).toEqual(["read_file", "fs.write", "edit_file"]);
   });
 
   it("accepts the native tool names the model sees (fs_write for fs.write)", async () => {

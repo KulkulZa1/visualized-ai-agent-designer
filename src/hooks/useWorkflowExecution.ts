@@ -549,6 +549,13 @@ export function useWorkflowExecution() {
             details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
         };
 
+        // Every file an agent writes goes into the run's change log (Changes dialog,
+        // revert). A helper can finish after its run ended: never write into a newer run.
+        const recordChangeBy = (agent: string) => (path: string, before: string | null, after: string) => {
+          if (useExecutionStore.getState().currentRun?.id !== runId) return;
+          useExecutionStore.getState().recordFileChange(path, before, after, agent);
+        };
+
         // bash: each command waits for the user's approval (CommandConsentDialog).
         const runCommand = (args: Record<string, unknown>) => runCommandTool(args, {
           agentName: data.name, workspacePath, invoke,
@@ -577,7 +584,7 @@ export function useWorkflowExecution() {
             userMessage: child.userMessage,
             tools: child.tools,
             timeoutMessage: `Sub-agent "${child.name}" ran past ${data.name}'s ${timeoutSeconds}s limit`,
-            runTool: (call) => executeTool(call, workspacePath, invoke, child.tools),
+            runTool: (call) => executeTool(call, workspacePath, invoke, child.tools, recordChangeBy(child.name)),
             onToolCall: logToolCall(`↳ ${child.name} — `),
           }),
           onEvent: (details, success) => {
@@ -604,7 +611,7 @@ export function useWorkflowExecution() {
           timeoutMessage: `${data.name} timed out after ${timeoutSeconds}s`,
           runTool: (call) => call.name === SUBAGENT_TOOL ? subAgents.dispatch(call.args)
             : call.name === "bash" ? runCommand(call.args)
-            : executeTool(call, workspacePath, invoke, data.tools as string[]),
+            : executeTool(call, workspacePath, invoke, data.tools as string[], recordChangeBy(data.name)),
           onToolCall: logToolCall(""),
           concurrentTools: [SUBAGENT_TOOL],
           maxConcurrent: MAX_CONCURRENT_SUBAGENTS,

@@ -368,7 +368,7 @@ describe("runnableTools / toolDefinitions", () => {
 
   it("offers runnable tools as JSON-schema definitions with provider-safe names", () => {
     const defs = toolDefinitions(["read_file", "fs.write", "web_search"]);
-    expect(defs.map((d) => d.name)).toEqual(["read_file", "fs_write"]);
+    expect(defs.map((d) => d.name)).toEqual(["read_file", "fs_write", "edit_file"]);
     expect(defs[0].parameters).toMatchObject({ type: "object", required: ["path"] });
     expect(defs[1].parameters).toMatchObject({ type: "object", required: ["path", "content"] });
     for (const d of toolDefinitions(["read_file", "fs.read", "list_files", "grep", "fs.write", "fs.append"])) {
@@ -416,5 +416,93 @@ describe("subagent_dispatch definition", () => {
 
   it("is described in the text protocol too", () => {
     expect(buildToolInstructions(["subagent_dispatch"])).toContain("• subagent_dispatch:");
+  });
+});
+
+// ── executeTool — edit_file ───────────────────────────────────────────────────
+
+/** An in-memory workspace for read/write tool calls. */
+function fileInvoke(files: Record<string, string>): InvokeFn {
+  return vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+    const path = args?.relativePath as string;
+    if (cmd === "read_workspace_file") {
+      if (path in files) return files[path];
+      throw new Error("IO error: The system cannot find the file specified. (os error 2)");
+    }
+    if (cmd === "write_workspace_file") { files[path] = args?.content as string; return undefined; }
+    throw new Error(`Unexpected: ${cmd}`);
+  }) as unknown as InvokeFn;
+}
+
+describe("executeTool — edit_file", () => {
+  it("comes with fs.write and edits the file", async () => {
+    const files = { "src/a.ts": "const x = 1;\n" };
+    const result = await executeTool(
+      { name: "edit_file", args: { path: "src/a.ts", old_string: "x = 1", new_string: "x = 2" } },
+      "/workspace", fileInvoke(files), ["fs.write"],
+    );
+    expect(result).toBe("Edited: src/a.ts (1 replacement)");
+    expect(files["src/a.ts"]).toBe("const x = 2;\n");
+  });
+
+  it("is refused without fs.write, naming that permission", async () => {
+    const result = await executeTool(
+      { name: "edit_file", args: { path: "a.ts", old_string: "a", new_string: "b" } },
+      "/workspace", fileInvoke({ "a.ts": "a" }), ["fs.append"],
+    );
+    expect(result).toContain('Enable "fs.write"');
+  });
+
+  it("reports a mismatch without writing", async () => {
+    const files = { "a.ts": "a();\na();\n" };
+    const result = await executeTool(
+      { name: "edit_file", args: { path: "a.ts", old_string: "a()", new_string: "b()" } },
+      "/workspace", fileInvoke(files), ["fs.write"],
+    );
+    expect(result).toMatch(/^\[error\] old_string occurs 2 times/);
+    expect(files["a.ts"]).toBe("a();\na();\n");
+  });
+
+  it("points to fs.write for a file that does not exist", async () => {
+    const result = await executeTool(
+      { name: "edit_file", args: { path: "new.ts", old_string: "a", new_string: "b" } },
+      "/workspace", fileInvoke({}), ["fs.write"],
+    );
+    expect(result).toBe("[error] new.ts does not exist. Use fs.write to create it.");
+  });
+
+  it("is offered to nodes with fs.write, with its required arguments", () => {
+    expect(runnableTools(["read_file", "fs.write"])).toEqual(["read_file", "fs.write", "edit_file"]);
+    const edit = toolDefinitions(["fs.write"]).find((d) => d.name === "edit_file");
+    expect(edit?.parameters).toMatchObject({
+      required: ["path", "old_string", "new_string"],
+      properties: { replace_all: { type: "boolean" } },
+    });
+  });
+});
+
+describe("executeTool — change listener", () => {
+  it("reports the before and after content of each write, edit and append", async () => {
+    const files: Record<string, string> = { "a.ts": "old\n" };
+    const changes: Array<[string, string | null, string]> = [];
+    const onChange = (path: string, before: string | null, after: string) => { changes.push([path, before, after]); };
+    const tools = ["fs.write", "fs.append"];
+    const invoke = fileInvoke(files);
+
+    await executeTool({ name: "fs.write", args: { path: "a.ts", content: "new\n" } }, "/w", invoke, tools, onChange);
+    await executeTool({ name: "edit_file", args: { path: "a.ts", old_string: "new", new_string: "newer" } }, "/w", invoke, tools, onChange);
+    await executeTool({ name: "fs.append", args: { path: "log.txt", content: "line\n" } }, "/w", invoke, tools, onChange);
+
+    expect(changes).toEqual([
+      ["a.ts", "old\n", "new\n"],
+      ["a.ts", "new\n", "newer\n"],
+      ["log.txt", null, "line\n"],
+    ]);
+  });
+
+  it("does not read the old content when nothing listens", async () => {
+    const invoke = mockInvoke({ write_workspace_file: undefined });
+    await executeTool({ name: "fs.write", args: { path: "a.ts", content: "x" } }, "/w", invoke, ["fs.write"]);
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });

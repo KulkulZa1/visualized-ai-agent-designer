@@ -1,8 +1,10 @@
+import { useState } from "react";
 import { useExecutionStore } from "@/store/executionStore";
 import { useUIStore } from "@/store/uiStore";
 import type { AgentStatus } from "@/types/execution";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { ExecutionTimeline } from "./ExecutionTimeline";
+import { ChangesDialog } from "./ChangesDialog";
 
 interface RunPanelProps {
   onClose: () => void;
@@ -45,6 +47,8 @@ export function RunPanel({ onClose }: RunPanelProps) {
   const setApiKey  = useExecutionStore((s) => s.setApiKey);
   const setOpenaiApiKey = useExecutionStore((s) => s.setOpenaiApiKey);
   const selectNode = useUIStore((s) => s.selectNode);
+  const [showChanges, setShowChanges] = useState(false);
+  const changeCount = currentRun?.changes?.length ?? 0;
 
   const agents = currentRun ? Object.values(currentRun.agents) : [];
   const runningAgent = agents.find((a) => a.status === "running");
@@ -131,6 +135,20 @@ export function RunPanel({ onClose }: RunPanelProps) {
           </span>
         </div>
       )}
+
+      {/* Files changed by this run's agents */}
+      {changeCount > 0 && (
+        <div style={{ padding: "8px 14px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+          <button onClick={() => setShowChanges(true)} style={{
+            width: "100%", padding: "5px 0", border: "1px solid var(--border-md)", borderRadius: 5,
+            background: "var(--surface-3)", color: "var(--text)", cursor: "pointer", fontSize: 12,
+            fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center", gap: 6,
+          }}>
+            <NodeIcon name="file" size={12} /> Changes ({changeCount})
+          </button>
+        </div>
+      )}
+      {showChanges && <ChangesDialog onClose={() => setShowChanges(false)} />}
 
       {/* Agent list */}
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>

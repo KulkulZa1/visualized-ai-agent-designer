@@ -149,6 +149,18 @@ pub fn write_workspace_file(
     atomic_write(&safe, content.as_bytes())
 }
 
+/// Delete one file inside the workspace (reverting a file an agent created).
+/// Folders are refused.
+#[tauri::command]
+pub fn delete_workspace_file(workspace_path: String, relative_path: String) -> AppResult<()> {
+    let safe = resolve_safe_path(&workspace_path, &relative_path)?;
+    if !safe.is_file() {
+        return Err(AppError::Other(format!("{relative_path} is not a file")));
+    }
+    std::fs::remove_file(safe)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +272,29 @@ mod tests {
         fs::write(root.join("file.txt"), "").unwrap();
         let entries = list_workspace_files(root.to_str().unwrap().to_string()).unwrap();
         assert!(entries[0].is_directory);
+    }
+
+    #[test]
+    fn delete_workspace_file_removes_a_file_inside_the_workspace() {
+        let dir = temp_workspace();
+        fs::write(dir.path().join("new.txt"), "x").unwrap();
+
+        delete_workspace_file(dir.path().to_string_lossy().to_string(), "new.txt".to_string()).unwrap();
+
+        assert!(!dir.path().join("new.txt").exists());
+    }
+
+    #[test]
+    fn delete_workspace_file_refuses_folders_and_paths_outside() {
+        let dir = temp_workspace();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+
+        assert!(delete_workspace_file(root.clone(), "sub".to_string()).is_err());
+        assert!(dir.path().join("sub").exists());
+        assert!(matches!(
+            delete_workspace_file(root, "../outside.txt".to_string()),
+            Err(AppError::PathTraversal(_))
+        ));
     }
 }

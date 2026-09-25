@@ -25,6 +25,10 @@ export async function writeWorkspaceFile(workspacePath: string, relativePath: st
   return invoke<void>("write_workspace_file", { workspacePath, relativePath, content });
 }
 
+export async function deleteWorkspaceFile(workspacePath: string, relativePath: string): Promise<void> {
+  return invoke<void>("delete_workspace_file", { workspacePath, relativePath });
+}
+
 export async function saveWorkflow(workspacePath: string, relativePath: string, def: WorkflowDef): Promise<void> {
   return invoke<void>("save_workflow", { workspacePath, relativePath, workflow: def });
 }
