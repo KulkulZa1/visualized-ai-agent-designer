@@ -1,6 +1,6 @@
 ﻿# Architecture
 
-Updated: 2026-09-25
+Updated: 2026-09-26
 
 ## Stack
 
@@ -11,7 +11,8 @@ Updated: 2026-09-25
 | Canvas | React Flow |
 | State | Zustand + zundo |
 | Validation | Zod |
-| CLI | Node script, read-only |
+| CLI | Node script: read-only commands, and `harness run` (a Vite SSR bundle of the engine) |
+| Headless Rust | `harness-core`: the app's commands without Tauri, JSON lines over stdin/stdout |
 | MCP | Node stdio JSON-RPC server, read/test |
 
 ## Current Runtime Architecture
@@ -20,6 +21,8 @@ Updated: 2026-09-25
 - `src/engine/runWorkflow.ts` runs workflows through the dependency-aware `runParallel()` scheduler. The `useWorkflowExecution` hook gives it the canvas and settings, and a host that updates the stores.
 - Provider calls go through `src/services/model-providers/providerAdapter.ts` and Rust IPC commands.
 - Rust commands own filesystem access, workflow load/save, audit writes, provider calls, and hook execution.
+- `harness run` (`src/cli/`) runs the same engine without the app. It starts `harness-core` (`src-tauri/src/bin/harness-core.rs`, served by `commands/core_server.rs`) and sends the Rust commands to it as JSON lines. The crate's default `app` feature builds the desktop app; `--no-default-features --features core` builds `harness-core` without Tauri.
+- Every run is saved to `.harness/runs/<runId>/run.json` (`src/engine/runRecord.ts`); `harness run --resume` reuses the agents that finished and did not change. See `docs/HEADLESS.md`.
 - CLI and MCP are separate Node entrypoints; they do not require a Tauri runtime.
 
 ## Execution Model

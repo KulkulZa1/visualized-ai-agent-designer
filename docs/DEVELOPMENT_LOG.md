@@ -1,5 +1,61 @@
 ﻿# Development Log
 
+## 2026-09-26 - Headless runs and CI (`harness run`)
+
+- **Goal:** run a workflow without the app, the way `codex exec` runs Codex, for CI servers.
+  - Spec: `docs/superpowers/specs/2026-09-25-headless-ci-design.md`.
+  - Five parts, each with a plan in `docs/superpowers/plans/`, built test-first.
+- **Shared engine:**
+  - The run moved out of the React hook into `src/engine/runWorkflow.ts`: `runWorkflow(input, host)`.
+  - Store reads became `input`. Store writes, command approval, Stop and snapshots became `host` calls. The engine keeps its own run record.
+  - The hook's 40 tests passed unchanged. `defToGraph` is shared by the store and the CLI.
+- **harness-core:**
+  - Tauri and its plugins are optional (the default `app` feature). `--features core` builds the crate with no Tauri, WebView or GTK in the dependency tree.
+  - `core_server.rs` parses each command's camelCase arguments into typed structs, runs the app's own command functions, and answers concurrent requests by id.
+  - It serves only the commands a run uses, including `call_claude_api`, which the spec had missed.
+  - `tauri build` still builds only the app.
+- **harness run:**
+  - `src/cli/` is bundled by Vite in SSR mode, with a Node shim for Tauri's `Channel`, so replies do not stream.
+  - Keys come from the environment only. `--allow-command` lets exact command lines run; the audit reads "allowed by --allow-command" or "denied (not in --allow-command)".
+  - Output is readable lines or `--json` events, with exit codes 0/1/2/3/130. The first Ctrl+C is Stop.
+- **Run records and resume:**
+  - Every run is saved to `.harness/runs/<runId>/run.json` as it goes, including in the app when a workspace is open.
+  - Nodes are keyed by their place in the workflow file.
+  - `--resume` reuses a node that is done, has the same definition hash (role, model, tools, limits, prompt text, memory keys, hook) and has only reused forward predecessors. It restores the reused nodes' outputs, memory and routes, and the change log.
+- **Found and fixed along the way:**
+  - Ctrl+C reached `harness-core` too (the same console or process group) and killed it. A stopped run then exited 3 and could not be saved. The core now ignores Ctrl+C.
+  - A memory node's downstream text differs from its shown output, so the record keeps `outputs`.
+  - The CLI summary took the final output from a trailing memory node; it now takes it from the last agents.
+  - The app's bash warning talked about the approval dialog; `harness run` words it for `--allow-command`.
+- **CI:**
+  - `.github/workflows/ci.yml` runs on Linux: types, `vitest`, `cargo test` with and without Tauri, and `harness run` against the real core, expecting exit 3 without a key.
+  - The Rust process tests used `cmd.exe` and `.bat` hooks. They now pick `sh` on Unix, so Linux covers the `sh` path, the process-group kill and key-free environments.
+  - `examples/ci/harness-run.yml` is a template for other repositories.
+- **Live smoke (2026-09-26):**
+  - **Setup:**
+    - the real `harness run` and the real release `harness-core`;
+    - the free keyless endpoint (`--provider openai-compatible --base-url https://text.pollinations.ai/openai --model openai`);
+    - a synthetic scratch project: `sum.mjs` returns `a - b`, and `sum.test.mjs` expects 5.
+  - **Run 1** (`--allow-command "node --test"`):
+    - The Coder read both files through native tool calls and fixed the line with `edit_file` (`a - b` → `a + b`).
+    - It ran `node --test`: "allowed by --allow-command; exit 0, 422 ms". It was done in 112.9 s with 4 tool calls.
+    - The Reviewer, given a 1 s timeout on purpose, failed ("timed out after 1s"): exit 1 after 123 s.
+    - The record was saved with the change `sum.mjs +1 −1`.
+  - **Run 2**, after raising the Reviewer's timeout (its definition changed; the Coder's didn't), with `--resume run-1790348292064`:
+    - A `reused` event for the Coder; no `node_started` and no model call for it.
+    - The Reviewer ran in 21.1 s on the Coder's saved report ("The bug was that `sum.mjs` performed `return a - b;` …").
+    - Exit 0 after 24 s. The record shows `attempts: 2`, `status: done`, the same run id and the change log carried over.
+    - `node --test` passes in the scratch project.
+  - The free endpoint answered 429 a few times; `harness-core` retried and logged it on stderr, and stdout stayed pure JSON.
+  - **Ctrl+C on Windows:** a run was started in its own console, and a helper process attached to that console and sent a real `CTRL_C_EVENT` about 12 s in.
+    - `harness run` printed "Stopping the run…". The Coder was stopped mid-call, and the run finished `cancelled` with exit code 130.
+    - The record was saved as `cancelled` through `harness-core`, so the core survived the Ctrl+C.
+- **Verification:**
+  - `npx tsc --noEmit`, and `npx vitest run`: 668 tests / 65 files.
+  - `cargo test`: 95 tests, and 95 + 1 in the core build, with no warnings in either build.
+  - `npm run build`, `npm run build:core`, `npm run build:cli`, and `npx tauri build --debug --no-bundle`.
+- **Not verified:** macOS. Windows Ctrl+C was checked once by hand, as above, with no automated test; the Unix SIGINT test runs in CI.
+
 ## 2026-09-25 - Coding Core (toward Codex-level coding)
 
 - **Goal:** the six-item checklist the user chose. Spec: `docs/superpowers/specs/2026-09-25-coding-core-design.md`. There was one plan per part in `docs/superpowers/plans/`, built test-first with one commit per part.

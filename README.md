@@ -4,9 +4,9 @@ Harness Studio is a local-first Tauri desktop app for designing, validating,
 running, and inspecting multi-agent AI workflows.
 
 The current app is not just a mockup: the canvas, workflow YAML load/save,
-provider adapters, bounded parallel scheduling, read-only CLI, read/test MCP
-server, Tauri desktop launch, and installer build have all been exercised
-locally. Some important surfaces are still intentionally partial, especially
+provider adapters, bounded parallel scheduling, the CLI (read-only commands and
+headless runs with `harness run`), read/test MCP server, Tauri desktop launch,
+and installer build have all been exercised locally. Some important surfaces are still intentionally partial, especially
 real provider streaming, durable run artifacts, process isolation, and OS
 keychain storage.
 
@@ -14,13 +14,14 @@ keychain storage.
 
 Source of truth: [docs/DEPLOYMENT_READINESS.md](docs/DEPLOYMENT_READINESS.md)
 
-Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an earlier pass and were not re-run):
+Verified on 2026-09-26 (the Tauri dev app and Tauri package rows come from an earlier pass and were not re-run):
 
 | Area | Result |
 |---|---|
 | TypeScript | `npx tsc --noEmit` passed |
-| Frontend/unit tests | `npx vitest run` passed, 593 tests / 57 files |
-| Rust tests | `cargo test` passed, 86 tests |
+| Frontend/unit tests | `npx vitest run` passed, 668 tests / 65 files |
+| Rust tests | `cargo test` passed, 95 tests; the Tauri-free build (`--no-default-features --features core`) passed 95 + 1 |
+| Headless runs | `harness run` passed end to end against a fake `harness-core`, and live against the real one with a free endpoint (a fix, an allowed test command, a resume) |
 | Frontend build | `npm run build` passed |
 | Tauri dev app | `npm run tauri -- dev` launched `agent-workflow-builder.exe` and WebView2 |
 | Tauri package | `npm run tauri -- build` produced MSI and NSIS installers |
@@ -39,7 +40,10 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Revision loops | A node with a feedback edge acts as a reviewer: a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds; downstream nodes wait for the outcome |
 | Agent tools | File tools (`read_file`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for exact-snippet edits) confined to the open workspace, called with the provider's native tool calling (text-protocol fallback for models without it) |
 | Changes and undo | Every file a run's agents change is listed under **Changes (N)** in the run panel, with a side-by-side diff and revert per file or all (files created by the run are deleted) |
-| Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog, once or for the rest of the run; not sandboxed, no input, no provider keys, stopped at the agent's time limit or killed on Stop; helpers never get it |
+| Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog, once or for the rest of the run (in `harness run`: only commands passed exactly with `--allow-command`); not sandboxed, no input, no provider keys, stopped at the agent's time limit or killed on Stop; helpers never get it |
+| Headless runs | `harness run` runs a workflow without the app, with the same engine and the app's Rust commands (`harness-core`, built without Tauri); keys from the environment, `--json` events, CI exit codes ([docs/HEADLESS.md](docs/HEADLESS.md)) |
+| Run records and resume | Every run (the app with a workspace open, and `harness run`) is saved to `.harness/runs/<runId>/run.json`; `harness run --resume` reuses the agents that finished and did not change |
+| CI | `.github/workflows/ci.yml` on Linux; `examples/ci/harness-run.yml` is a template for running workflows in other repositories |
 | Long runs | Past 75% of a node's Token budget, older steps are summarized into a progress note; the workspace's `AGENTS.md` is given to agents with workspace tools |
 | Sub-agents | `subagent_dispatch` starts helper agents with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time; each helper is listed in the activity panel |
 | Hooks during runs | Only Hook-role nodes run their pre-hook; hooks on agent nodes run only manually from the Hooks tab |
@@ -50,7 +54,7 @@ Verified on 2026-09-24 (the Tauri dev app and Tauri package rows come from an ea
 | Context inspector | Useful preview plus partial run data; not a complete durable trace |
 | Artifact viewer | Mock placeholders; real persistence service exists but execution is not wired to it |
 | API key storage | localStorage/env development path; OS keychain not implemented |
-| CLI | Read-only v0 |
+| CLI | Read-only commands, plus `run` for headless runs |
 | MCP | Read/test v0 (8 tools), no writes, no workflow execution |
 | VS Code extension | Experimental scaffold; most commands do not work yet |
 
@@ -73,6 +77,14 @@ npm run harness -- project status
 npm run mcp
 ```
 
+Headless runs ([docs/HEADLESS.md](docs/HEADLESS.md)):
+
+```powershell
+npm run build:cli
+npm run build:core
+npm run harness -- run examples/purchasing-decision.harness.yaml --task "Pick a laptop" --provider ollama
+```
+
 ## Provider Setup
 
 - Ollama local: install Ollama, run `ollama pull qwen2.5-coder:7b`, use `http://localhost:11434`.
@@ -89,6 +101,7 @@ secret redaction.
 - [Quick Start](docs/QUICK_START.md)
 - [Installation](docs/INSTALLATION.md)
 - [Air-Gapped Deployment](docs/AIRGAPPED.md)
+- [Headless Runs (`harness run`)](docs/HEADLESS.md)
 - [MCP Usage](docs/MCP_USAGE.md)
 - [Security](docs/SECURITY.md)
 - [Project Status](docs/PROJECT_STATUS.md)
