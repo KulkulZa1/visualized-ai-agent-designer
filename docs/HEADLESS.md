@@ -206,6 +206,8 @@ Done in 23.5 s · run run-1790348292064
   everything after it.
 - A run id that is not saved in the workspace, or a record of another workflow,
   is an error (exit 2).
+- The provider settings are recorded, not compared. A finished agent is reused
+  even if you resume with another `--provider`, `--base-url` or `--model`.
 
 A run saved by the app can be resumed with `harness run` on the same workflow
 file: the record names agents by their place in the file.

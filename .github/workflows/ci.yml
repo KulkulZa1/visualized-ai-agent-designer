@@ -35,6 +35,8 @@ jobs:
       - run: npm ci
       - run: npx tsc --noEmit
       - run: npx vitest run
+      - name: Frontend production build
+        run: npx vite build
 
       - name: Rust tests (the app)
         run: cargo test --manifest-path src-tauri/Cargo.toml
