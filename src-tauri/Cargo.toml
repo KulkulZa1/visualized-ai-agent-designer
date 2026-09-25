@@ -16,6 +16,11 @@ name = "agent-workflow-builder"
 path = "src/main.rs"
 required-features = ["app"]
 
+[[bin]]
+name = "harness-core"
+path = "src/bin/harness-core.rs"
+required-features = ["core"]
+
 [features]
 default = ["app"]
 # The desktop app.
