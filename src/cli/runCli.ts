@@ -4,11 +4,13 @@
  * harness-core over its pipes. Bundled by `npm run build:cli` into
  * cli/dist/harness-run.mjs, which `node cli/harness.mjs run` loads.
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { runWorkflow, type RunHost, type RunOutcome } from "@/engine/runWorkflow";
+import { RUN_RECORD_VERSION, runRecordPath, writeRunRecord, type RunRecord } from "@/engine/runRecord";
 import { defToGraph } from "@/engine/workflowGraph";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import type { WorkflowDef } from "@/types/workflow";
@@ -47,11 +49,13 @@ export function corePath(flag: string | undefined, env: Record<string, string | 
   return fileURLToPath(new URL(`../../src-tauri/target/release/${exe}`, import.meta.url).href);
 }
 
-/** The workflow file, checked with the app's schema; or what is wrong with it. */
-function loadWorkflow(file: string): { def: WorkflowDef } | { error: string } {
+/** The workflow file and its text, checked with the app's schema; or what is wrong with it. */
+function loadWorkflow(file: string): { def: WorkflowDef; text: string } | { error: string } {
+  let text: string;
   let raw: unknown;
   try {
-    raw = parseYaml(readFileSync(file, "utf8"));
+    text = readFileSync(file, "utf8");
+    raw = parseYaml(text);
   } catch (e) {
     return { error: `cannot read ${file}: ${String(e)}` };
   }
@@ -60,7 +64,22 @@ function loadWorkflow(file: string): { def: WorkflowDef } | { error: string } {
     const issues = checked.error.issues.map((i) => `  ${i.path.join(".")}: ${i.message}`).join("\n");
     return { error: `${file} is not a valid workflow:\n${issues}` };
   }
-  return { def: checked.data as WorkflowDef };
+  return { def: checked.data as WorkflowDef, text };
+}
+
+/** The saved run to resume, from the workspace's .harness/runs; or what is wrong. */
+function loadRunRecord(workspacePath: string, runId: string): { record: RunRecord } | { error: string } {
+  if (!/^[\w.-]+$/.test(runId)) return { error: `${runId} is not a run id` };
+  const file = join(workspacePath, runRecordPath(runId));
+  if (!existsSync(file)) return { error: `no saved run ${runId} in ${join(workspacePath, ".harness", "runs")}` };
+  let record: RunRecord;
+  try {
+    record = JSON.parse(readFileSync(file, "utf8")) as RunRecord;
+  } catch (e) {
+    return { error: `cannot read ${file}: ${String(e)}` };
+  }
+  if (record.version !== RUN_RECORD_VERSION) return { error: `${file} has an unknown record version` };
+  return { record };
 }
 
 /** `harness run <workflow> …`; returns the exit code. */
@@ -82,16 +101,33 @@ export async function runHarness(argv: string[]): Promise<number> {
     err(`harness run: ${loaded.error}`);
     return EXIT.usage;
   }
+  const workspacePath = resolve(args.workspace ?? ".");
+  if (!existsSync(workspacePath)) {
+    err(`harness run: the workspace ${workspacePath} does not exist`);
+    return EXIT.usage;
+  }
+  let resume: RunRecord | undefined;
+  if (args.resume) {
+    const found = loadRunRecord(workspacePath, args.resume);
+    if ("error" in found) {
+      err(`harness run: ${found.error}`);
+      return EXIT.usage;
+    }
+    resume = found.record;
+    if (resume.workflow.name !== loaded.def.meta.name) {
+      err(`harness run: run ${args.resume} is of the workflow "${resume.workflow.name}", not "${loaded.def.meta.name}"`);
+      return EXIT.usage;
+    }
+  }
   let task: string;
   try {
-    task = args.task ?? readFileSync(args.taskFile ?? "", "utf8");
+    task = args.task ?? (args.taskFile !== undefined ? readFileSync(args.taskFile, "utf8") : resume?.task ?? "");
   } catch (e) {
     err(`harness run: cannot read the task file: ${String(e)}`);
     return EXIT.usage;
   }
-  const workspacePath = resolve(args.workspace ?? ".");
-  if (!existsSync(workspacePath)) {
-    err(`harness run: the workspace ${workspacePath} does not exist`);
+  if (resume && task !== resume.task) {
+    err("harness run: a resumed run keeps its saved task; leave out --task and --task-file");
     return EXIT.usage;
   }
   const graph = defToGraph(loaded.def);
@@ -122,6 +158,7 @@ export async function runHarness(argv: string[]): Promise<number> {
   process.on("SIGINT", stop.onInterrupt);
   const reporter = createReporter(graph, args.json, out, err);
   const allowed = new Set(args.allowCommands);
+  let saved = false;
   const host: RunHost = {
     invoke: core.invoke,
     events: reporter.events,
@@ -130,6 +167,10 @@ export async function runHarness(argv: string[]): Promise<number> {
     commandPolicy: "--allow-command",
     isCancelled: stop.interrupted,
     revealOutput: false,
+    saveRun: async (record) => {
+      await writeRunRecord(core.invoke, workspacePath, record);
+      saved = true;
+    },
   };
   const started = Date.now();
   try {
@@ -139,8 +180,17 @@ export async function runHarness(argv: string[]): Promise<number> {
       provider: providerSettings(args, process.env),
       workspacePath,
       continueOnError: args.continueOnError,
+      workflowFile: {
+        path: relative(workspacePath, resolve(args.workflow)).split("\\").join("/"),
+        hash: createHash("sha256").update(loaded.text).digest("hex"),
+      },
+      resume,
     }, host);
-    reporter.summary(outcome, Date.now() - started);
+    const trace = outcome.started && saved ? runRecordPath(outcome.run.id) : undefined;
+    reporter.summary(outcome, Date.now() - started, trace);
+    if (!args.json && trace && outcome.started && outcome.run.status !== "done") {
+      out(`Resume: harness run ${args.workflow} --resume ${outcome.run.id}`);
+    }
     if (core.stopped()) err("harness run: harness-core stopped during the run.");
     return exitCode(outcome, core.stopped());
   } finally {

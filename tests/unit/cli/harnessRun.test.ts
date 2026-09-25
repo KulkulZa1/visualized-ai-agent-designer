@@ -119,6 +119,38 @@ describe("harness run", () => {
     expect(invalid.requests).toEqual([]);
   });
 
+  const lastEvent = (stdout: string) => JSON.parse(stdout.trim().split("\n").at(-1)!) as Record<string, string>;
+  const callsOf = (agent: string, requests: Array<{ cmd: string; args: Record<string, unknown> }>) =>
+    requests.filter((r) => r.cmd === "call_ollama_api" && String(r.args.system).startsWith(`You are ${agent},`));
+
+  it("saves each run, and --resume reuses the agents that finished unchanged", () => {
+    const dir = workspace({ Coder: ["wrote the fix"], Reviewer: ["ERROR: model crashed"] });
+    const first = harnessRun(dir, ["--task", "Fix the bug", "--json"]);
+    expect(first.status).toBe(1);
+    const { runId, trace } = lastEvent(first.stdout);
+    expect(trace).toBe(`.harness/runs/${runId}/run.json`);
+
+    writeFileSync(join(dir, "scenario.json"), JSON.stringify({ replies: { Coder: ["another fix"], Reviewer: ["Looks good."] } }));
+    const second = harnessRun(dir, ["--resume", runId]);
+
+    expect(second.status, second.stderr).toBe(0);
+    expect(second.stdout).toContain("↩ Coder: reused from the saved run (unchanged)");
+    expect(callsOf("Coder", second.requests)).toHaveLength(callsOf("Coder", first.requests).length);
+    expect(callsOf("Reviewer", second.requests).at(-1)?.args.userMessage).toContain("[From: Coder]\nwrote the fix");
+    expect(JSON.parse(readFileSync(join(dir, trace), "utf8"))).toMatchObject({ runId, attempts: 2, status: "done" });
+  });
+
+  it("exits 2 when the run to resume is missing, of another workflow, or given another task", () => {
+    const dir = workspace({ Coder: ["x"], Reviewer: ["y"] });
+    expect(harnessRun(dir, ["--resume", "run-404"]).status).toBe(2);
+    const { runId } = lastEvent(harnessRun(dir, ["--task", "t", "--json"]).stdout);
+
+    expect(harnessRun(dir, ["--resume", runId, "--task", "another task"]).status).toBe(2);
+    const yaml = readFileSync(join(dir, "review.harness.yaml"), "utf8");
+    writeFileSync(join(dir, "review.harness.yaml"), yaml.replace("name: Code Review", "name: Other Workflow"));
+    expect(harnessRun(dir, ["--resume", runId]).status).toBe(2);
+  });
+
   it("exits 3 when harness-core is missing or the provider preflight fails", () => {
     const dir = workspace({}, { healthFails: true });
 

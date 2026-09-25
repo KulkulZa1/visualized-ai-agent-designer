@@ -62,7 +62,14 @@ declare module "node:os" {
 declare module "node:path" {
   export const delimiter: string;
   export function join(...paths: string[]): string;
+  export function relative(from: string, to: string): string;
   export function resolve(...paths: string[]): string;
+}
+
+declare module "node:crypto" {
+  export function createHash(algorithm: string): {
+    update(data: string): { digest(encoding: "hex"): string };
+  };
 }
 
 declare module "node:url" {

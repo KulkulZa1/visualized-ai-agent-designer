@@ -107,6 +107,30 @@ describe("createReporter", () => {
     expect(out.slice(-2)).toEqual(["Final output — Writer:", "  The report."]);
   });
 
+  it("shows reused agents once, and names the saved record", () => {
+    const { reporter, out } = capture(false);
+    reporter.events.onAudit(audit("Coder", "workflow_loaded", "↩ Coder: reused from the saved run (unchanged)"));
+    reporter.events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "done", output: "patched",
+      startedAt: 0, finishedAt: 5000 });
+    reporter.summary({ started: true, run: { ...run, changes: [] } }, 1000, ".harness/runs/run-1/run.json");
+
+    expect(out[0]).toBe("↩ Coder: reused from the saved run (unchanged)");
+    expect(out).not.toContain("✓ Coder done (5.0 s)");
+    expect(out).toContain("Saved: .harness/runs/run-1/run.json");
+  });
+
+  it("marks reused agents and the record in --json events", () => {
+    const { reporter, out } = capture(true);
+    reporter.events.onAudit(audit("Coder", "workflow_loaded", "↩ Coder: reused from the saved run (unchanged)"));
+    reporter.events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "done", output: "patched" });
+    reporter.summary({ started: true, run }, 1000, ".harness/runs/run-1/run.json");
+
+    const events = out.map((line) => JSON.parse(line));
+    expect(events[0]).toMatchObject({ type: "reused", nodeId: "Coder" });
+    expect(events[1]).toMatchObject({ type: "node_finished", nodeId: "Coder", reused: true });
+    expect(events[2]).toMatchObject({ type: "run_finished", trace: ".harness/runs/run-1/run.json" });
+  });
+
   it("emits one JSON event per line with --json, ending with the summary", () => {
     const { reporter, out } = capture(true);
 

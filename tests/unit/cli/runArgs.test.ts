@@ -31,6 +31,12 @@ describe("parseRunArgs", () => {
     });
   });
 
+  it("takes --resume, which makes the task optional", () => {
+    expect(ok(["wf.yaml", "--resume", "run-17"])).toEqual({
+      workflow: "wf.yaml", resume: "run-17", provider: "auto", continueOnError: false, json: false, allowCommands: [],
+    });
+  });
+
   it.each([
     [["--task", "t"], /one workflow file/],
     [["a.yaml", "b.yaml", "--task", "t"], /one workflow file/],

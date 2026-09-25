@@ -12,7 +12,8 @@ export type Write = (line: string) => void;
 
 export interface Reporter {
   events: RunEvents;
-  summary: (outcome: RunOutcome, elapsedMs: number) => void;
+  /** `trace`: the saved run record, relative to the workspace. */
+  summary: (outcome: RunOutcome, elapsedMs: number, trace?: string) => void;
 }
 
 const ENDED: ReadonlySet<AgentStatus> = new Set(["done", "error", "stopped", "skipped"]);
@@ -47,6 +48,8 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
     .map((e) => e.source));
   const finalNodes = graph.nodes.filter((n) => agentIds.has(n.id) && !hasNext.has(n.id));
   const agents: Record<string, AgentRun> = {};
+  // Agents a resume reused: their saved result is not news.
+  const reusedIds = new Set<string>();
 
   const events: RunEvents = {
     onRunStarted: (runId, workflowName) => {
@@ -68,8 +71,8 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
         const durationMs = agent.startedAt && agent.finishedAt ? agent.finishedAt - agent.startedAt : undefined;
         if (json) {
           emit({ type: "node_finished", nodeId, agent: agent.agentName, status: agent.status, output: agent.output,
-            error: agent.error, durationMs, revision: agent.revision });
-        } else {
+            error: agent.error, durationMs, revision: agent.revision, reused: reusedIds.has(nodeId) || undefined });
+        } else if (!reusedIds.has(nodeId)) {
           out(endLine(agent, durationMs));
         }
       }
@@ -77,10 +80,12 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
     onNodeStatus: () => {},
     onAudit: (entry) => {
       const details = entry.details ?? "";
-      const type = entry.action === "command_executed" ? "command"
+      const type = details.startsWith("↩") ? "reused"
+        : entry.action === "command_executed" ? "command"
         : details.startsWith("↺") ? "revision"
         : details.startsWith("↻") ? "compaction"
         : "audit";
+      if (type === "reused" && entry.agentId) reusedIds.add(entry.agentId);
       if (json) emit({ type, nodeId: entry.agentId, details, success: entry.success });
       else if (type === "command") out(`$ ${details}`);
       else if (type !== "audit") out(details);
@@ -89,7 +94,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
     onRunFinished: () => {},
   };
 
-  const summary = (outcome: RunOutcome, elapsedMs: number) => {
+  const summary = (outcome: RunOutcome, elapsedMs: number, trace?: string) => {
     if (!outcome.started) {
       if (json) emit({ type: "run_finished", status: "not_started", error: outcome.error });
       else err(`harness run: the run did not start: ${outcome.error}`);
@@ -108,6 +113,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
         agents: Object.fromEntries(graph.nodes.map((n) => [n.id, { agent: n.data.name, status: run.agents[n.id]?.status ?? "idle" }])),
         changes,
         outputs: Object.fromEntries(outputs.map((o) => [o.id, o.output])),
+        trace,
       });
       return;
     }
@@ -121,6 +127,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
       out("Changed files:");
       for (const c of changes) out(`  ${c.path}${c.created ? " (new)" : ""}  +${c.added} −${c.removed}`);
     }
+    if (trace) out(`Saved: ${trace}`);
     for (const o of outputs) {
       out("");
       out(`Final output — ${o.name}:`);

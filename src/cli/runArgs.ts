@@ -19,11 +19,14 @@ export interface RunArgs {
   core?: string;
   /** Exact command lines agents may run; every other command is denied. */
   allowCommands: string[];
+  /** A saved run to resume (its run id). */
+  resume?: string;
 }
 
 export const RUN_USAGE = `Usage: harness run <workflow.harness.yaml> --task "…" [options]
 
   --task "<text>"            What the run should do (or --task-file <path>)
+  --resume <runId>           Resume a saved run (.harness/runs/<runId>): finished, unchanged agents are reused
   --workspace <dir>          The folder the agents work in (default: the current folder)
   --provider <name>          auto, openai, anthropic, ollama, ollama-cloud or openai-compatible (default: auto)
   --base-url <url>           The Ollama or OpenAI-compatible endpoint
@@ -41,7 +44,7 @@ Exit codes: 0 done, 1 an agent failed, 2 bad usage or workflow, 3 could not star
 const PROVIDERS: readonly LlmProvider[] = ["auto", "openai", "anthropic", "ollama", "ollama-cloud", "openai-compatible"];
 const TAKES_VALUE = new Set([
   "--task", "--task-file", "--workspace", "--provider", "--base-url", "--model", "--max-parallel", "--core",
-  "--allow-command",
+  "--allow-command", "--resume",
 ]);
 
 export function parseRunArgs(argv: string[]): { args: RunArgs } | { error: string } {
@@ -62,6 +65,7 @@ export function parseRunArgs(argv: string[]): { args: RunArgs } | { error: strin
       case "--base-url": args.baseUrl = value; break;
       case "--model": args.model = value; break;
       case "--core": args.core = value; break;
+      case "--resume": args.resume = value; break;
       case "--provider":
         if (!PROVIDERS.includes(value as LlmProvider)) {
           return { error: `--provider must be one of: ${PROVIDERS.join(", ")}` };
@@ -82,7 +86,10 @@ export function parseRunArgs(argv: string[]): { args: RunArgs } | { error: strin
   }
   if (positionals.length !== 1) return { error: "Give exactly one workflow file." };
   args.workflow = positionals[0];
-  if ((args.task === undefined) === (args.taskFile === undefined)) {
+  if (args.task !== undefined && args.taskFile !== undefined) {
+    return { error: "Give the task with --task or --task-file (one of them)." };
+  }
+  if (args.task === undefined && args.taskFile === undefined && args.resume === undefined) {
     return { error: "Give the task with --task or --task-file (one of them)." };
   }
   if (args.task !== undefined && !args.task.trim()) return { error: "The task is empty." };
