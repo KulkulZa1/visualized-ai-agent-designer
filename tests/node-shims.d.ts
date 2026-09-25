@@ -1,4 +1,27 @@
+// Minimal Node typings: this project has no @types/node. Used by the Node-side
+// tests and by src/cli (harness run).
+
 declare module "node:child_process" {
+  export interface ChildProcess {
+    stdin: {
+      write(data: string): boolean;
+      end(): void;
+      on(event: "error", listener: (error: unknown) => void): void;
+    };
+    stdout: {
+      setEncoding(encoding: string): void;
+      on(event: "data", listener: (chunk: string) => void): void;
+    };
+    on(event: "error" | "close", listener: () => void): void;
+    kill(): boolean;
+  }
+
+  export function spawn(
+    command: string,
+    args?: string[],
+    options?: { stdio?: Array<"pipe" | "inherit" | "ignore"> },
+  ): ChildProcess;
+
   export interface SpawnSyncOptions {
     cwd?: string;
     encoding?: string;
@@ -42,9 +65,18 @@ declare module "node:path" {
   export function resolve(...paths: string[]): string;
 }
 
+declare module "node:url" {
+  export function fileURLToPath(url: string | URL): string;
+}
+
 declare const __dirname: string;
 declare const process: {
   execPath: string;
   env: Record<string, string | undefined>;
   platform: string;
+  stdout: { write(text: string): boolean };
+  stderr: { write(text: string): boolean };
+  on(event: "SIGINT", listener: () => void): void;
+  off(event: "SIGINT", listener: () => void): void;
+  exit(code?: number): never;
 };
