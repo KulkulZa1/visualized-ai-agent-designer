@@ -31,6 +31,12 @@ function getEdgeKind(edge: Edge): WorkflowEdgeKind {
   return isWorkflowEdgeKind(edge.type) ? edge.type : "dataflow";
 }
 
+/** React Flow also reports measuring and selecting nodes and edges, which change
+ *  nothing that is saved: only the other changes make the workflow unsaved. */
+function changesSavedState(changes: Array<NodeChange<AgentNode> | EdgeChange>): boolean {
+  return changes.some((change) => change.type !== "dimensions" && change.type !== "select");
+}
+
 const DEFAULT_META: WorkflowMeta = {
   name: "Untitled Workflow",
   version: "1.0.0",
@@ -92,13 +98,13 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
       onNodesChange: (changes) =>
         set((state) => {
           state.nodes = applyNodeChanges(changes, state.nodes) as AgentNode[];
-          state.isDirty = true;
+          if (changesSavedState(changes)) state.isDirty = true;
         }),
 
       onEdgesChange: (changes) =>
         set((state) => {
           state.edges = applyEdgeChanges(changes, state.edges);
-          state.isDirty = true;
+          if (changesSavedState(changes)) state.isDirty = true;
         }),
 
       onConnect: (connection) =>

@@ -173,6 +173,40 @@ describe("workflowStore", () => {
     });
   });
 
+  describe("the unsaved flag and canvas changes", () => {
+    const loadTwoNodes = () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("a", AgentRole.Worker, { x: 0, y: 0 }));
+      store.addNode(makeDefaultAgentNode("b", AgentRole.Critic, { x: 200, y: 0 }));
+      store.onConnect({ source: "a", target: "b", sourceHandle: null, targetHandle: null });
+      useWorkflowStore.getState().loadWorkflow(useWorkflowStore.getState().toWorkflowDef());
+    };
+
+    it("stays clean when React Flow measures or selects nodes and edges after a load", () => {
+      loadTwoNodes();
+      const { onNodesChange, onEdgesChange, edges } = useWorkflowStore.getState();
+
+      onNodesChange([{ type: "dimensions", id: "agent-0", dimensions: { width: 220, height: 90 } }]);
+      onNodesChange([{ type: "select", id: "agent-0", selected: true }]);
+      onEdgesChange([{ type: "select", id: edges[0].id, selected: true }]);
+
+      expect(useWorkflowStore.getState().isDirty).toBe(false);
+    });
+
+    it("marks the workflow unsaved when a node moves", () => {
+      loadTwoNodes();
+      useWorkflowStore.getState().onNodesChange([{ type: "position", id: "agent-0", position: { x: 40, y: 0 } }]);
+      expect(useWorkflowStore.getState().isDirty).toBe(true);
+    });
+
+    it("marks the workflow unsaved when an edge is removed", () => {
+      loadTwoNodes();
+      const edgeId = useWorkflowStore.getState().edges[0].id;
+      useWorkflowStore.getState().onEdgesChange([{ type: "remove", id: edgeId }]);
+      expect(useWorkflowStore.getState().isDirty).toBe(true);
+    });
+  });
+
   describe("undo history", () => {
     it("loadWorkflow starts a fresh history so undo cannot resurrect the previous workflow", () => {
       const store = useWorkflowStore.getState();
