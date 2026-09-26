@@ -72,6 +72,7 @@ pub fn atomic_write(target: &Path, content: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(feature = "app")]
 #[tauri::command]
 pub fn open_workspace_dialog(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
@@ -82,7 +83,7 @@ pub fn open_workspace_dialog(app: tauri::AppHandle) -> Option<String> {
 }
 
 // `async`: walking a large tree (node_modules, target) must not block the UI thread.
-#[tauri::command(async)]
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn list_workspace_files(workspace_path: String) -> AppResult<Vec<FileTreeEntry>> {
     let root = Path::new(&workspace_path);
     if !root.is_dir() {
@@ -133,13 +134,13 @@ fn read_dir_recursive(base: &Path, dir: &Path) -> AppResult<Vec<FileTreeEntry>> 
     Ok(entries)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn read_workspace_file(workspace_path: String, relative_path: String) -> AppResult<String> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
     Ok(std::fs::read_to_string(safe)?)
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn write_workspace_file(
     workspace_path: String,
     relative_path: String,
@@ -151,7 +152,7 @@ pub fn write_workspace_file(
 
 /// Delete one file inside the workspace (reverting a file an agent created).
 /// Folders are refused.
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn delete_workspace_file(workspace_path: String, relative_path: String) -> AppResult<()> {
     let safe = resolve_safe_path(&workspace_path, &relative_path)?;
     if !safe.is_file() {
@@ -197,6 +198,21 @@ mod tests {
             .output()
             .unwrap();
         assert!(linked.status.success());
+
+        let root = ws.path().to_str().unwrap();
+        assert!(matches!(resolve_safe_path(root, "link/new.txt"), Err(AppError::PathTraversal(_))));
+        assert!(matches!(
+            resolve_safe_path(root, "link/deep/nested/new.txt"),
+            Err(AppError::PathTraversal(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_safe_path_rejects_new_files_under_a_symlink_leading_outside() {
+        let ws = temp_workspace();
+        let outside = temp_workspace();
+        std::os::unix::fs::symlink(outside.path(), ws.path().join("link")).unwrap();
 
         let root = ws.path().to_str().unwrap();
         assert!(matches!(resolve_safe_path(root, "link/new.txt"), Err(AppError::PathTraversal(_))));

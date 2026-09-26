@@ -1,0 +1,73 @@
+# Every push to master and every pull request, on Linux: types, the TypeScript
+# tests (with harness run end to end against a fake harness-core), the Rust tests
+# with Tauri and without it, and harness run against the real harness-core.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # A cold Rust cache builds Tauri and then the crate without it. The steps have
+    # their own limits: a job that runs out of time loses its log.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Tauri's Linux build packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+      - name: Frontend production build
+        run: npx vite build
+
+      # Built, then run: a slow build and a stuck test ("has been running for over
+      # 60 seconds") show up as different steps.
+      - name: Build the Rust tests (the app)
+        timeout-minutes: 45
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
+
+      - name: Rust tests (the app)
+        timeout-minutes: 10
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build the Rust tests (harness-core, without Tauri)
+        timeout-minutes: 30
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core --no-run
+
+      - name: Rust tests (harness-core, without Tauri)
+        timeout-minutes: 10
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core
+
+      - name: harness run with the real harness-core
+        # No key for the chosen provider: the run must stop at the preflight (exit 3).
+        run: |
+          npm run build:cli
+          set +e
+          OPENAI_API_KEY= HARNESS_CORE=src-tauri/target/debug/harness-core \
+            node cli/harness.mjs run examples/purchasing-decision.harness.yaml \
+            --task "Pick a laptop" --provider openai --json > events.jsonl
+          code=$?
+          set -e
+          cat events.jsonl
+          test "$code" -eq 3
+          grep -q '"not_started"' events.jsonl

@@ -21,7 +21,7 @@
 | File snapshot repository (`fileSnapshotRepository.ts`) | ⚠️ | Imports `@/ipc/tauriCommands`. Needs to be wrapped behind a `FileService` interface before VS Code can substitute it with `vscode.workspace.fs`. |
 | Artifact service | ⚠️ | Same coupling — uses Tauri IPC for disk writes. |
 | Context builder | ✅ | Pure functions over node + upstream output. |
-| `useWorkflowExecution` hook | ❌ | Tightly coupled to Zustand stores and `invoke()` API calls. Needs extraction. |
+| `useWorkflowExecution` hook | ✅ | Extracted (2026-09-25): the run engine is `src/engine/runWorkflow.ts`, plain TypeScript that takes `invoke` and events from a host; the hook is the app's host, and `harness run` is another. |
 | UI components (`src/components/`) | ⚠️ | Most are pure React; the webview would render them. A handful import Tauri-specific helpers (`tauriCommands`, `mockTauri`). |
 | Rust `src-tauri/` | ❌ | Not reachable from VS Code. Functionality must be re-expressed as service interfaces. |
 
@@ -38,6 +38,7 @@
 4. Extract `AuditService`. Today audit writes go via Tauri command.
 5. Move `useWorkflowExecution` logic out of the React hook into a framework-
    agnostic engine module; the React hook should be a thin orchestrator.
+   Done 2026-09-25: `src/engine/runWorkflow.ts`.
 
 None of these require breaking the existing app. Each is a refactor where
 the Tauri implementation becomes the default adapter.

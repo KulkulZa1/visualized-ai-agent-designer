@@ -4,25 +4,48 @@ version = "0.1.0"
 description = "Visual AI Agent Workflow Builder"
 authors = []
 edition = "2021"
+# Two binaries: the desktop app (what `tauri dev` / `tauri build` run) and harness-core.
+default-run = "agent-workflow-builder"
 
 [lib]
 name = "tauri_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "agent-workflow-builder"
+path = "src/main.rs"
+required-features = ["app"]
+
+[[bin]]
+name = "harness-core"
+path = "src/bin/harness-core.rs"
+required-features = ["core"]
+
+[features]
+default = ["app"]
+# The desktop app.
+app = [
+  "dep:tauri", "dep:tauri-build",
+  "dep:tauri-plugin-opener", "dep:tauri-plugin-fs", "dep:tauri-plugin-dialog",
+  "dep:tauri-plugin-shell", "dep:tauri-plugin-store", "dep:tauri-plugin-log",
+]
+# harness-core: the app's commands over stdin/stdout without Tauri, for `harness run`.
+core = []
+
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
 # No "devtools" feature: it enables the inspector in release builds too. Debug
 # builds get DevTools regardless (lib.rs opens them under cfg(debug_assertions)).
-tauri = { version = "2" }
+tauri = { version = "2", optional = true, features = [] }
 log = "0.4"
-tauri-plugin-opener = "2"
-tauri-plugin-fs = "2"
-tauri-plugin-dialog = "2"
-tauri-plugin-shell = "2"
-tauri-plugin-store = "2"
-tauri-plugin-log = "2"
+tauri-plugin-opener = { version = "2", optional = true }
+tauri-plugin-fs = { version = "2", optional = true }
+tauri-plugin-dialog = { version = "2", optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-store = { version = "2", optional = true }
+tauri-plugin-log = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -31,6 +54,10 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 thiserror = "1"
 reqwest = { version = "0.12", features = ["json"] }
+
+# kill(2) for stopping an agent command's process group.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

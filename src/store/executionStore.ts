@@ -24,7 +24,8 @@ interface ExecutionState {
 }
 
 interface ExecutionActions {
-  startRun: (workflowName: string) => string;
+  /** Starts a run; the engine passes its run id. */
+  startRun: (workflowName: string, id?: string) => string;
   updateAgent: (agentId: string, partial: Partial<AgentRun>) => void;
   finishRun: (status: "done" | "error" | "cancelled") => void;
   recordFileChange: (path: string, before: string | null, after: string, agent: string) => void;
@@ -60,8 +61,7 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   ollamaModel: loadKey("harness_ollama_model") || DEFAULT_OLLAMA_MODEL,
   continueOnError: true,
 
-  startRun: (workflowName) => {
-    const id = `run-${Date.now()}`;
+  startRun: (workflowName, id = `run-${Date.now()}`) => {
     const run: WorkflowRun = {
       id,
       workflowName,

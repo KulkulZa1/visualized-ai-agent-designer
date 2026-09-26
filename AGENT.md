@@ -17,18 +17,23 @@ provider/model choices, CLI/MCP access, and safety boundaries.
 
 ## Current Verified Baseline
 
-Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
-`npm run tauri -- build` rows come from an earlier pass and were not re-run).
+Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
+`npm run tauri -- build` rows come from an earlier pass and were not re-run;
+`tauri build --debug --no-bundle` was re-run on 2026-09-25).
 
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 593 tests / 57 files |
-| `cargo test` | Passed, 86 tests |
+| `npx vitest run` | Passed, 669 tests / 65 files |
+| `cargo test` | Passed, 95 tests (the app build) |
+| `cargo test --no-default-features --features core` | Passed, 95 + 1 tests; no Tauri, WebView or GTK in the dependency tree |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
+| `npm run build:core`, `npm run build:cli` | Passed: `harness-core` (5.6 MB release binary) and `cli/dist/harness-run.mjs` |
 | `npm run tauri -- dev` | Launched `target\\debug\\agent-workflow-builder.exe` and WebView2 |
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
-| CLI | Read-only commands tested |
+| CLI | Read-only commands tested; `harness run` end to end against a fake `harness-core` |
+| `harness run` (live) | 2026-09-26: the real `harness-core` and a free keyless endpoint; an agent fixed a bug and ran an allowed `node --test`, and `--resume` reused it (see `docs/DEVELOPMENT_LOG.md`) |
+| App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. UI issues found are listed in `docs/DEPLOYMENT_READINESS.md` |
 | MCP | stdio server and read/test tools tested |
 
 ## Tech Stack
@@ -40,7 +45,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | Canvas | `@xyflow/react` |
 | State | Zustand + zundo |
 | Validation | Zod |
-| CLI | `cli/harness.mjs`, read-only |
+| CLI | `cli/harness.mjs`: read-only commands, and `run` for headless workflow runs |
 | MCP | `mcp/server.mjs`, stdio read/test v0 |
 
 ## What Works
@@ -58,10 +63,17 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 - Sub-agents: `subagent_dispatch` (`src/services/execution/subAgents.ts`) starts helpers with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time. Helpers are recorded on the node's run (`AgentRun.subAgents`) and listed in `AgentActivityPanel`.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
 - Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
-- CLI v0:
+- CLI:
   - `npm run harness -- project status`
   - `npm run harness -- provider list`
   - `npm run harness -- workflow validate <file>`
+  - `npm run harness -- run <workflow> --task "…"` (see below)
+- Headless runs (`docs/HEADLESS.md`): `harness run` runs a workflow without the app.
+  - It uses the same engine (`src/engine/runWorkflow.ts`) and `harness-core`: the app's Rust commands built without Tauri, over JSON lines on stdin/stdout.
+  - Keys come from the environment. Agent commands run only if passed exactly with `--allow-command`.
+  - Output is readable lines or `--json` events, with exit codes for CI.
+- Run records: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`. `harness run --resume <runId>` reuses the agents that finished and did not change.
+- CI: `.github/workflows/ci.yml` runs on Linux: types, the TypeScript and Rust tests (with and without Tauri), and `harness run` against the real `harness-core`. `examples/ci/harness-run.yml` is a template for other repositories.
 - MCP v0 tools:
   - `project_status`
   - `list_workflows`
@@ -78,7 +90,8 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 - Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (`src/services/execution/routing.ts`). Gateway routing prunes skipped branches.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).
-- Context snapshots are partial and not a complete durable provider request trace.
+- Context snapshots are partial and not a complete durable provider request trace. Run records (`.harness/runs/`) keep each agent's status, output and the audit, not the provider requests.
+- `harness run` shows each agent's reply when it is done (no streaming). `harness-core`'s Ctrl+C handling is tested on Linux in CI; on Windows it was checked once with a scripted console Ctrl+C, not by an automated test. There are no prebuilt `harness-core` binaries, and the app has no Resume button.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
@@ -93,9 +106,9 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 1. Do not create `AGEND.md`; use `AGENT.md`.
 2. Do not claim mock/partial features are production-ready.
 3. Do not commit secrets or print raw API key values.
-4. Keep CLI read-only and MCP limited to read/test tools unless a permission and audit system exists.
+4. The CLI's `project`, `workflow` and `provider` commands stay read-only, and MCP stays limited to read/test tools. `harness run` executes workflows: agent commands run only if the user passed that exact command with `--allow-command`, and every command is audited.
 5. Do not add hidden cloud calls or background provider checks.
-6. Do not add command execution without the user's approval of that exact command, once or as a run grant the user chose (agent `bash` goes through `commandConsentStore`; never auto-approve anything else).
+6. Do not add command execution without the user's approval of that exact command: once, as a run grant the user chose (agent `bash` goes through `commandConsentStore`), or up front with `harness run --allow-command`. Never auto-approve anything else.
 7. Use `resolve_safe_path()` for Rust file paths.
 8. Hook execution must stay explicit and consent-gated.
 9. Prefer small, reviewable fixes over rewrites.
@@ -105,12 +118,16 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 
 | File | Purpose |
 |---|---|
-| `src/hooks/useWorkflowExecution.ts` | Workflow runner (uses `runParallel`) |
+| `src/engine/runWorkflow.ts` | Workflow run engine (uses `runParallel`); no React, stores or Tauri |
+| `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`) and the resume rule |
+| `src/cli/runCli.ts` | `harness run` (bundled by `npm run build:cli`) |
+| `src-tauri/src/commands/core_server.rs` | `harness-core`: the run's Rust commands over stdin/stdout (`npm run build:core`) |
+| `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
 | `src/services/model-providers/providerAdapter.ts` | Provider call adapter |
 | `src/utils/providerConfig.ts` | Provider selection and Ollama URL/key helpers |
 | `src/services/wizard/goalTemplates.ts` | Rule-based goal templates |
 | `src/components/guide/GuidePanel.tsx` | Rule-based guide assistant |
-| `cli/harness.mjs` | Read-only CLI |
+| `cli/harness.mjs` | CLI: read-only commands, and `run` (headless runs: `src/cli/`, needs `npm run build:cli` and `npm run build:core`) |
 | `mcp/server.mjs` | MCP stdio server |
 | `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
 | `src-tauri/src/commands/process_commands.rs` | Hook execution and approved agent commands (`execute_command`) |
@@ -121,9 +138,8 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 ## Next Best Work
 
 1. Git-native runs: a worktree per run, a diff that includes command-made changes, commit/PR.
-2. Persist real per-run artifacts and context traces into `.harness/artifacts/`.
+2. Persist real per-run artifacts and full provider request traces (run records keep outputs and the audit only).
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
 4. Add installer smoke tests on a clean Windows user profile.
-5. Wire real GitHub Actions CI (tsc + vitest + cargo test on every push).
 
 

@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 /**
- * harness-cli v0 — read-only CLI for Harness Studio
+ * harness-cli — command line for Harness Studio
  *
  * Usage:
  *   node cli/harness.mjs project status                   [--workspace <path>]
  *   node cli/harness.mjs workflow validate <path>
  *   node cli/harness.mjs provider list                    [--json]
+ *   node cli/harness.mjs run <workflow> --task "…"        (see run --help)
  *
- * No Tauri runtime required. No API calls made.
- * Schemas are duplicated from src/schemas/ — see comments marked [KEEP-IN-SYNC].
+ * project, workflow and provider are read-only: no Tauri runtime, no API calls.
+ * Their schemas are duplicated from src/schemas/ — see comments marked [KEEP-IN-SYNC].
  *
- * Safe to run: read-only, no network, no secret output.
+ * run executes a workflow headless (docs/HEADLESS.md): model calls, workspace
+ * files, and only the agent commands passed with --allow-command. It loads
+ * cli/dist/harness-run.mjs (npm run build:cli) and needs harness-core (npm run build:core).
  */
 
 import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
@@ -408,6 +411,17 @@ function cmdProviderList() {
   console.log();
 }
 
+// harness run: the shared engine, bundled by `npm run build:cli` (src/cli/runCli.ts).
+async function cmdRun(runArgs) {
+  const bundle = new URL("./dist/harness-run.mjs", import.meta.url);
+  if (!existsSync(bundle)) {
+    process.stderr.write("harness run: build it first with npm run build:cli\n");
+    return 3;
+  }
+  const { runHarness } = await import(bundle.href);
+  return runHarness(runArgs);
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -420,7 +434,9 @@ for (let i = 0; i < args.length; i++) {
 }
 const [cmd, sub, arg] = positionals;
 
-if (cmd === "project" && sub === "status") {
+if (args[0] === "run") {
+  process.exitCode = await cmdRun(args.slice(1));
+} else if (cmd === "project" && sub === "status") {
   cmdProjectStatus();
 } else if (cmd === "workflow" && sub === "validate") {
   cmdWorkflowValidate(arg);
@@ -434,6 +450,7 @@ Commands:
   project status                      Summary of the current workspace
   workflow validate <path>            Validate a .harness.yaml file
   provider list                       Show the provider catalog
+  run <workflow> --task "…"           Run a workflow headless (run --help for options)
 
 Options:
   --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env)

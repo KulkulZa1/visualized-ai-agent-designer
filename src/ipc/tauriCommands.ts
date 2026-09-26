@@ -5,7 +5,7 @@ import type { WorkflowDef } from "@/types/workflow";
 import type { AuditEntry } from "@/types/audit";
 
 /** Unified invoke — uses VS Code bridge when running in a WebviewPanel, Tauri otherwise. */
-function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+export function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   return isVsCode() ? vsCodeInvoke<T>(command, args) : tauriInvoke<T>(command, args);
 }
 
