@@ -133,6 +133,58 @@ describe("runWorkflow", () => {
     expect(commands).not.toContain("call_ollama_api");
   });
 
+  describe("the local Ollama probe", () => {
+    const OLLAMA_DOWN = "Ollama is selected, but the local Ollama server is not reachable at " +
+      "http://localhost:11434. Please start Ollama and try again.";
+    /** Local Ollama is down; every other provider is healthy and answers "done". */
+    const probeHandlers = (probed: string[]): Record<string, Handler> => ({
+      check_provider_health: (args) => {
+        probed.push(String(args.provider));
+        return args.provider === "ollama"
+          ? { ok: false, provider: "ollama", latency_ms: 0, message: OLLAMA_DOWN, model_available: false, pull_command: null }
+          : { ok: true, provider: args.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null };
+      },
+      call_openai_api: () => "done",
+    });
+    const nodeOn = (model: string) => {
+      const node = makeNode("A");
+      node.data.model = model;
+      return node;
+    };
+    const provider = (settings: Partial<RunInput["provider"]>): Partial<RunInput> => ({
+      provider: { ...runInput([]).provider, ...settings },
+    });
+
+    it("is skipped for a run on a Custom endpoint, which never falls back to it", async () => {
+      const probed: string[] = [];
+      const { host } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("openai")], [], provider({
+        llmProvider: "openai-compatible", customApiUrl: "https://llm.example/v1", customApiModel: "openai",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect(probed).toEqual(["openai-compatible"]);
+    });
+
+    it("warns, without blocking the run, that OpenAI's billing fallback is down", async () => {
+      const probed: string[] = [];
+      const { host, log } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("gpt-4o-mini")], [], provider({
+        llmProvider: "openai", openaiApiKey: "sk-test",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect([...probed].sort()).toEqual(["ollama", "openai"]);
+      expect(log.audit.find((e) => e.details?.includes("ollama"))).toMatchObject({
+        details: "⚠ ollama — not available at http://localhost:11434, so a billing error from OpenAI " +
+          "cannot fall back to local Ollama",
+        success: true,
+      });
+    });
+  });
+
   /** Node A asks to run `npm test` with bash, then answers. */
   function commandRun(): { nodes: AgentNode[]; handlers: Record<string, Handler> } {
     let calls = 0;

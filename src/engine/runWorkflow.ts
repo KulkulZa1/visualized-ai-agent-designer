@@ -192,6 +192,8 @@ async function runHealthChecks(
   ollamaUrl: string, ollamaModel: string, ollamaKey: string,
   ollamaProvider: Extract<RuntimeProvider, "ollama" | "ollama-cloud">,
   customUrl: string, customKey: string, customModel: string,
+  /** The providers local Ollama is probed for as the billing fallback only (not used by the run). */
+  ollamaFallbackFor: string[],
   addEntry: (entry: AuditEntry) => void,
 ): Promise<ProviderHealth[]> {
   const checks: Promise<ProviderHealth>[] = [];
@@ -224,10 +226,16 @@ async function runHealthChecks(
   }
   const results = await Promise.all(checks);
   for (const h of results) {
+    // A fallback that is down is a warning: the run does not need it.
+    const fallbackDown = !h.ok && h.provider === ollamaProvider && ollamaFallbackFor.length > 0;
     addEntry({
       id: `health-${h.provider}-${Date.now()}`, timestamp: new Date().toISOString(),
       action: "workflow_loaded", agentId: "system",
-      details: `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`, success: h.ok,
+      details: fallbackDown
+        ? `⚠ ${h.provider} — not available at ${ollamaUrl}, so a billing error from ` +
+          `${ollamaFallbackFor.join(" or ")} cannot fall back to local Ollama`
+        : `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`,
+      success: h.ok || fallbackDown,
     });
   }
   return results;
@@ -298,9 +306,14 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     requiredProviders.add(sel.provider === "ollama" ? ollamaProviderType : sel.provider);
   }
 
-  // Health checks — never contact a hosted provider this run will not use.
-  // Local Ollama is always probed because it is the billing fallback.
-  const probeOllama = requiredProviders.has(ollamaProviderType) || !isRemoteOllamaUrl(effectiveOllamaUrl);
+  // Health checks — never contact a hosted provider this run will not use. Local
+  // Ollama is probed when the run uses it, or as the billing fallback of OpenAI and
+  // Anthropic (a Custom endpoint never falls back).
+  const usesOllama = requiredProviders.has(ollamaProviderType);
+  const fallbackFor = (["openai", "anthropic"] as const)
+    .filter((p) => requiredProviders.has(p))
+    .map((p) => (p === "openai" ? "OpenAI" : "Anthropic"));
+  const probeOllama = usesOllama || (fallbackFor.length > 0 && !isRemoteOllamaUrl(effectiveOllamaUrl));
   const healthResults = await runHealthChecks(
     invoke,
     requiredProviders.has("openai") ? openaiApiKey : "",
@@ -308,7 +321,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     probeOllama ? effectiveOllamaUrl : "", effectiveOllamaModel,
     ollamaApiKey, ollamaProviderType,
     requiredProviders.has("openai-compatible") ? customApiUrl : "",
-    customApiKey, customApiModel, addEntry,
+    customApiKey, customApiModel, usesOllama ? [] : fallbackFor, addEntry,
   );
   const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
   const ollamaHealth = healthMap.get(ollamaProviderType);
