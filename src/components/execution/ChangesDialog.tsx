@@ -123,6 +123,7 @@ export function ChangesDialog({ onClose }: { onClose: () => void }) {
               <React.Suspense fallback={<div style={{ padding: 16, fontSize: 12, color: "var(--hint)" }}>Loading diff…</div>}>
                 <DiffEditor
                   height="100%"
+                  theme="vs-dark"
                   language={languageOf(shown.path)}
                   original={shown.before ?? ""}
                   modified={shown.after}
