@@ -24,7 +24,7 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 669 tests / 65 files |
+| `npx vitest run` | Passed, 706 tests / 69 files |
 | `cargo test` | Passed, 95 tests (the app build) |
 | `cargo test --no-default-features --features core` | Passed, 95 + 1 tests; no Tauri, WebView or GTK in the dependency tree |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
@@ -33,7 +33,7 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
 | CLI | Read-only commands tested; `harness run` end to end against a fake `harness-core` |
 | `harness run` (live) | 2026-09-26: the real `harness-core` and a free keyless endpoint; an agent fixed a bug and ran an allowed `node --test`, and `--resume` reused it (see `docs/DEVELOPMENT_LOG.md`) |
-| App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. UI issues found are listed in `docs/DEPLOYMENT_READINESS.md` |
+| App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. The UI issues it found are fixed and were re-checked the same way (see `docs/DEVELOPMENT_LOG.md`) |
 | MCP | stdio server and read/test tools tested |
 
 ## Tech Stack

@@ -68,6 +68,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Generate** — generated CLAUDE.md names `<slug>.harness.yaml` (same as Save) and no longer claims every hook is consented and logged; the Generate panel asks before overwriting an existing file with different content.
 - **Repository** — root `CLAUDE.md` is a short pointer to `AGENT.md` (the generated 12-agent harness moved to `examples/harness-studio-project.CLAUDE.md`); `src-tauri/target-codex-verify*` and `.claude/settings.local.json` untracked; `outputs/` ignored; the empty-state screenshot moved to `docs/assets/empty-state.png`; `.gitattributes` added (LF).
 
+### Fixed (UI, from the Windows QA)
+- **Top bar in a narrow window**: with a workflow open it needed ~1,230 px, but the window may be 1,024 px wide, and then Save and Run were cut off.
+  - Below 1,440 px, Create from Goal, Examples, Generate and Permissions show icons only.
+  - The workspace and file names shorten with "…", and Save and Run never shrink.
+  - The static "Phase 5 · Execution Engine" badge left the top bar, and the Ctrl+K palette has "Run workflow".
+- **"Unsaved" when nothing changed**: opening a workflow, selecting a node and running no longer mark the workflow unsaved.
+- **Stale run results**: opening another workflow no longer shows the last run's output on the new workflow's nodes (they share ids like `agent-0`).
+- **Audit strip**: entries are named by what happened (agent started, tool call, provider check, revision, …) instead of "file read" and "hook executed" for everything.
+  - The tool, consent and warn chips now match entries.
+  - Non-fatal problems (fallbacks, a revision limit) are warnings (⚠), not errors.
+  - `harness run --json` events carry `warning: true` for them.
+- **Local Ollama probe**: a Custom-endpoint run no longer probes local Ollama, which it never falls back to. When only the OpenAI/Anthropic billing fallback is down, the warning says so instead of "Ollama is selected".
+- **Windows**: shortcut hints say Ctrl+K and Ctrl+S; ⌘ is shown only on macOS.
+- **Editors**: the Changes diff and the file editor use Monaco's dark theme.
+- **File tree**: the search box filters the tree, a Refresh button replaces the dead gear, and the tree refreshes after each run.
+- **Page title**: "Harness Studio".
+
 ### Fixed
 - **Stopped nodes** — a node still working when you press Stop now shows as stopped (grey ■, also on the canvas node, in the run panel and in the timeline; saved to the workflow file as idle) instead of "Skipped by gateway" with a red "Stopped by user" error.
 - **Tool names with leaked template tokens** — gpt-oss behind some servers returns names like `read_file<|channel|>commentary`; they are now cleaned instead of refused as unknown tools.
