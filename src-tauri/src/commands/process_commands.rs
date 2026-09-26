@@ -186,12 +186,13 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // Agent commands start in their own process group (shell_command).
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Agent commands start in their own process group (shell_command): signal the
+        // group itself. Running `kill -KILL -<pgid>` instead is ambiguous: a kill binary
+        // may read "-<pgid>" as an option and signal pid -1, every process of the user.
+        // SAFETY: kill(2) only sends a signal; a negative pid names a process group.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
     }
 }
 
@@ -643,6 +644,24 @@ mod tests {
 
         assert_ne!(output.exit_code, 0);
         assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    /// Stopping a command must signal only its own process group. `kill -KILL -<pgid>`
+    /// can be read by a kill binary as option `-1…` and signal pid -1: every process
+    /// of the user. On the first Linux CI runs that ended the runner itself.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_command_leaves_other_processes_running() {
+        let mut neighbour = Command::new("sleep").arg("30").spawn().unwrap();
+        let dir = tempdir().unwrap();
+
+        let result = run_in(dir.path(), "sleep 8", 1);
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
+        let still_running = neighbour.try_wait().unwrap().is_none();
+        let _ = neighbour.kill();
+        let _ = neighbour.wait();
+        assert!(still_running, "a process outside the command's group was killed");
     }
 
     #[test]
