@@ -14,21 +14,20 @@ import {
 } from "@/utils/auditFilters";
 
 const KIND_COLOR: Record<string, string> = {
-  run:             "var(--accent)",
-  tokens:          "var(--muted)",
-  edge:            "var(--blue)",
-  tool:            "var(--green)",
-  fanout:          "var(--purple)",
-  consent:         "var(--orange)",
-  done:            "var(--blue)",
-  warn:            "var(--accent)",
-  error:           "var(--red)",
-  file_write:      "var(--green)",
-  hook_executed:   "var(--orange)",
-  command_executed: "var(--orange)",
-  workflow_saved:  "var(--accent)",
-  workflow_loaded: "var(--blue)",
-  file_read:       "var(--muted)",
+  file_write:        "var(--green)",
+  hook_executed:     "var(--orange)",
+  command_executed:  "var(--orange)",
+  workflow_saved:    "var(--accent)",
+  workflow_loaded:   "var(--blue)",
+  file_read:         "var(--muted)",
+  provider_check:    "var(--blue)",
+  provider_fallback: "var(--accent)",
+  agent_started:     "var(--accent)",
+  agent_finished:    "var(--blue)",
+  agent_failed:      "var(--red)",
+  tool_call:         "var(--green)",
+  subagent:          "var(--purple)",
+  revision:          "var(--purple)",
 };
 
 export function AuditStrip() {
@@ -222,8 +221,8 @@ export function AuditStrip() {
           )}
           {visible.map((entry, index) => {
             const severity = !entry.success ? "error"
-              : entry.action.includes("warn") ? "warn"
-              : entry.action.includes("hook") ? "hook"
+              : entry.warning ? "warn"
+              : entry.action === "hook_executed" ? "hook"
               : "info";
             const borderColor = severity === "error" ? "var(--red)"
               : severity === "warn" ? "var(--accent)"
@@ -243,7 +242,7 @@ export function AuditStrip() {
                   {entry.timestamp.split("T")[1]?.split(".")[0] ?? entry.timestamp}
                 </span>
                 <span style={{
-                  color: KIND_COLOR[entry.action] ?? "var(--muted)",
+                  color: entry.warning ? "var(--accent)" : KIND_COLOR[entry.action] ?? "var(--muted)",
                   minWidth: 56,
                   flexShrink: 0,
                   textTransform: "uppercase",
@@ -251,7 +250,7 @@ export function AuditStrip() {
                   letterSpacing: "0.04em",
                   paddingTop: 1,
                 }}>
-                  {entry.action.replace(/_/g, " ")}
+                  {entry.warning && "⚠ "}{entry.action.replace(/_/g, " ")}
                 </span>
                 {entry.path && (
                   <span style={{

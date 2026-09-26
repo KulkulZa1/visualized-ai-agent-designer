@@ -213,6 +213,37 @@ describe("runWorkflow", () => {
     expect(outcome.run.agents.A.status).toBe("done");
   });
 
+  it("names a run's audit entries by what happened", async () => {
+    const { nodes, handlers } = commandRun();
+    const { host, log } = fakeHost(handlers, { askCommand: async () => "granted" });
+
+    await runWorkflow(runInput(nodes), host);
+
+    const entries = log.audit.filter((e) => e.agentId === "A");
+    expect(entries.map((e) => e.action)).toEqual(
+      ["agent_started", "tool_call", "command_executed", "provider_fallback", "agent_finished"]);
+    // The model refused native tool calls (noted once the loop ends): a warning, not a failure.
+    expect(entries[3]).toMatchObject({ success: true, warning: true });
+  });
+
+  it("records a billing fallback to local Ollama as a warning", async () => {
+    const { host, log } = fakeHost({
+      call_openai_api: () => { throw new Error("insufficient_quota: you exceeded your current quota"); },
+    });
+    const node = makeNode("A");
+    node.data.model = "gpt-4o-mini";
+
+    const outcome = await runWorkflow(runInput([node], [], {
+      provider: { ...runInput([]).provider, llmProvider: "openai", openaiApiKey: "sk-test" },
+    }), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(outcome.run.agents.A.status).toBe("done");
+    expect(log.audit.find((e) => e.action === "provider_fallback")).toMatchObject({
+      details: "Billing error — fell back to Ollama (qwen2.5-coder:7b)", success: true, warning: true,
+    });
+  });
+
   it("does not run a shell command the host denies", async () => {
     const { nodes, handlers } = commandRun();
     const { host, commands, log } = fakeHost(handlers, { askCommand: async () => "deny" });

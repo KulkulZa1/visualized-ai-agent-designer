@@ -335,7 +335,9 @@ describe("useWorkflowExecution", () => {
 
       expect([calls.W.length, calls.R.length, calls.D.length]).toEqual([1 + MAX_REVISION_ROUNDS, 1 + MAX_REVISION_ROUNDS, 1]);
       expect(finished?.status).toBe("done");
-      expect(useAuditStore.getState().entries.some((e) => /revision limit/.test(e.details ?? ""))).toBe(true);
+      // The run goes on with the latest version: a warning, not a failure.
+      expect(useAuditStore.getState().entries.find((e) => /revision limit/.test(e.details ?? "")))
+        .toMatchObject({ action: "revision", success: true, warning: true });
     });
 
     it("re-runs every node between the target and a gateway that routes back, then follows its final route", async () => {

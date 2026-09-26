@@ -80,13 +80,15 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
     onNodeStatus: () => {},
     onAudit: (entry) => {
       const details = entry.details ?? "";
-      const type = details.startsWith("↩") ? "reused"
+      const type = entry.action === "agent_reused" ? "reused"
         : entry.action === "command_executed" ? "command"
-        : details.startsWith("↺") ? "revision"
-        : details.startsWith("↻") ? "compaction"
+        : entry.action === "revision" ? "revision"
+        : entry.action === "compaction" ? "compaction"
         : "audit";
       if (type === "reused" && entry.agentId) reusedIds.add(entry.agentId);
-      if (json) emit({ type, nodeId: entry.agentId, details, success: entry.success });
+      if (json) {
+        emit({ type, nodeId: entry.agentId, details, success: entry.success, ...(entry.warning ? { warning: true } : {}) });
+      }
       else if (type === "command") out(`$ ${details}`);
       else if (type !== "audit") out(details);
     },

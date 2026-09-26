@@ -35,20 +35,22 @@ export function deriveAgentFilterChips(
 }
 
 function isErrorEntry(entry: AuditEntry): boolean {
-  return !entry.success || entry.action.includes("error");
+  return !entry.success;
 }
 
-function isWarningEntry(entry: AuditEntry): boolean {
-  return entry.action.includes("warn");
+/** Agent commands all need the user's approval; hooks can wait for their consent. */
+function isConsentEntry(entry: AuditEntry): boolean {
+  return entry.action === "command_executed" ||
+    (entry.action === "hook_executed" && /consent/i.test(entry.details ?? ""));
 }
 
 function matchesKind(entry: AuditEntry, kind: AuditFilterKind): boolean {
   if (kind === "all") return true;
   if (kind === "error") return isErrorEntry(entry);
   if (isErrorEntry(entry)) return true;
-  if (kind === "warn") return isWarningEntry(entry);
-  if (kind === "tool") return entry.action.includes("tool");
-  return entry.action.includes(kind);
+  if (kind === "warn") return entry.warning === true;
+  if (kind === "tool") return entry.action === "tool_call" || entry.action === "command_executed";
+  return isConsentEntry(entry);
 }
 
 export function filterAuditEntries(

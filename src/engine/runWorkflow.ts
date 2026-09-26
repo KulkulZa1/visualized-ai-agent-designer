@@ -230,12 +230,12 @@ async function runHealthChecks(
     const fallbackDown = !h.ok && h.provider === ollamaProvider && ollamaFallbackFor.length > 0;
     addEntry({
       id: `health-${h.provider}-${Date.now()}`, timestamp: new Date().toISOString(),
-      action: "workflow_loaded", agentId: "system",
+      action: "provider_check", agentId: "system",
       details: fallbackDown
         ? `⚠ ${h.provider} — not available at ${ollamaUrl}, so a billing error from ` +
           `${ollamaFallbackFor.join(" or ")} cannot fall back to local Ollama`
         : `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`,
-      success: h.ok || fallbackDown,
+      success: h.ok || fallbackDown, warning: fallbackDown,
     });
   }
   return results;
@@ -434,7 +434,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     const i = nodes.findIndex((n) => n.id === nodeId);
     const saved = input.resume?.nodes[savedNodeId(i)];
     if (!saved) return;
-    addEntry({ id: `${nodeId}-reused-${Date.now()}`, timestamp: new Date().toISOString(), action: "workflow_loaded",
+    addEntry({ id: `${nodeId}-reused-${Date.now()}`, timestamp: new Date().toISOString(), action: "agent_reused",
       agentId: nodeId, success: true, details: `↩ ${nodes[i].data.name}: reused from the saved run (unchanged)` });
     updateAgent(nodeId, {
       agentId: nodeId, agentName: nodes[i].data.name, status: "done", output: saved.output,
@@ -486,7 +486,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     saving = saving.then(() => saveRun(record)).catch((e) => {
       if (saveFailed) return;
       saveFailed = true;
-      addEntry({ id: `run-record-${Date.now()}`, timestamp: new Date().toISOString(), action: "workflow_loaded",
+      addEntry({ id: `run-record-${Date.now()}`, timestamp: new Date().toISOString(), action: "run_record",
         agentId: "system", success: false, details: `Could not save the run record: ${String(e)}` });
     });
     return saving;
@@ -525,7 +525,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       });
       updateNodeData(nodeId, { status: "done" });
       addEntry({ id: `${nodeId}-mem-${Date.now()}`, timestamp: new Date().toISOString(),
-        action: "workflow_loaded", agentId: nodeId,
+        action: "memory_write", agentId: nodeId,
         details: `Memory wrote: ${data.memoryWrite.join(", ")}`, success: true });
       return;
     }
@@ -628,7 +628,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     updateNodeData(nodeId, { status: "running" });
     addEntry({
       id: `${nodeId}-start-${Date.now()}`, timestamp: new Date().toISOString(),
-      action: "hook_executed", agentId: nodeId,
+      action: "agent_started", agentId: nodeId,
       details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
     });
 
@@ -709,8 +709,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           const callResult = await callProvider({ ...providerParams, systemMsg: system, userMsg }, invoke);
           if (callResult.usedOllamaFallback) {
             addEntry({ id: `${nodeId}-fb-${Date.now()}`, timestamp: new Date().toISOString(),
-              action: "hook_executed", agentId: nodeId,
-              details: `Billing error — fell back to Ollama (${effectiveOllamaModel})`, success: false });
+              action: "provider_fallback", agentId: nodeId, warning: true,
+              details: `Billing error — fell back to Ollama (${effectiveOllamaModel})`, success: true });
           }
           return callResult.text;
         },
@@ -718,7 +718,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       const logToolCall = (who: string) => (call: ToolCall) => {
         toolCallCount++;
         addEntry({ id: `${nodeId}-tool-${toolCallCount}-${Date.now()}`, timestamp: new Date().toISOString(),
-          action: "file_read", agentId: nodeId,
+          action: "tool_call", agentId: nodeId,
           details: `${who}Tool: ${call.name}(${JSON.stringify(call.args)})`, success: true });
       };
 
@@ -789,7 +789,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         onEvent: (details, success) => {
           eventCount++;
           addEntry({ id: `${nodeId}-sub-${eventCount}-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId, details, success });
+            action: "subagent", agentId: nodeId, details, success });
         },
         // The activity panel shows the helpers from the node's run record.
         onUpdate: (record) => {
@@ -819,13 +819,13 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           summarize: (text) => shared.callText(SUMMARY_INSTRUCTIONS, text),
           onCompacted: (steps, before, after) => addEntry({
             id: `${nodeId}-compact-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId, success: true,
+            action: "compaction", agentId: nodeId, success: true,
             details: `↻ ${data.name}: compacted ${steps} earlier step${steps === 1 ? "" : "s"} ` +
               `(~${before.toLocaleString()} → ~${after.toLocaleString()} tokens)`,
           }),
           onFailed: (e) => addEntry({
             id: `${nodeId}-compact-fail-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId, success: false,
+            action: "compaction", agentId: nodeId, success: true, warning: true,
             details: `↻ ${data.name}: could not compact the conversation: ${String(e)}`,
           }),
         } : undefined,
@@ -834,7 +834,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       if (loop.nativeRefused) {
         noNativeTools.add(nativeKey);
         addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
-          action: "workflow_loaded", agentId: nodeId,
+          action: "provider_fallback", agentId: nodeId, warning: true,
           details: `${model} via ${runtimeProvider} refused native tool calls — using the text tool protocol`,
           success: true });
       }
@@ -850,7 +850,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         if (route) {
           gatewayRoutes.set(nodeId, route);
           addEntry({ id: `${nodeId}-route-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId,
+            action: "gateway_route", agentId: nodeId,
             details: `Gateway routed → "${route}"`, success: true });
         }
       }
@@ -875,7 +875,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       updateNodeData(nodeId, { status: "done", tokens: { used: tokenEstimate, budget: data.tokens.budget } });
       addEntry({
         id: `${nodeId}-done-${Date.now()}`, timestamp: new Date().toISOString(),
-        action: "hook_executed", agentId: nodeId,
+        action: "agent_finished", agentId: nodeId,
         details: `✓ ${data.name} — ${tokenEstimate} est. tokens${toolCallCount > 0 ? ` (${toolCallCount} tool calls)` : ""}`,
         success: true,
       });
@@ -892,7 +892,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
       updateNodeData(nodeId, { status: "error" });
       addEntry({ id: `${nodeId}-err-${Date.now()}`, timestamp: new Date().toISOString(),
-        action: "hook_executed", agentId: nodeId, details: String(e), success: false });
+        action: "agent_failed", agentId: nodeId, details: String(e), success: false });
 
       host.snapshot?.({ runId, nodeId, status: "failed", output: "", error: String(e) });
 
@@ -914,13 +914,13 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       if (targets.length === 0) return;
       if (round > MAX_REVISION_ROUNDS) {
         addEntry({ id: `${nodeId}-revision-limit-${Date.now()}`, timestamp: new Date().toISOString(),
-          action: "workflow_loaded", agentId: nodeId, success: false,
+          action: "revision", agentId: nodeId, success: true, warning: true,
           details: `↺ ${name}: revision limit (${MAX_REVISION_ROUNDS}) reached — continuing with the latest version` });
         return;
       }
       const targetNames = targets.map((t) => nodes.find((n) => n.id === t)?.data.name ?? t).join(", ");
       addEntry({ id: `${nodeId}-revision-${round}-${Date.now()}`, timestamp: new Date().toISOString(),
-        action: "workflow_loaded", agentId: nodeId, success: true,
+        action: "revision", agentId: nodeId, success: true,
         details: `↺ ${name} asked for revision ${round}/${MAX_REVISION_ROUNDS}: re-running ${targetNames}` });
       for (const target of targets) {
         // Plus what the reviewer read that the target doesn't see itself, e.g. the
@@ -967,7 +967,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
           updateNodeData(nodeId, { status: "idle" });
           addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId, details: "skipped by gateway routing", success: true });
+            action: "agent_skipped", agentId: nodeId, details: "skipped by gateway routing", success: true });
         },
         gatewayRoutes,
       },
