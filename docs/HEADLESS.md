@@ -251,3 +251,9 @@ master and every pull request, on Linux:
 - **An agent times out on a slow endpoint**: free and shared endpoints can take
   30 seconds or more per call and may answer 429 when busy. Raise the agents'
   timeouts in the workflow, or use `--max-parallel 1`.
+- **Garbled text in Windows PowerShell** (`??` instead of `▶` and `✓`, broken
+  non-English text): `harness run` writes UTF-8, but Windows PowerShell reads a
+  program's output with the console's code page, and its `>` saves files as
+  UTF-16. To save it, redirect from cmd.exe:
+  `cmd /c "node cli\harness.mjs run … --json > events.jsonl"`. To read it into
+  PowerShell, first run `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`.

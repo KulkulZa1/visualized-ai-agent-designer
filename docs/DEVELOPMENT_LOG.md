@@ -1,5 +1,47 @@
 ﻿# Development Log
 
+## 2026-09-26 - Visual QA on Windows (the app, with a free model)
+
+- **Setup:**
+  - No local Ollama and no keys, so the model was the free keyless endpoint (`https://text.pollinations.ai/openai`, model `openai`) as a Custom endpoint.
+  - The Tauri window was not driven. The app's own UI ran in a browser, 1,062 to 1,240 px wide, through a scratch Vite plugin that sent every `invoke` to the real `harness-core`.
+  - `harness-core` has no folder dialog, workflow load and save, or model list, so those were stood in for. It does not stream, so live streaming was not covered.
+  - A synthetic scratch workspace: `sum.mjs` returns `a - b`.
+- **App run** ("Fix the sum bug", Coder → Reviewer):
+  - Open the workspace, Settings → Custom endpoint, Test connection (0.7 s), load the file, then Run with "Make the tests pass.".
+  - The Coder read both files, fixed the line with `edit_file`, and asked to run `node --test`. The dialog showed the exact command and "cmd.exe on Windows". Approved once: exit 0 in 398 ms.
+  - The Reviewer answered in 17.7 s, and the run was done in 53.7 s.
+  - The canvas statuses, the run panel (time, tokens, timeline), the output panel, the audit strip and the Changes dialog's diff all showed the run. Revert was not tried.
+  - `.harness/runs/<id>/run.json` was saved: `done`, the change, and the provider settings without a key.
+- **Stop:** a one-agent workflow ran an approved `ping -n 30 127.0.0.1`.
+  - Cancel run stopped it at once. `cancel_command` killed `cmd.exe` and `ping.exe`, and `execute_command` returned.
+  - The node showed "stopped", and the record was saved as `cancelled`.
+- **Resume an app-saved run:** `harness run --resume` on the app's record reused both agents (the app and the CLI hash the definitions alike) and exited 0 with `attempts: 2`.
+- **`harness run` output on Windows:**
+  - Redirected from cmd.exe, it is UTF-8: ▶ ✓ · — and an emoji came through intact.
+  - Windows PowerShell 5.1 in a default console (code page 949) turns them into `??` when it captures the output, and `--json > events.jsonl` writes UTF-16. This is now in `docs/HEADLESS.md` (Troubleshooting).
+  - Consolas lacks ▶ ✓ ✗ ↺ ↻ ↩, and Cascadia Mono lacks ↺ ↻ ↩ ✗. Windows Terminal, the default here, falls back to other fonts. Output shown directly in a console (Windows Terminal or the legacy console) was not checked.
+- **Fixed:**
+  - `harness run` printed "(1 agents)".
+  - `tests/unit/cli/harnessRun.test.ts` failed once in a full run; its message was not captured.
+    - The likely cause: vitest 4 fails a synchronous test that runs past the 5 s default, and the test that runs the CLI four times took 3.9 s under load.
+    - The file now has a 60 s timeout.
+    - Separately, running the file several times at once fails with "build it first": each copy's build empties `cli/dist`.
+- **Found, not fixed** (all also on master):
+  - With a workflow open, the top bar needs about 1,230 px, but the window may be 1,024 px wide (`minWidth`). Below that, Save and Run are cut off, and nothing else runs a workflow. For example, a 1,366 px screen at 125 % scaling gives a 1,093 px window.
+  - A workflow shows "● unsaved" as soon as it is opened. `onNodesChange` marks the graph dirty for every React Flow change, including measuring the nodes.
+  - After another workflow is opened, the node inspector shows the previous run's output, status and run id for the node with the same id (`agent-0`).
+  - Audit labels are wrong for some entries:
+    - tool calls (`bash`, `edit_file`) show as "file read";
+    - an agent's start and end show as "hook executed";
+    - provider checks show as "workflow loaded".
+  - A run on the Custom endpoint still probes local Ollama as the billing fallback, which applies only to OpenAI and Anthropic calls. That adds about 2 s and a warning that reads "Ollama is selected".
+  - Shortcut hints use the Mac ⌘ on Windows (`⌘K`, `⌘S`, …).
+  - The Changes diff uses Monaco's light theme in the dark app.
+  - The file tree's search box and the cog next to the workspace name do nothing. New files show only after the workspace is opened again.
+  - The page title is still "Tauri + React + Typescript".
+- **Verification:** `npx tsc --noEmit`, and `npx vitest run`: 669 tests / 65 files under Git Bash. From PowerShell, the 32 bash hook tests are skipped.
+
 ## 2026-09-26 - Headless runs and CI (`harness run`)
 
 - **Goal:** run a workflow without the app, the way `codex exec` runs Codex, for CI servers.

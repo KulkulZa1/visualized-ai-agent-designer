@@ -22,7 +22,7 @@ rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 668 tests / 65 files (2026-09-26) |
+| Frontend tests | `npx vitest run` | Passed, 669 tests / 65 files (2026-09-26) |
 | Rust tests | `npm run test:rust` | Passed, 95 Rust tests (2026-09-26) |
 | Rust tests without Tauri | `cargo test --no-default-features --features core` | Passed, 95 + 1 (2026-09-26); `cargo tree` shows no Tauri, WebView or GTK |
 | harness-core and the CLI bundle | `npm run build:core`, `npm run build:cli` | Passed (2026-09-26); 5.6 MB `harness-core.exe`, a 498 KB bundle with no React, stores or Tauri |
@@ -31,6 +31,9 @@ rows come from earlier passes and were not re-run.
 | harness run, real core | `OPENAI_API_KEY= node cli/harness.mjs run examples/purchasing-decision.harness.yaml --task … --provider openai --json` | Passed (2026-09-25): a `not_started` event and exit 3 without a key |
 | harness run, live | The real `harness-core` and the free endpoint on a synthetic scratch project | Passed (2026-09-26). An agent fixed a bug and ran `node --test`, allowed by `--allow-command` (exit 0). The 1 s Reviewer timed out, so exit 1. `--resume` reused the Coder with no model call; the Reviewer ran (21.1 s), so exit 0 with `attempts: 2`. See `docs/DEVELOPMENT_LOG.md` |
 | harness run, Ctrl+C on Windows | A real console `CTRL_C_EVENT`, sent by a helper to a run in its own console | Passed (2026-09-26): "Stopping the run…", the agent was stopped, the run finished `cancelled` with exit 130, and the record was saved through `harness-core`, which survived |
+| App run in the UI, Windows | The app's UI in a browser, its `invoke` calls sent to the real `harness-core`; the free endpoint and a synthetic scratch project | Passed (2026-09-26): workspace, Custom endpoint, run, command approval (`node --test`, exit 0), Changes and the run record. Stop killed a running `ping` and its `cmd.exe`, and saved the run as `cancelled`. Not covered: the Tauri window, the folder dialog and streaming. See `docs/DEVELOPMENT_LOG.md` |
+| Resume an app-saved run | `harness run --resume` on a record the app saved | Passed (2026-09-26): both agents reused, exit 0 |
+| harness run output on Windows | Redirected from cmd.exe; captured by Windows PowerShell 5.1 | cmd.exe: UTF-8. Windows PowerShell 5.1 in a default console decodes it with the console code page (`??`), and its `>` writes UTF-16: see `docs/HEADLESS.md` (Troubleshooting) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |
@@ -103,7 +106,7 @@ Installer outputs:
 | Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook; hooks with `requireConsent` are not run automatically (the node fails and the run stops); agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |
 | Tauri shell permissions | `shell:allow-execute` and `shell:allow-kill` removed from default capabilities |
-| Cloud calls | No hidden cloud calls added; run preflight contacts only providers the run will use; the billing-error fallback only goes to a local Ollama server |
+| Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and always probes local Ollama as the billing fallback; the billing-error fallback only goes to a local Ollama server |
 
 ## Runtime UI Findings
 
@@ -116,6 +119,22 @@ Verified through browser DOM inspection and Chrome headless screenshot of the fr
 - Empty-canvas run guidance now says independent forward branches can run concurrently up to `maxParallel`.
 - Empty-canvas minimap is hidden until the workflow has nodes.
 - AuditStrip empty state says no events yet and includes the All chip.
+
+Found by the Windows QA on 2026-09-26 and not fixed yet (details in
+`docs/DEVELOPMENT_LOG.md`):
+
+- The top bar needs about 1,230 px with a workflow open, but the window may be
+  1,024 px wide: below that, Save and Run are cut off.
+- A workflow shows "● unsaved" as soon as it is opened.
+- After another workflow is opened, the node inspector shows the previous run's
+  output for the node with the same id.
+- Audit labels: tool calls show as "file read", an agent's start and end as
+  "hook executed", provider checks as "workflow loaded".
+- A Custom-endpoint run still probes local Ollama and warns "Ollama is selected".
+- Shortcut hints use the Mac ⌘ on Windows.
+- The Changes diff uses a light theme.
+- The file search box and the workspace cog do nothing.
+- The page title is still "Tauri + React + Typescript".
 
 Screenshot evidence: `docs/assets/empty-state.png` shows the empty
 onboarding state after hiding the blank minimap when no nodes exist. Playwright's
