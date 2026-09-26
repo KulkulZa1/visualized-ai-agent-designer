@@ -34,6 +34,7 @@ declare module "node:child_process" {
     status: number | null;
     stdout: string;
     stderr: string;
+    error?: Error;
   }
 
   export function spawnSync(
