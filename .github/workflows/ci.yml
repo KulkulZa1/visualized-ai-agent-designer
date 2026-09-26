@@ -11,7 +11,9 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # A cold Rust cache builds Tauri and then the crate without it. The steps have
+    # their own limits: a job that runs out of time loses its log.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -38,10 +40,22 @@ jobs:
       - name: Frontend production build
         run: npx vite build
 
+      # Built, then run: a slow build and a stuck test ("has been running for over
+      # 60 seconds") show up as different steps.
+      - name: Build the Rust tests (the app)
+        timeout-minutes: 45
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-run
+
       - name: Rust tests (the app)
+        timeout-minutes: 10
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
+      - name: Build the Rust tests (harness-core, without Tauri)
+        timeout-minutes: 30
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core --no-run
+
       - name: Rust tests (harness-core, without Tauri)
+        timeout-minutes: 10
         run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core
 
       - name: harness run with the real harness-core
