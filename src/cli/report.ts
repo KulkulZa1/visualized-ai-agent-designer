@@ -54,7 +54,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
   const events: RunEvents = {
     onRunStarted: (runId, workflowName) => {
       if (json) emit({ type: "run_started", runId, workflow: workflowName });
-      else out(`Run ${runId}: ${workflowName} (${graph.nodes.length} agents)`);
+      else out(`Run ${runId}: ${workflowName} (${graph.nodes.length} agent${graph.nodes.length === 1 ? "" : "s"})`);
     },
     onAgentUpdate: (nodeId, partial) => {
       const agent = agents[nodeId] = {

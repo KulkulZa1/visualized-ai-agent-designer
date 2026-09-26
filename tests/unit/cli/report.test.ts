@@ -47,6 +47,14 @@ function capture(json: boolean) {
 }
 
 describe("createReporter", () => {
+  it("says 1 agent, not 1 agents", () => {
+    const out: string[] = [];
+    const { events } = createReporter({ ...graph, nodes: [node("Coder")], edges: [] }, false,
+      (l) => out.push(l), () => {});
+    events.onRunStarted("run-1", "W");
+    expect(out).toEqual(["Run run-1: W (1 agent)"]);
+  });
+
   it("prints each agent's start and end, and its commands, compactions and revisions", () => {
     const { reporter: { events }, out } = capture(false);
 
