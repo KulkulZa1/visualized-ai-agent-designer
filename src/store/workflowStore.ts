@@ -71,6 +71,8 @@ interface WorkflowStoreActions {
   removeNode: (nodeId: string) => void;
   duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
+  /** A run's status and token count for a node: not an edit, so the workflow stays saved. */
+  setNodeRunState: (nodeId: string, status: AgentNode["data"]["status"], tokens?: AgentNode["data"]["tokens"]) => void;
   /** Set model on all nodes, optionally filtered by role. Returns the count changed. */
   bulkSetModel: (model: string, roleFilter?: AgentRole) => number;
   updateEdgeLabel: (edgeId: string, label: string) => void;
@@ -160,6 +162,14 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           if (!node) return;
           Object.assign(node.data, data);
           state.isDirty = true;
+        }),
+
+      setNodeRunState: (nodeId, status, tokens) =>
+        set((state) => {
+          const node = state.nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          node.data.status = status;
+          if (tokens) node.data.tokens = tokens;
         }),
 
       bulkSetModel: (model, roleFilter) => {

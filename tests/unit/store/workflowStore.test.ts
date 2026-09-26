@@ -237,6 +237,18 @@ describe("workflowStore", () => {
       expect(useWorkflowStore.getState().isDirty).toBe(true);
     });
 
+    it("stays clean when a run updates the nodes' status and token counts", () => {
+      loadTwoNodes();
+
+      useWorkflowStore.getState().setNodeRunState("agent-0", "running");
+      useWorkflowStore.getState().setNodeRunState("agent-0", "done", { used: 120, budget: 16000 });
+
+      const { nodes, isDirty } = useWorkflowStore.getState();
+      expect(nodes[0].data.status).toBe("done");
+      expect(nodes[0].data.tokens.used).toBe(120);
+      expect(isDirty).toBe(false);
+    });
+
     it("marks the workflow unsaved when an edge is removed", () => {
       loadTwoNodes();
       const edgeId = useWorkflowStore.getState().edges[0].id;

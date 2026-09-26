@@ -77,6 +77,15 @@ beforeEach(() => {
 });
 
 describe("useWorkflowExecution", () => {
+  it("leaves a saved workflow saved: a run's node status is not an edit", async () => {
+    useWorkflowStore.setState({ isDirty: false });
+
+    await run();
+
+    expect(useWorkflowStore.getState().nodes.map((n) => n.data.status)).toEqual(["done", "done"]);
+    expect(useWorkflowStore.getState().isDirty).toBe(false);
+  });
+
   it("re-reads the workspace's files after a run, so the files agents created show up", async () => {
     mockInvokeHandler("list_workspace_files", () => [{ name: "notes.md", path: "notes.md", isDirectory: false }]);
     useWorkspaceStore.setState({ fileTree: [] });

@@ -28,7 +28,7 @@ export function useWorkflowExecution() {
   const edges             = useWorkflowStore((s) => s.edges);
   const meta              = useWorkflowStore((s) => s.meta);
   const executionSettings = useWorkflowStore((s) => s.executionSettings);
-  const updateNodeData    = useWorkflowStore((s) => s.updateNodeData);
+  const setNodeRunState   = useWorkflowStore((s) => s.setNodeRunState);
   const filePath          = useWorkflowStore((s) => s.filePath);
   const workspacePath     = useWorkspaceStore((s) => s.workspacePath);
   const {
@@ -90,7 +90,7 @@ export function useWorkflowExecution() {
       events: {
         onRunStarted: (id, workflowName) => { runId = id; startRun(workflowName, id); },
         onAgentUpdate: (nodeId, partial) => { if (isCurrent()) updateAgent(nodeId, partial); },
-        onNodeStatus: (nodeId, status, tokens) => updateNodeData(nodeId, tokens ? { status, tokens } : { status }),
+        onNodeStatus: (nodeId, status, tokens) => setNodeRunState(nodeId, status, tokens),
         onAudit: addEntry,
         onFileChange: (path, before, after, agent) => {
           if (isCurrent()) useExecutionStore.getState().recordFileChange(path, before, after, agent);
