@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore } from "@/store/workflowStore";
-import { useWorkspaceStore, openWorkspaceFolder } from "@/store/workspaceStore";
+import { useWorkspaceStore, openWorkspaceFolder, refreshWorkspaceFiles } from "@/store/workspaceStore";
+import { filterFileTree } from "@/utils/fileTreeFilter";
 import { useUIStore } from "@/store/uiStore";
 import { ROLE_META, STATUS_COLORS } from "@/utils/nodeColors";
 import type { FileTreeEntry } from "@/types/filesystem";
@@ -9,8 +10,12 @@ import { useWorkflow } from "@/hooks/useWorkflow";
 import { ArtifactSidebar } from "./ArtifactSidebar";
 
 // ── File tree entry ────────────────────────────────────────────────────────
-function FileEntry({ entry, depth = 0 }: { entry: FileTreeEntry; depth?: number }) {
-  const [open, setOpen] = useState(depth < 1);
+/** `forceOpen`: a search is on, so every folder shown holds a match and stays open. */
+function FileEntry({ entry, depth = 0, forceOpen = false }: {
+  entry: FileTreeEntry; depth?: number; forceOpen?: boolean;
+}) {
+  const [expanded, setOpen] = useState(depth < 1);
+  const open = forceOpen || expanded;
   const openFile   = useUIStore((s) => s.openEditorFile);
   const activePath = useUIStore((s) => s.activeEditorPath);
   const { load }   = useWorkflow();
@@ -35,7 +40,9 @@ function FileEntry({ entry, depth = 0 }: { entry: FileTreeEntry; depth?: number 
           <NodeIcon name="folder" size={12} color="var(--accent)" style={{ opacity: 0.75 }}/>
           <span>{entry.name}</span>
         </div>
-        {open && entry.children?.map((c) => <FileEntry key={c.path} entry={c} depth={depth + 1}/>)}
+        {open && entry.children?.map((c) => (
+          <FileEntry key={c.path} entry={c} depth={depth + 1} forceOpen={forceOpen}/>
+        ))}
       </div>
     );
   }
@@ -78,6 +85,9 @@ export function Sidebar() {
   const selectedNodeId = useUIStore((s) => s.selectedNodeId);
   const selectNode     = useUIStore((s) => s.selectNode);
   const [nodeSearch, setNodeSearch] = useState("");
+  const [fileSearch, setFileSearch] = useState("");
+  const searchingFiles = fileSearch.trim() !== "";
+  const shownTree = filterFileTree(fileTree, fileSearch);
 
   const filteredNodes = nodeSearch.trim()
     ? nodes.filter((n) => n.data.name.toLowerCase().includes(nodeSearch.toLowerCase()))
@@ -98,7 +108,14 @@ export function Sidebar() {
           <NodeIcon name="folder" size={13} color="var(--accent)"/>
           <span style={{ fontSize: 12, fontWeight: 500 }}>{workspaceName}</span>
         </div>
-        <NodeIcon name="cog" size={12} style={{ color: "var(--hint)", cursor: "pointer" }}/>
+        {workspacePath && (
+          <button onClick={() => { void refreshWorkspaceFiles(); }} title="Refresh files" style={{
+            background: "transparent", border: "none", padding: 2, cursor: "pointer",
+            color: "var(--hint)", display: "flex",
+          }}>
+            <NodeIcon name="refresh" size={12}/>
+          </button>
+        )}
       </div>
 
       {/* Search */}
@@ -107,7 +124,8 @@ export function Sidebar() {
           background: "var(--bg)", border: "1px solid var(--border)",
           borderRadius: 4, padding: "4px 7px" }}>
           <NodeIcon name="search" size={11} style={{ color: "var(--hint)" }}/>
-          <input placeholder="search files" style={{
+          <input placeholder="search files" value={fileSearch}
+            onChange={(e) => setFileSearch(e.target.value)} style={{
             flex: 1, background: "transparent", border: "none",
             color: "var(--text)", fontSize: 11, outline: "none", fontFamily: "inherit",
           }}/>
@@ -130,7 +148,10 @@ export function Sidebar() {
             {workspacePath ? "Empty workspace" : "Open a workspace to browse files"}
           </div>
         )}
-        {!isLoading && fileTree.map((e) => <FileEntry key={e.path} entry={e}/>)}
+        {!isLoading && fileTree.length > 0 && shownTree.length === 0 && (
+          <div style={{ padding: 10, fontSize: 11, color: "var(--hint)" }}>No files match</div>
+        )}
+        {!isLoading && shownTree.map((e) => <FileEntry key={e.path} entry={e} forceOpen={searchingFiles}/>)}
       </div>
 
       {/* Workflow nodes */}

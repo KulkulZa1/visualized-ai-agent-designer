@@ -9,7 +9,7 @@
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useAuditStore } from "@/store/auditStore";
-import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useWorkspaceStore, refreshWorkspaceFiles } from "@/store/workspaceStore";
 import { useCommandConsentStore } from "@/store/commandConsentStore";
 import { invoke } from "@/ipc/tauriCommands";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
@@ -72,6 +72,8 @@ export function useWorkflowExecution() {
         },
       }, appHost());
       if (!outcome.started) reportError(outcome.error);
+      // Agents may have created files: show them in the file tree.
+      else await refreshWorkspaceFiles();
     } finally {
       history.resume();
       runInFlight = false;

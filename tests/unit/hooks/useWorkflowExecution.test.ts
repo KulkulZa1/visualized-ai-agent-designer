@@ -73,9 +73,19 @@ beforeEach(() => {
   }));
   // No workspace files (AGENTS.md included) unless a test registers its own reader.
   mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
+  mockInvokeHandler("list_workspace_files", () => []);
 });
 
 describe("useWorkflowExecution", () => {
+  it("re-reads the workspace's files after a run, so the files agents created show up", async () => {
+    mockInvokeHandler("list_workspace_files", () => [{ name: "notes.md", path: "notes.md", isDirectory: false }]);
+    useWorkspaceStore.setState({ fileTree: [] });
+
+    await run();
+
+    expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]);
+  });
+
   it("reports the run as failed when an agent errors, even with continueOnError", async () => {
     mockInvokeHandler("call_ollama_api", (args) =>
       (args as { system: string }).system.startsWith("You are B")
