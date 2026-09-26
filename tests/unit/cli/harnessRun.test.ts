@@ -62,7 +62,9 @@ function harnessRun(dir: string, args: string[]) {
 
 const bashCall = '<tool_call>{"name":"bash","args":{"command":"npm test"}}</tool_call>';
 
-describe("harness run", () => {
+// Each test runs the CLI one to four times in a row, synchronously: under a full
+// parallel suite that can pass vitest's 5 s default, which fails a sync test too.
+describe("harness run", { timeout: 60_000 }, () => {
   it("runs a workflow, printing each agent and a summary, and exits 0", () => {
     const run = harnessRun(workspace({ Coder: ["wrote the fix"], Reviewer: ["Looks good."] }), ["--task", "Fix the bug"]);
 
