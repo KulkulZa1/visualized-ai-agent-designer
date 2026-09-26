@@ -7,6 +7,7 @@ import type { AgentNode, WorkflowDef, WorkflowMeta, ExecutionSettings } from "@/
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import { defToGraph } from "@/engine/workflowGraph";
+import { useExecutionStore } from "@/store/executionStore";
 
 type WorkflowEdgeKind = NonNullable<WorkflowDef["connections"][number]["edgeKind"]>;
 type WorkflowEdgeData = { label?: string; edgeKind?: WorkflowEdgeKind };
@@ -211,6 +212,9 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
         // A loaded workflow starts a fresh history: undoing past the load would put the
         // previous graph under this workflow's name and file path.
         useWorkflowStore.temporal.getState().clear();
+        // Node ids are places in the file, so the last run's results would show on this
+        // workflow's nodes. They stay in .harness/runs.
+        useExecutionStore.getState().clearRun();
       },
 
       markClean: (filePath) =>
@@ -226,6 +230,7 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           meta: { ...DEFAULT_META, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
         }));
         useWorkflowStore.temporal.getState().clear();
+        useExecutionStore.getState().clearRun();
       },
 
       toWorkflowDef: () => {

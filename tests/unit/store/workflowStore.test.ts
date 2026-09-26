@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
+import { useExecutionStore } from "@/store/executionStore";
 import { AgentRole } from "@/types/agent";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import type { Edge } from "@xyflow/react";
@@ -70,6 +71,43 @@ describe("workflowStore", () => {
     const { nodes, isDirty } = useWorkflowStore.getState();
     expect(nodes).toHaveLength(0);
     expect(isDirty).toBe(false);
+  });
+
+  describe("the last run's results", () => {
+    const otherWorkflow = () => ({
+      meta: { name: "Other", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+      agents: [makeDefaultAgentNode("x", AgentRole.Worker, { x: 0, y: 0 }).data],
+      connections: [],
+      executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+      nodePositions: {},
+    });
+    const runCoder = (finished: boolean) => {
+      useExecutionStore.setState({ currentRun: null, isRunning: false });
+      const run = useExecutionStore.getState();
+      run.startRun("Fix the sum bug", "run-1");
+      run.updateAgent("agent-0", { agentName: "Coder", status: "done", output: "fixed sum.mjs" });
+      if (finished) run.finishRun("done");
+    };
+
+    // Node ids are places in the file (agent-0, …), so another workflow's first
+    // node would otherwise show this run's output in the inspector.
+    it("are cleared when another workflow is loaded", () => {
+      runCoder(true);
+      useWorkflowStore.getState().loadWorkflow(otherWorkflow());
+      expect(useExecutionStore.getState().currentRun).toBeNull();
+    });
+
+    it("are cleared for a new workflow", () => {
+      runCoder(true);
+      useWorkflowStore.getState().reset();
+      expect(useExecutionStore.getState().currentRun).toBeNull();
+    });
+
+    it("are kept while the run is still going", () => {
+      runCoder(false);
+      useWorkflowStore.getState().loadWorkflow(otherWorkflow());
+      expect(useExecutionStore.getState().currentRun?.id).toBe("run-1");
+    });
   });
 
   it("loadWorkflow preserves connection label and kind in edge data", () => {

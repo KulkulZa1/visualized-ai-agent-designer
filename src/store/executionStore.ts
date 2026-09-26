@@ -28,6 +28,8 @@ interface ExecutionActions {
   startRun: (workflowName: string, id?: string) => string;
   updateAgent: (agentId: string, partial: Partial<AgentRun>) => void;
   finishRun: (status: "done" | "error" | "cancelled") => void;
+  /** Forgets a finished run's results; a run that is still going is kept. */
+  clearRun: () => void;
   recordFileChange: (path: string, before: string | null, after: string, agent: string) => void;
   forgetFileChange: (path: string) => void;
   setApiKey: (key: string) => void;
@@ -99,6 +101,8 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
         : null,
       isRunning: false,
     })),
+
+  clearRun: () => set((state) => (state.isRunning ? {} : { currentRun: null })),
 
   recordFileChange: (path, before, after, agent) =>
     set((state) => state.currentRun
