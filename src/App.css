@@ -58,8 +58,9 @@ html, body, #root {
 .react-flow__pane             { cursor: default; }
 
 /* ── Top bar in a narrow window (the window may be 1,024 px wide) ──────── */
-/* The secondary buttons show icons only; their titles name them. */
-@media (max-width: 1279px) {
+/* The secondary buttons show icons only; their titles name them. Their labels
+   take ~275 px: from 1,440 px, the workspace and file names still fit beside them. */
+@media (max-width: 1439px) {
   .topbar-label { display: none; }
 }
 
