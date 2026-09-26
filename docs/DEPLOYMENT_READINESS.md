@@ -22,7 +22,7 @@ rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 669 tests / 65 files (2026-09-26) |
+| Frontend tests | `npx vitest run` | Passed, 706 tests / 69 files (2026-09-26) |
 | Rust tests | `npm run test:rust` | Passed, 95 Rust tests (2026-09-26) |
 | Rust tests without Tauri | `cargo test --no-default-features --features core` | Passed, 95 + 1 (2026-09-26); `cargo tree` shows no Tauri, WebView or GTK |
 | harness-core and the CLI bundle | `npm run build:core`, `npm run build:cli` | Passed (2026-09-26); 5.6 MB `harness-core.exe`, a 498 KB bundle with no React, stores or Tauri |
@@ -106,7 +106,7 @@ Installer outputs:
 | Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook; hooks with `requireConsent` are not run automatically (the node fails and the run stops); agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |
 | Tauri shell permissions | `shell:allow-execute` and `shell:allow-kill` removed from default capabilities |
-| Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and always probes local Ollama as the billing fallback; the billing-error fallback only goes to a local Ollama server |
+| Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and probes local Ollama only when the run uses it or as the billing fallback of OpenAI and Anthropic; the billing-error fallback only goes to a local Ollama server |
 
 ## Runtime UI Findings
 
@@ -120,21 +120,20 @@ Verified through browser DOM inspection and Chrome headless screenshot of the fr
 - Empty-canvas minimap is hidden until the workflow has nodes.
 - AuditStrip empty state says no events yet and includes the All chip.
 
-Found by the Windows QA on 2026-09-26 and not fixed yet (details in
-`docs/DEVELOPMENT_LOG.md`):
+The Windows QA on 2026-09-26 found nine UI issues, now fixed and re-checked in
+a browser with a real run (details in `docs/DEVELOPMENT_LOG.md`):
 
-- The top bar needs about 1,230 px with a workflow open, but the window may be
-  1,024 px wide: below that, Save and Run are cut off.
-- A workflow shows "● unsaved" as soon as it is opened.
-- After another workflow is opened, the node inspector shows the previous run's
-  output for the node with the same id.
-- Audit labels: tool calls show as "file read", an agent's start and end as
-  "hook executed", provider checks as "workflow loaded".
-- A Custom-endpoint run still probes local Ollama and warns "Ollama is selected".
-- Shortcut hints use the Mac ⌘ on Windows.
-- The Changes diff uses a light theme.
-- The file search box and the workspace cog do nothing.
-- The page title is still "Tauri + React + Typescript".
+- The top bar fits a 1,024 px window: Save and Run stay visible.
+- A workflow is "unsaved" only after an edit: opening it, selecting and
+  running no longer count.
+- Opening another workflow clears the last run's results from the panels.
+- Audit entries are named by what happened, and the tool, consent and warn
+  chips match them.
+- Local Ollama is probed only when the run uses it or can fall back to it.
+- Shortcut hints say Ctrl on Windows.
+- The code editors use a dark theme.
+- The file search box works, and a Refresh button replaced the dead gear.
+- The page title is "Harness Studio".
 
 Screenshot evidence: `docs/assets/empty-state.png` shows the empty
 onboarding state after hiding the blank minimap when no nodes exist. Playwright's

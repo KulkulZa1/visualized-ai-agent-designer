@@ -73,9 +73,28 @@ beforeEach(() => {
   }));
   // No workspace files (AGENTS.md included) unless a test registers its own reader.
   mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
+  mockInvokeHandler("list_workspace_files", () => []);
 });
 
 describe("useWorkflowExecution", () => {
+  it("leaves a saved workflow saved: a run's node status is not an edit", async () => {
+    useWorkflowStore.setState({ isDirty: false });
+
+    await run();
+
+    expect(useWorkflowStore.getState().nodes.map((n) => n.data.status)).toEqual(["done", "done"]);
+    expect(useWorkflowStore.getState().isDirty).toBe(false);
+  });
+
+  it("re-reads the workspace's files after a run, so the files agents created show up", async () => {
+    mockInvokeHandler("list_workspace_files", () => [{ name: "notes.md", path: "notes.md", isDirectory: false }]);
+    useWorkspaceStore.setState({ fileTree: [] });
+
+    await run();
+
+    expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]);
+  });
+
   it("reports the run as failed when an agent errors, even with continueOnError", async () => {
     mockInvokeHandler("call_ollama_api", (args) =>
       (args as { system: string }).system.startsWith("You are B")
@@ -335,7 +354,9 @@ describe("useWorkflowExecution", () => {
 
       expect([calls.W.length, calls.R.length, calls.D.length]).toEqual([1 + MAX_REVISION_ROUNDS, 1 + MAX_REVISION_ROUNDS, 1]);
       expect(finished?.status).toBe("done");
-      expect(useAuditStore.getState().entries.some((e) => /revision limit/.test(e.details ?? ""))).toBe(true);
+      // The run goes on with the latest version: a warning, not a failure.
+      expect(useAuditStore.getState().entries.find((e) => /revision limit/.test(e.details ?? "")))
+        .toMatchObject({ action: "revision", success: true, warning: true });
     });
 
     it("re-runs every node between the target and a gateway that routes back, then follows its final route", async () => {

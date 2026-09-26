@@ -8,6 +8,7 @@ import { useExecutionStore } from "@/store/executionStore";
 import { useUIStore } from "@/store/uiStore";
 import type { AgentRun } from "@/types/execution";
 import { validateWorkflow } from "@/utils/validateWorkflow";
+import { modShortcut } from "@/utils/shortcuts";
 
 interface TopBarProps {
   onOpenGenerate: () => void;
@@ -47,6 +48,8 @@ const Btn = ({ children, primary, small, onClick, title, style: s = {} }: {
     color: primary ? "#1a1207" : "var(--text)",
     fontSize: 12, fontWeight: primary ? 600 : 500,
     fontFamily: "inherit", display: "inline-flex", alignItems: "center", gap: 5,
+    // In a narrow window the file name gives way, not the buttons.
+    flexShrink: 0, whiteSpace: "nowrap",
     ...s,
   }}>{children}</button>
 );
@@ -122,12 +125,14 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
         }}>
         {uiMode === "atelier" ? "A" : "O"}
       </button>
-      <span style={{ fontSize: 9, color: "var(--hint)", marginLeft: -4 }}>[beta]</span>
+      <span style={{ fontSize: 9, color: "var(--hint)", marginLeft: -4, flexShrink: 0 }}>[beta]</span>
 
-      {/* Breadcrumb */}
-      <span style={{ fontSize: 12, color: "var(--muted)" }}>harness-studio</span>
+      {/* Breadcrumb: only the workspace and file names shorten in a narrow window */}
+      <span style={{ fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", flexShrink: 0 }}>harness-studio</span>
       <span style={{ color: "var(--hint)", fontSize: 12 }}>/</span>
-      <span style={{ fontSize: 12 }}>{workspaceName}</span>
+      <span title={workspace ?? undefined} style={{
+        fontSize: 12, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      }}>{workspaceName}</span>
       <span style={{ color: "var(--hint)", fontSize: 12 }}>/</span>
       <span
         onClick={onOpenMetaEditor}
@@ -140,19 +145,15 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
       >
         {relPath ?? meta.name}
       </span>
-      {isDirty && <span style={{ fontSize: 10, color: "var(--accent)" }}>● unsaved</span>}
-
-      {/* Phase badge */}
-      <div style={{ padding: "2px 9px", borderRadius: 99, fontSize: 10, fontWeight: 700,
-        background: "var(--accent-soft)", color: "var(--accent)",
-        border: "1px solid rgba(229,161,66,0.3)", letterSpacing: "0.03em", flexShrink: 0 }}>
-        Phase 5 · Execution Engine
-      </div>
+      {isDirty && (
+        <span style={{ fontSize: 10, color: "var(--accent)", whiteSpace: "nowrap", flexShrink: 0 }}>● unsaved</span>
+      )}
 
       <div style={{ flex: 1 }}/>
 
       {/* Stats */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "var(--muted)",
+        whiteSpace: "nowrap", flexShrink: 0 }}>
         <span onClick={canUndo ? () => undo() : undefined} title="Undo (Ctrl+Z)"
           style={{ cursor: canUndo ? "pointer" : "not-allowed", opacity: canUndo ? 1 : 0.35, display: "flex" }}>
           <NodeIcon name="undo" size={13}/>
@@ -174,10 +175,10 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
         <Sep/>
       </div>
 
-      {/* ⌘K */}
+      {/* Command palette */}
       <Btn small onClick={onOpenPalette} title="Command palette (Ctrl+K)"
         style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--hint)" }}>
-        ⌘K
+        {modShortcut("K")}
       </Btn>
 
       {/* Help / Quick Start */}
@@ -190,23 +191,21 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
       {onOpenWizard && (
         <Btn small onClick={onOpenWizard} title="Create from Goal — recommend workflow + provider (Ctrl+Shift+W)"
           style={{ background: "var(--accent-soft)", color: "var(--accent)" }}>
-          ★ Create from Goal
+          ★ <span className="topbar-label">Create from Goal</span>
         </Btn>
       )}
 
-      {/* Examples */}
+      {/* Examples, Generate, Permissions: icons only in a narrow window (App.css) */}
       <Btn small onClick={onOpenExamples} title="Load an example workflow (Ctrl+E)">
-        <NodeIcon name="folder" size={12}/> Examples
+        <NodeIcon name="folder" size={12}/><span className="topbar-label">Examples</span>
       </Btn>
 
-      {/* Generate */}
       <Btn small onClick={onOpenGenerate} title="Generate files (Ctrl+G)">
-        <NodeIcon name="grid" size={12}/> Generate
+        <NodeIcon name="grid" size={12}/><span className="topbar-label">Generate</span>
       </Btn>
 
-      {/* Permissions */}
       <Btn small onClick={onOpenPermissions} title="Permission matrix (Ctrl+Shift+P)">
-        <NodeIcon name="shield" size={12}/> Permissions
+        <NodeIcon name="shield" size={12}/><span className="topbar-label">Permissions</span>
       </Btn>
 
       <Sep/>

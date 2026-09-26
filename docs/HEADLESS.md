@@ -139,7 +139,7 @@ With `--json`, stdout has one JSON object per line and nothing else:
 | `run_started` | `runId`, `workflow` |
 | `node_started` | `nodeId`, `agent`, `model`, `provider`, `revision` |
 | `node_finished` | `nodeId`, `agent`, `status` (`done`, `error`, `stopped`, `skipped`), `output` (the full text), `error`, `durationMs`, `revision`, `reused` |
-| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success` |
+| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success`, and `warning: true` for a problem the run went on after (a fallback, a revision limit) |
 | `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record) |
 
 `nodeId`s are the agents' places in the workflow file: `agent-0`, `agent-1`, …

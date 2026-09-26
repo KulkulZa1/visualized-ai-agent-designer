@@ -9,7 +9,7 @@
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useAuditStore } from "@/store/auditStore";
-import { useWorkspaceStore } from "@/store/workspaceStore";
+import { useWorkspaceStore, refreshWorkspaceFiles } from "@/store/workspaceStore";
 import { useCommandConsentStore } from "@/store/commandConsentStore";
 import { invoke } from "@/ipc/tauriCommands";
 import { buildContextSnapshot } from "@/services/context-builder/contextSnapshot";
@@ -28,7 +28,7 @@ export function useWorkflowExecution() {
   const edges             = useWorkflowStore((s) => s.edges);
   const meta              = useWorkflowStore((s) => s.meta);
   const executionSettings = useWorkflowStore((s) => s.executionSettings);
-  const updateNodeData    = useWorkflowStore((s) => s.updateNodeData);
+  const setNodeRunState   = useWorkflowStore((s) => s.setNodeRunState);
   const filePath          = useWorkflowStore((s) => s.filePath);
   const workspacePath     = useWorkspaceStore((s) => s.workspacePath);
   const {
@@ -72,6 +72,8 @@ export function useWorkflowExecution() {
         },
       }, appHost());
       if (!outcome.started) reportError(outcome.error);
+      // Agents may have created files: show them in the file tree.
+      else await refreshWorkspaceFiles();
     } finally {
       history.resume();
       runInFlight = false;
@@ -88,7 +90,7 @@ export function useWorkflowExecution() {
       events: {
         onRunStarted: (id, workflowName) => { runId = id; startRun(workflowName, id); },
         onAgentUpdate: (nodeId, partial) => { if (isCurrent()) updateAgent(nodeId, partial); },
-        onNodeStatus: (nodeId, status, tokens) => updateNodeData(nodeId, tokens ? { status, tokens } : { status }),
+        onNodeStatus: (nodeId, status, tokens) => setNodeRunState(nodeId, status, tokens),
         onAudit: addEntry,
         onFileChange: (path, before, after, agent) => {
           if (isCurrent()) useExecutionStore.getState().recordFileChange(path, before, after, agent);

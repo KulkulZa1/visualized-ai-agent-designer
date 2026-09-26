@@ -61,11 +61,11 @@ describe("createReporter", () => {
     events.onRunStarted("run-1", "W");
     events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "running", startedAt: 1000,
       modelUsed: "qwen3:8b", providerUsed: "ollama" });
-    events.onAudit(audit("Coder", "file_read", "Tool: read_file({})"));
+    events.onAudit(audit("Coder", "tool_call", "Tool: read_file({})"));
     events.onAudit(audit("Coder", "command_executed", "Coder ran: npm test (allowed by --allow-command; exit 0, 900 ms)"));
-    events.onAudit(audit("Coder", "workflow_loaded", "↻ Coder: compacted 2 earlier steps (~4,000 → ~900 tokens)"));
+    events.onAudit(audit("Coder", "compaction", "↻ Coder: compacted 2 earlier steps (~4,000 → ~900 tokens)"));
     events.onAgentUpdate("Coder", { status: "done", output: "patched", finishedAt: 13_300 });
-    events.onAudit(audit("Reviewer", "workflow_loaded", "↺ Reviewer asked for revision 1/2: re-running Coder"));
+    events.onAudit(audit("Reviewer", "revision", "↺ Reviewer asked for revision 1/2: re-running Coder"));
     events.onAgentUpdate("Reviewer", { agentId: "Reviewer", agentName: "Reviewer", status: "error",
       error: "model crashed", finishedAt: 14_000 });
 
@@ -117,7 +117,7 @@ describe("createReporter", () => {
 
   it("shows reused agents once, and names the saved record", () => {
     const { reporter, out } = capture(false);
-    reporter.events.onAudit(audit("Coder", "workflow_loaded", "↩ Coder: reused from the saved run (unchanged)"));
+    reporter.events.onAudit(audit("Coder", "agent_reused", "↩ Coder: reused from the saved run (unchanged)"));
     reporter.events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "done", output: "patched",
       startedAt: 0, finishedAt: 5000 });
     reporter.summary({ started: true, run: { ...run, changes: [] } }, 1000, ".harness/runs/run-1/run.json");
@@ -129,7 +129,7 @@ describe("createReporter", () => {
 
   it("marks reused agents and the record in --json events", () => {
     const { reporter, out } = capture(true);
-    reporter.events.onAudit(audit("Coder", "workflow_loaded", "↩ Coder: reused from the saved run (unchanged)"));
+    reporter.events.onAudit(audit("Coder", "agent_reused", "↩ Coder: reused from the saved run (unchanged)"));
     reporter.events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "done", output: "patched" });
     reporter.summary({ started: true, run }, 1000, ".harness/runs/run-1/run.json");
 
@@ -139,6 +139,15 @@ describe("createReporter", () => {
     expect(events[2]).toMatchObject({ type: "run_finished", trace: ".harness/runs/run-1/run.json" });
   });
 
+  it("marks a warning in --json events: the run went on", () => {
+    const { reporter, out } = capture(true);
+    const details = "↺ Reviewer: revision limit (2) reached — continuing with the latest version";
+    reporter.events.onAudit({ ...audit("Reviewer", "revision", details), warning: true });
+
+    expect(JSON.parse(out[0])).toEqual(
+      { type: "revision", nodeId: "Reviewer", details, success: true, warning: true });
+  });
+
   it("emits one JSON event per line with --json, ending with the summary", () => {
     const { reporter, out } = capture(true);
 
@@ -146,7 +155,7 @@ describe("createReporter", () => {
     reporter.events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "running",
       startedAt: 1000, modelUsed: "m", providerUsed: "ollama" });
     reporter.events.onAudit(audit("Coder", "command_executed", "Coder: command denied (not in --allow-command): rm -rf /", false));
-    reporter.events.onAudit(audit("Coder", "file_read", "Tool: read_file({})"));
+    reporter.events.onAudit(audit("Coder", "tool_call", "Tool: read_file({})"));
     reporter.events.onAgentUpdate("Coder", { status: "done", output: "patched", finishedAt: 2000 });
     reporter.summary({ started: true, run }, 5000);
 

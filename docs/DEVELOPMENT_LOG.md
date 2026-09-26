@@ -1,5 +1,45 @@
 ﻿# Development Log
 
+## 2026-09-26 - Fixes for the Windows QA's UI findings
+
+- **Scope:** the nine UI issues the Windows QA below found, all also on master. Branch `claude/ui-fixes`, stacked on `claude/headless-ci`, one commit per fix, each test-first where it can be tested.
+- **Design choices** (agreed before the work):
+  - A compact top bar in a narrow window, rather than an overflow menu or a larger minimum window.
+  - Honest audit types, with working filter chips.
+  - A working file search and a Refresh button.
+  - Dark editors.
+- **Top bar:**
+  - The labels of Create from Goal, Examples, Generate and Permissions hide below 1,440 px (App.css).
+  - The buttons, the stats and "harness-studio" no longer shrink or wrap; the workspace and file names shorten with "…".
+  - The static phase badge left the top bar, and the Ctrl+K palette gained "Run workflow".
+  - Measured in a browser:
+    - With the labels, the bar needs 1,168 px before the names, so the breakpoint moved from the planned 1,280 px to 1,440 px.
+    - At 1,024 px, with a long workspace name, a long file name and "unsaved", Save ends at 940 px and Run at 1,010 px.
+    - At 1,280 px, both names show in full.
+- **The unsaved flag:**
+  - React Flow's measuring and selecting no longer mark a workflow unsaved.
+  - A run's node status and token counts are written with `setNodeRunState`, which does not either. The browser check found this second case once opening a file stopped showing "unsaved".
+- **Stale results:** loading a workflow, or starting a new one, clears a finished run (`clearRun`); a run still going is kept.
+- **Audit:**
+  - New action types: `provider_check`, `provider_fallback`, `agent_started`, `agent_finished`, `agent_failed`, `agent_skipped`, `agent_reused`, `tool_call`, `subagent`, `revision`, `compaction`, `gateway_route`, `memory_write` and `run_record`.
+  - A `warning` flag marks the problems a run goes on after. The chips match on types and that flag.
+  - `harness run` classifies events by action and adds `warning: true` to its JSON events.
+  - Commands and hooks, the only entries saved to `audit.log.jsonl`, keep their names.
+- **Ollama probe:** only when the run uses Ollama, or uses OpenAI or Anthropic (billing fallback). A fallback that is down is a warning worded as such.
+- **Also:**
+  - `modShortcut()` for Ctrl/⌘ hints;
+  - `vs-dark` for both Monaco editors;
+  - `filterFileTree()`, `refreshWorkspaceFiles()`, and a refresh after each run;
+  - the page title.
+- **Re-checked live** in the browser against the real `harness-core` and the free endpoint:
+  - one health check (the Custom endpoint), with no Ollama probe;
+  - the audit read provider check, file read, agent started, tool call ×4, command executed, agent finished;
+  - the tool chip showed the 4 tool calls and the command, and the consent chip showed the command;
+  - the Changes diff was dark;
+  - the file search showed only the matches;
+  - the workflow stayed "Saved" through the run (55.9 s).
+- **Verification:** `npx tsc --noEmit`; `npx vitest run`: 706 tests / 69 files.
+
 ## 2026-09-26 - Visual QA on Windows (the app, with a free model)
 
 - **Setup:**
