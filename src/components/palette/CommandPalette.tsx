@@ -28,6 +28,8 @@ interface CommandPaletteProps {
   onClose: () => void;
   onOpenGenerate: () => void;
   onOpenPermissions: () => void;
+  /** Opens the run dialog, as the top bar's Run button does. */
+  onRun: () => void;
 }
 
 const MONO = '"JetBrains Mono", ui-monospace, monospace';
@@ -41,7 +43,7 @@ function pressShortcut(key: string) {
   }, 0);
 }
 
-export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: CommandPaletteProps) {
+export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions, onRun }: CommandPaletteProps) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -93,6 +95,7 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
 
   const actions: PaletteAction[] = [
     // Workflow actions
+    { id:"run",      label:"Run workflow",      hint:meta.name,  icon:"play",    group:"Workflow",   run: () => { onClose(); onRun(); } },
     { id:"save",     label:"Save workflow",     hint:meta.name,  icon:"save",    shortcut:modShortcut("S"), group:"Workflow",   run: () => { onClose(); pressShortcut("s"); } },
     { id:"generate", label:"Generate…",         hint:"CLAUDE.md, LangGraph, CrewAI", icon:"grid", shortcut:modShortcut("G"), group:"Workflow", run: () => { onClose(); onOpenGenerate(); } },
     { id:"permissions", label:"Permission matrix", hint:"node x tool grants", icon:"shield", shortcut:"Ctrl+Shift+P", group:"Workflow", run: () => { onClose(); onOpenPermissions(); } },

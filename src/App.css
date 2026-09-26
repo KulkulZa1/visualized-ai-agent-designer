@@ -57,6 +57,12 @@ html, body, #root {
 .react-flow__node             { cursor: default; }
 .react-flow__pane             { cursor: default; }
 
+/* ── Top bar in a narrow window (the window may be 1,024 px wide) ──────── */
+/* The secondary buttons show icons only; their titles name them. */
+@media (max-width: 1279px) {
+  .topbar-label { display: none; }
+}
+
 /* ── Observatory mode — cyan accent ───────────────────────────────────── */
 .observatory {
   --accent:      #4dd4ff;

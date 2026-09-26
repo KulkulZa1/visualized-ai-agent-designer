@@ -7,7 +7,7 @@ import { AgentRole } from "@/types/agent";
 const noop = vi.fn();
 const renderTopBar = () => render(
   <TopBar onOpenGenerate={noop} onOpenPalette={noop} onOpenExamples={noop}
-    onOpenPermissions={noop} onRun={noop} onOpenSettings={noop} />,
+    onOpenPermissions={noop} onRun={noop} onOpenSettings={noop} onOpenWizard={noop} />,
 );
 
 beforeEach(() => {
@@ -25,6 +25,30 @@ describe("TopBar", () => {
     renderTopBar();
 
     expect(screen.getByText(/invalid/)).toBeTruthy();
+  });
+
+  // The window can be 1,024 px wide (tauri.conf.json minWidth): the bar must fit it.
+  describe("in a narrow window", () => {
+    it("never shrinks Save and Run", () => {
+      renderTopBar();
+
+      expect(screen.getByText("Save").closest("button")?.style.flexShrink).toBe("0");
+      expect(screen.getByText("Run").closest("button")?.style.flexShrink).toBe("0");
+    });
+
+    it("can hide the secondary buttons' labels, which their titles repeat", () => {
+      renderTopBar();
+
+      for (const label of ["Create from Goal", "Examples", "Generate", "Permissions"]) {
+        expect(screen.getByText(label).className).toBe("topbar-label");
+      }
+    });
+
+    it("has no development phase badge", () => {
+      renderTopBar();
+
+      expect(screen.queryByText(/Phase 5/)).toBeNull();
+    });
   });
 
   it("labels the command palette shortcut with Ctrl outside macOS", () => {
