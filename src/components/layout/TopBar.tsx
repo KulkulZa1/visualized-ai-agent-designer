@@ -8,6 +8,7 @@ import { useExecutionStore } from "@/store/executionStore";
 import { useUIStore } from "@/store/uiStore";
 import type { AgentRun } from "@/types/execution";
 import { validateWorkflow } from "@/utils/validateWorkflow";
+import { modShortcut } from "@/utils/shortcuts";
 
 interface TopBarProps {
   onOpenGenerate: () => void;
@@ -174,10 +175,10 @@ export function TopBar({ onOpenGenerate, onOpenPalette, onOpenExamples, onOpenPe
         <Sep/>
       </div>
 
-      {/* ⌘K */}
+      {/* Command palette */}
       <Btn small onClick={onOpenPalette} title="Command palette (Ctrl+K)"
         style={{ fontFamily: '"JetBrains Mono", monospace', color: "var(--hint)" }}>
-        ⌘K
+        {modShortcut("K")}
       </Btn>
 
       {/* Help / Quick Start */}

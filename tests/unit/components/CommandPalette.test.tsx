@@ -75,6 +75,13 @@ describe("CommandPalette actions", () => {
 
     expect(useUIStore.getState().activeEditorPath).toBe("CLAUDE.md");
   });
+
+  it("labels shortcuts with Ctrl outside macOS", () => {
+    openPalette();
+
+    expect(screen.getByText("Ctrl+S")).toBeTruthy();
+    expect(screen.queryByText(/⌘/)).toBeNull();
+  });
 });
 
 describe("canvas shortcuts", () => {

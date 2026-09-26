@@ -26,4 +26,11 @@ describe("TopBar", () => {
 
     expect(screen.getByText(/invalid/)).toBeTruthy();
   });
+
+  it("labels the command palette shortcut with Ctrl outside macOS", () => {
+    renderTopBar();
+
+    expect(screen.getByText("Ctrl+K")).toBeTruthy();
+    expect(screen.queryByText(/⌘/)).toBeNull();
+  });
 });

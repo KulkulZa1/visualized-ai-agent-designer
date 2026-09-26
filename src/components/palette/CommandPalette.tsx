@@ -11,6 +11,7 @@ import { AgentRole } from "@/types/agent";
 import { ROLE_META } from "@/utils/nodeColors";
 import { deserializeWorkflow } from "@/utils/yamlSerializer";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
+import { modShortcut } from "@/utils/shortcuts";
 
 interface PaletteAction {
   id: string;
@@ -92,11 +93,11 @@ export function CommandPalette({ onClose, onOpenGenerate, onOpenPermissions }: C
 
   const actions: PaletteAction[] = [
     // Workflow actions
-    { id:"save",     label:"Save workflow",     hint:meta.name,  icon:"save",    shortcut:"⌘S", group:"Workflow",   run: () => { onClose(); pressShortcut("s"); } },
-    { id:"generate", label:"Generate…",         hint:"CLAUDE.md, LangGraph, CrewAI", icon:"grid", shortcut:"⌘G", group:"Workflow", run: () => { onClose(); onOpenGenerate(); } },
+    { id:"save",     label:"Save workflow",     hint:meta.name,  icon:"save",    shortcut:modShortcut("S"), group:"Workflow",   run: () => { onClose(); pressShortcut("s"); } },
+    { id:"generate", label:"Generate…",         hint:"CLAUDE.md, LangGraph, CrewAI", icon:"grid", shortcut:modShortcut("G"), group:"Workflow", run: () => { onClose(); onOpenGenerate(); } },
     { id:"permissions", label:"Permission matrix", hint:"node x tool grants", icon:"shield", shortcut:"Ctrl+Shift+P", group:"Workflow", run: () => { onClose(); onOpenPermissions(); } },
-    { id:"validate", label:"Validate graph",    icon:"check",   shortcut:"⌘.", group:"Workflow",  run: () => { onClose(); pressShortcut("."); } },
-    { id:"layout",   label:"Auto-layout",       icon:"grid",    shortcut:"⌘L", group:"Workflow",  run: () => { onClose(); pressShortcut("l"); } },
+    { id:"validate", label:"Validate graph",    icon:"check",   shortcut:modShortcut("."), group:"Workflow",  run: () => { onClose(); pressShortcut("."); } },
+    { id:"layout",   label:"Auto-layout",       icon:"grid",    shortcut:modShortcut("L"), group:"Workflow",  run: () => { onClose(); pressShortcut("l"); } },
 
     // Add nodes
     ...Object.values(AgentRole).map((role) => {
