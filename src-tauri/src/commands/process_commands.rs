@@ -101,18 +101,70 @@ pub fn execute_hook(
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Agent commands that are running, by the id the frontend gave them: the
-/// shell's process id, for cancel_command.
-static RUNNING_COMMANDS: LazyLock<Mutex<HashMap<String, u32>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// How long a Stop that found no running command is remembered.
+const EARLY_STOP_MEMORY: Duration = Duration::from_secs(60);
 
-/// Takes a command out of RUNNING_COMMANDS when it ends, however it ends.
+/// What cancel_command works from, by the id the frontend gave each agent command.
+#[derive(Default)]
+struct Commands {
+    /// The commands that are running: the shell's process id.
+    running: HashMap<String, u32>,
+    /// Stops that found no running command, and when. Stop can overtake a command
+    /// that is still starting; the command then ends the moment it has a process.
+    early_stops: HashMap<String, Instant>,
+}
+
+impl Commands {
+    /// A Stop: the process id to kill if the command is running, else None and the
+    /// Stop is remembered for a command that is about to start.
+    fn stop(&mut self, id: String) -> Option<u32> {
+        if let Some(pid) = self.running.remove(&id) {
+            return Some(pid);
+        }
+        self.early_stops
+            .retain(|_, at| at.elapsed() < EARLY_STOP_MEMORY);
+        self.early_stops.insert(id, Instant::now());
+        None
+    }
+
+    /// The command's shell has started as `pid`. True if a Stop came first: the
+    /// caller must kill it now; it is not registered.
+    fn start(&mut self, id: &str, pid: u32) -> bool {
+        let stopped = self
+            .early_stops
+            .remove(id)
+            .is_some_and(|at| at.elapsed() < EARLY_STOP_MEMORY);
+        if !stopped {
+            self.running.insert(id.to_string(), pid);
+        }
+        stopped
+    }
+}
+
+static COMMANDS: LazyLock<Mutex<Commands>> = LazyLock::new(Mutex::default);
+
+/// A command's entry in COMMANDS: taken out again when it ends, however it ends.
 struct Registration(Option<String>);
+
+impl Registration {
+    /// The shell has a process id: Stop can reach it now. A Stop that came earlier
+    /// ends it here.
+    fn started(&self, pid: u32) {
+        let Some(id) = &self.0 else { return };
+        if COMMANDS
+            .lock()
+            .is_ok_and(|mut commands| commands.start(id, pid))
+        {
+            kill_tree(pid);
+        }
+    }
+}
 
 impl Drop for Registration {
     fn drop(&mut self) {
-        if let (Some(id), Ok(mut running)) = (&self.0, RUNNING_COMMANDS.lock()) {
-            running.remove(id);
+        if let (Some(id), Ok(mut commands)) = (&self.0, COMMANDS.lock()) {
+            commands.running.remove(id);
+            commands.early_stops.remove(id);
         }
     }
 }
@@ -141,16 +193,11 @@ pub fn execute_command(
         .ok_or_else(|| AppError::Other(format!("Workspace folder not found: {workspace_path}")))?;
     let dir = interpreter_path(&dir);
     let mut shell = shell_command(&command, &dir)?;
-    // No input: a command that asks a question gets end-of-file instead of waiting.
-    shell.current_dir(&dir).stdin(Stdio::null());
+    shell.current_dir(&dir);
 
     let timeout = Duration::from_secs(timeout_secs.clamp(1, 3600));
     let registration = Registration(command_id);
-    match wait_with_timeout(shell, timeout, |pid| {
-        if let (Some(id), Ok(mut running)) = (&registration.0, RUNNING_COMMANDS.lock()) {
-            running.insert(id.clone(), pid);
-        }
-    }) {
+    match wait_with_timeout(shell, timeout, |pid| registration.started(pid)) {
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(AppError::Other(format!(
             "Command timed out after {} s",
@@ -161,10 +208,14 @@ pub fn execute_command(
 }
 
 /// Stop a running agent command: kill its whole process tree. False if no
-/// command with that id is running.
+/// command with that id is running; one that starts under it within the next
+/// minute is stopped as it starts.
 #[tauri::command]
 pub fn cancel_command(command_id: String) -> bool {
-    let pid = RUNNING_COMMANDS.lock().ok().and_then(|mut running| running.remove(&command_id));
+    let pid = COMMANDS
+        .lock()
+        .ok()
+        .and_then(|mut commands| commands.stop(command_id));
     if let Some(pid) = pid {
         kill_tree(pid);
     }
@@ -186,9 +237,11 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // Agent commands start in their own process group (shell_command).
+        // Hooks and agent commands start in their own process group (child_command),
+        // whose id is the process id. `-s KILL --` is the form every `kill` reads
+        // the same way: procps-ng 4.x takes `kill -KILL -<pgid>` as a no-op.
         let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-s", "KILL", "--", &format!("-{pid}")])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -206,7 +259,7 @@ fn shell_command(command: &str, dir: &str) -> AppResult<Command> {
             "Commands cannot run in a workspace on a network share.".to_string(),
         ));
     }
-    let mut shell = keyless_command("cmd.exe");
+    let mut shell = child_command("cmd.exe");
     // The line runs as typed (/s /c "…", as Node's `shell: true`; /d skips AutoRun)
     // in a cmd started after `chcp 65001`, so cmd's own output (echo, "not
     // recognized") is UTF-8: a cmd keeps the code page it started with. The line is
@@ -221,10 +274,8 @@ fn shell_command(command: &str, dir: &str) -> AppResult<Command> {
 
 #[cfg(not(target_os = "windows"))]
 fn shell_command(command: &str, _dir: &str) -> AppResult<Command> {
-    let mut shell = keyless_command("sh");
+    let mut shell = child_command("sh");
     shell.args(["-c", command]);
-    // Its own process group, so kill_tree can end everything it started.
-    std::os::unix::process::CommandExt::process_group(&mut shell, 0);
     Ok(shell)
 }
 
@@ -264,13 +315,27 @@ fn captured_text(captured: &Captured) -> String {
         .unwrap_or_default()
 }
 
-/// Child processes (hooks, agent commands) must not inherit the app's provider
-/// keys. A hook's explicit `env`, applied later, may still set one deliberately.
-fn keyless_command(program: &str) -> Command {
+/// Makes cmd.exe run a bare command name (`npm`, `git`) only from PATH, not from the
+/// working folder, where an agent could have planted an `npm.cmd`. Only Windows
+/// reads it.
+const NO_CWD_IN_EXE_PATH: &str = "NoDefaultCurrentDirectoryInExePath";
+
+/// The one way the app starts a child process (hook or agent command). The child:
+/// - does not inherit the app's provider keys (a hook's explicit `env`, applied
+///   later, may still set one deliberately);
+/// - gets no input: a child that asks a question reads end-of-file instead of
+///   waiting on the app's own stdin;
+/// - does not search the working folder for bare command names (NO_CWD_IN_EXE_PATH);
+/// - on Unix, is the leader of its own process group, so that kill_tree ends
+///   everything it starts.
+fn child_command(program: &str) -> Command {
     let mut command = Command::new(program);
     for key in PROVIDER_KEY_ENV_VARS {
         command.env_remove(key);
     }
+    command.env(NO_CWD_IN_EXE_PATH, "1").stdin(Stdio::null());
+    #[cfg(not(target_os = "windows"))]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     command
 }
 
@@ -281,7 +346,7 @@ fn run_command_with_timeout(
     env_vars: &HashMap<String, String>,
     timeout: Duration,
 ) -> AppResult<HookResult> {
-    let mut command = keyless_command(program);
+    let mut command = child_command(program);
     command.args(args).current_dir(current_dir).envs(env_vars);
     wait_with_timeout(command, timeout, |_| {})
         .map_err(|e| AppError::HookExecution(e.to_string()))?
@@ -291,7 +356,8 @@ fn run_command_with_timeout(
 }
 
 /// Run to completion and collect the output; `None` if it ran past `timeout`
-/// (the process tree is killed). `on_spawn` gets the process id.
+/// (the process tree is killed: `command` must come from child_command). `on_spawn`
+/// gets the process id.
 fn wait_with_timeout(
     mut command: Command,
     timeout: Duration,
@@ -340,6 +406,70 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use tempfile::tempdir;
+
+    /// `windows` on Windows, `unix` everywhere else.
+    fn platform<'a>(windows: &'a str, unix: &'a str) -> &'a str {
+        if cfg!(target_os = "windows") { windows } else { unix }
+    }
+
+    /// The shell line as the platform's own shell runs it: cmd.exe on Windows, sh elsewhere.
+    fn shell_line(windows: &str, unix: &str) -> (&'static str, Vec<String>) {
+        if cfg!(target_os = "windows") {
+            ("cmd.exe", vec!["/C".to_string(), windows.to_string()])
+        } else {
+            ("sh", vec!["-c".to_string(), unix.to_string()])
+        }
+    }
+
+    /// The hook path (`run_command_with_timeout`) running one shell line.
+    fn run_line(dir: &Path, windows: &str, unix: &str, timeout: Duration) -> AppResult<HookResult> {
+        let (program, args) = shell_line(windows, unix);
+        run_command_with_timeout(program, &args, dir, &HashMap::new(), timeout)
+    }
+
+    fn is_running(command_id: &str) -> bool {
+        COMMANDS.lock().unwrap().running.contains_key(command_id)
+    }
+
+    /// Marks the second copy of the test binary that `in_fresh_process` starts.
+    const PROBE_MARKER: &str = "HARNESS_TEST_PROBE";
+
+    /// For checks that depend on the state of the whole process: its environment (the
+    /// app holds a provider key) or its stdin (a child must not inherit it). Setting
+    /// either in this process would change what the tests running alongside see, so
+    /// the check runs in a second copy of the test binary that starts with `env` set
+    /// and with a stdin that is open but never delivers anything. The copy also
+    /// starts without NO_CWD_IN_EXE_PATH, which the app does not have either: a
+    /// machine that sets it for every process would let a test of the code that sets
+    /// it pass without that code. Call it first in the test, with the test's own
+    /// name. In the copy it runs `probe`, prints its result and returns None (the
+    /// test is over). In the first process it returns what the copy's probe printed.
+    fn in_fresh_process(test: &str, env: &[(&str, &str)], probe: impl FnOnce() -> String) -> Option<String> {
+        if std::env::var_os(PROBE_MARKER).is_some() {
+            println!("{PROBE_MARKER}:{}", probe().replace(['\r', '\n'], " "));
+            return None;
+        }
+        let module = module_path!().split_once("::").map_or("", |(_, path)| path);
+        let mut copy = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::{test}"), "--nocapture"])
+            .env(PROBE_MARKER, "1")
+            .env_remove(NO_CWD_IN_EXE_PATH)
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Kept open until the copy is done: a child that inherits it waits for input.
+        let stdin = copy.stdin.take();
+        let mut printed = String::new();
+        copy.stdout.take().unwrap().read_to_string(&mut printed).unwrap();
+        copy.wait().unwrap();
+        drop(stdin);
+        let probed = printed
+            .split_once(&format!("{PROBE_MARKER}:"))
+            .map(|(_, rest)| rest.lines().next().unwrap_or_default().to_string());
+        Some(probed.unwrap_or_else(|| panic!("the copy of the test binary printed no probe result:\n{printed}")))
+    }
 
     #[test]
     fn execute_hook_requires_explicit_consent() {
@@ -405,9 +535,10 @@ mod tests {
     #[test]
     fn run_hook_passes_custom_environment() {
         let dir = tempdir().unwrap();
+        let (program, args) = shell_line("echo %PHASE4_MODE%", "echo $PHASE4_MODE");
         let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "echo %PHASE4_MODE%".to_string()],
+            program,
+            &args,
             dir.path(),
             &HashMap::from([("PHASE4_MODE".to_string(), "enabled".to_string())]),
             Duration::from_secs(2),
@@ -418,21 +549,38 @@ mod tests {
         assert!(output.stdout.contains("enabled"));
     }
 
+    const PROBE_SECRET: &str = "probe-secret-must-not-leak";
+
+    /// The app holds a provider key: does a child it starts see it? `run` starts the
+    /// child and returns its output.
+    fn assert_child_does_not_see_the_apps_key(test: &str, run: fn(&Path) -> AppResult<HookResult>) {
+        let Some(seen) = in_fresh_process(test, &[("OLLAMA_REMOTE_API_KEY", PROBE_SECRET)], || {
+            let dir = tempdir().unwrap();
+            let app_has_key = std::env::var("OLLAMA_REMOTE_API_KEY").as_deref() == Ok(PROBE_SECRET);
+            let stdout = run(dir.path()).map(|output| output.stdout).unwrap_or_else(|e| format!("error: {e}"));
+            format!("app_has_key={app_has_key} child_stdout={:?}", stdout.trim())
+        }) else {
+            return;
+        };
+
+        assert!(seen.contains("app_has_key=true"), "the app had no key to leak: {seen}");
+        assert!(seen.contains(r#"child_stdout="key="#), "the child did not run: {seen}");
+        assert!(!seen.contains(PROBE_SECRET), "the child saw the key: {seen}");
+    }
+
     #[test]
     fn child_processes_do_not_inherit_provider_api_keys() {
-        // Hooks and agent-issued commands must not be able to read the app's keys.
-        std::env::set_var("OLLAMA_REMOTE_API_KEY", "probe-secret-must-not-leak");
-        let dir = tempdir().unwrap();
-        let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "echo key=%OLLAMA_REMOTE_API_KEY%".to_string()],
-            dir.path(),
-            &HashMap::new(),
-            Duration::from_secs(5),
-        );
-        std::env::remove_var("OLLAMA_REMOTE_API_KEY");
+        // Hooks must not be able to read the app's keys.
+        assert_child_does_not_see_the_apps_key("child_processes_do_not_inherit_provider_api_keys", |dir| {
+            run_line(dir, "echo key=%OLLAMA_REMOTE_API_KEY%", "echo key=$OLLAMA_REMOTE_API_KEY", Duration::from_secs(5))
+        });
+    }
 
-        assert!(!output.unwrap().stdout.contains("probe-secret-must-not-leak"));
+    #[test]
+    fn agent_commands_do_not_inherit_provider_api_keys() {
+        assert_child_does_not_see_the_apps_key("agent_commands_do_not_inherit_provider_api_keys", |dir| {
+            run_in(dir, platform("echo key=%OLLAMA_REMOTE_API_KEY%", "echo key=$OLLAMA_REMOTE_API_KEY"), 10)
+        });
     }
 
     #[test]
@@ -440,15 +588,10 @@ mod tests {
         // ~126 KB of stdout: more than the 64 KiB pipe buffer. The child must not
         // block on a full pipe while we wait for it to exit.
         let dir = tempdir().unwrap();
-        let output = run_command_with_timeout(
-            "cmd.exe",
-            &[
-                "/C".to_string(),
-                "for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789"
-                    .to_string(),
-            ],
+        let output = run_line(
             dir.path(),
-            &HashMap::new(),
+            "for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789",
+            "i=0; while [ $i -lt 3000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done",
             Duration::from_secs(20),
         )
         .unwrap();
@@ -459,14 +602,14 @@ mod tests {
 
     #[test]
     fn run_command_returns_when_a_background_grandchild_keeps_the_pipes_open() {
-        // `start /b` leaves ping running (holding stdout) after cmd exits.
+        // The background process (`start /b` / `&`) keeps running, holding stdout,
+        // after the shell exits.
         let dir = tempdir().unwrap();
         let started = Instant::now();
-        let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "start /b ping -n 8 127.0.0.1 >nul & echo done".to_string()],
+        let output = run_line(
             dir.path(),
-            &HashMap::new(),
+            "start /b ping -n 8 127.0.0.1 >nul & echo done",
+            "sleep 8 & echo done",
             Duration::from_secs(20),
         )
         .unwrap();
@@ -581,27 +724,10 @@ mod tests {
         assert!(shell_command("echo hi", r"\\server\share\project").is_err());
     }
 
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn agent_commands_do_not_inherit_provider_api_keys() {
-        std::env::set_var("OLLAMA_REMOTE_API_KEY", "probe-secret-must-not-leak");
-        let dir = tempdir().unwrap();
-        let output = run_in(dir.path(), "echo key=%OLLAMA_REMOTE_API_KEY%", 10);
-        std::env::remove_var("OLLAMA_REMOTE_API_KEY");
-
-        assert!(!output.unwrap().stdout.contains("probe-secret-must-not-leak"));
-    }
-
     #[test]
     fn run_hook_enforces_timeout() {
         let dir = tempdir().unwrap();
-        let result = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "ping -n 4 127.0.0.1 > nul".to_string()],
-            dir.path(),
-            &HashMap::new(),
-            Duration::from_millis(100),
-        );
+        let result = run_line(dir.path(), "ping -n 4 127.0.0.1 > nul", "sleep 4", Duration::from_millis(100));
 
         assert!(
             matches!(result, Err(AppError::HookExecution(message)) if message.contains("timeout"))
@@ -618,7 +744,7 @@ mod tests {
             execute_command(path, "ping -n 30 127.0.0.1 >nul".to_string(), true, 60,
                 Some("cancel-test".to_string()))
         });
-        while !RUNNING_COMMANDS.lock().unwrap().contains_key("cancel-test") {
+        while !is_running("cancel-test") {
             assert!(started.elapsed() < Duration::from_secs(10), "the command never started");
             thread::sleep(Duration::from_millis(20));
         }
@@ -637,5 +763,168 @@ mod tests {
         execute_command(dir.path().to_string_lossy().to_string(), "echo done".to_string(), true, 10,
             Some("finished-test".to_string())).unwrap();
         assert!(!cancel_command("finished-test".to_string()));
+    }
+
+    #[test]
+    fn a_stop_that_arrives_before_the_command_starts_still_ends_it() {
+        // Stop can reach cancel_command between the frontend's call and the moment
+        // the shell has a process to register: it must not be lost.
+        let dir = tempdir().unwrap();
+        assert!(!cancel_command("stopped-early-test".to_string()), "nothing runs under this id yet");
+        let started = Instant::now();
+        let output = execute_command(
+            dir.path().to_string_lossy().to_string(),
+            platform("ping -n 30 127.0.0.1 >nul", "sleep 30").to_string(),
+            true,
+            60,
+            Some("stopped-early-test".to_string()),
+        )
+        .unwrap();
+
+        assert_ne!(output.exit_code, 0);
+        assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn hooks_get_no_input() {
+        // A hook that asks a question gets end-of-file instead of waiting on the app's
+        // own stdin. In the copy the stdin is open and silent, so a hook that
+        // inherited it would wait for the whole timeout.
+        let Some(seen) = in_fresh_process("hooks_get_no_input", &[], || {
+            let dir = tempdir().unwrap();
+            let result = run_line(
+                dir.path(),
+                "set /p answer=Continue? & echo after",
+                "read answer; echo after",
+                Duration::from_secs(3),
+            );
+            format!("{:?}", result.map(|output| output.stdout.trim().to_string()))
+        }) else {
+            return;
+        };
+
+        assert!(seen.starts_with("Ok(") && seen.contains("after"), "the hook did not finish: {seen}");
+    }
+
+    #[test]
+    fn children_do_not_search_the_working_folder_for_bare_command_names() {
+        // On Windows cmd.exe reads this variable and then runs a bare command name
+        // (npm, git) only from PATH, not from the workspace folder, where an agent
+        // could have planted npm.cmd. Elsewhere it does nothing, so here the test can
+        // only check that hooks and agent commands both start with it. The copy does
+        // not have it itself, so what the children see comes from the code under test
+        // (a machine that sets it for every process would show it either way).
+        let test = "children_do_not_search_the_working_folder_for_bare_command_names";
+        let Some(seen) = in_fresh_process(test, &[], || {
+            let dir = tempdir().unwrap();
+            let line = platform(
+                "echo folder=%NoDefaultCurrentDirectoryInExePath%",
+                "echo folder=$NoDefaultCurrentDirectoryInExePath",
+            );
+            let hook = run_line(dir.path(), line, line, Duration::from_secs(5));
+            let agent = run_in(dir.path(), line, 10);
+            format!(
+                "hook={:?} agent={:?}",
+                hook.map(|output| output.stdout.trim().to_string()),
+                agent.map(|output| output.stdout.trim().to_string()),
+            )
+        }) else {
+            return;
+        };
+
+        assert!(seen.contains(r#"hook=Ok("folder=1")"#), "hook: {seen}");
+        assert!(seen.contains(r#"agent=Ok("folder=1")"#), "agent command: {seen}");
+    }
+
+    /// The shell starts a background `sleep`, notes its process id and waits for it.
+    #[cfg(unix)]
+    const BACKGROUND_SLEEP: &str = "sleep 60 & echo $! > grandchild.pid; wait";
+
+    /// The background process's id, once the shell has written it down.
+    #[cfg(unix)]
+    fn grandchild_pid(dir: &Path) -> u32 {
+        let started = Instant::now();
+        loop {
+            if let Some(pid) = fs::read_to_string(dir.join("grandchild.pid")).ok().and_then(|text| text.trim().parse().ok()) {
+                return pid;
+            }
+            assert!(started.elapsed() < Duration::from_secs(10), "the background process never started");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A process that was killed but not yet collected by its parent (a zombie) is
+    /// dead, though it is still listed.
+    #[cfg(unix)]
+    fn is_alive(pid: u32) -> bool {
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // "pid (name) S ...": the state follows the last ')'.
+            return stat.rsplit(')').next().is_some_and(|rest| !rest.trim_start().starts_with('Z'));
+        }
+        // No /proc entry: gone, or a system without /proc.
+        Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    #[cfg(unix)]
+    fn assert_stopped(pid: u32) {
+        let started = Instant::now();
+        while is_alive(pid) {
+            assert!(started.elapsed() < Duration::from_secs(5), "process {pid} is still running");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancel_command_kills_the_commands_background_processes_too() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_string_lossy().to_string();
+        let (done, result) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = done.send(execute_command(path, BACKGROUND_SLEEP.to_string(), true, 30, Some("cancel-tree-test".to_string())));
+        });
+        let grandchild = grandchild_pid(dir.path());
+        assert!(is_alive(grandchild));
+        assert!(is_running("cancel-tree-test"));
+
+        assert!(cancel_command("cancel-tree-test".to_string()));
+        let output = result.recv_timeout(Duration::from_secs(10)).expect("Stop did not end the command").unwrap();
+
+        assert_ne!(output.exit_code, 0);
+        assert_stopped(grandchild);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_command_that_times_out_takes_its_background_processes_with_it() {
+        let dir = tempdir().unwrap();
+        let result = run_in(dir.path(), BACKGROUND_SLEEP, 2);
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
+        assert_stopped(grandchild_pid(dir.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_that_times_out_takes_its_background_processes_with_it() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("hook.sh"), "sleep 60 &\necho $! > grandchild.pid\nwait\n").unwrap();
+
+        let result = execute_hook(
+            dir.path().to_string_lossy().to_string(),
+            "hook.sh".to_string(),
+            "agent-1".to_string(),
+            None,
+            true,
+            Some(2),
+        );
+
+        assert!(matches!(result, Err(AppError::HookExecution(message)) if message.contains("timeout")));
+        assert_stopped(grandchild_pid(dir.path()));
     }
 }
