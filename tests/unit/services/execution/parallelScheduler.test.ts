@@ -413,3 +413,64 @@ describe("runParallel — gateway skip", () => {
     expect(executed).toEqual(expect.arrayContaining(["G", "UI", "Rust"]));
   });
 });
+
+describe("runParallel — gateway label matching", () => {
+  /** Run gateway G with one branch per edge label; report which labels ran and which were skipped. */
+  async function routeGateway(route: string, labels: string[]) {
+    const branches = labels.map((_, i) => `B${i}`);
+    const nodes = [makeNode("G", AgentRole.Gateway), ...branches.map((id) => makeNode(id))];
+    const edges = labels.map((label, i) => makeEdge("G", branches[i], label));
+    const executed: string[] = [];
+    const skipped: string[] = [];
+
+    await runParallel(nodes, edges, async (id) => { executed.push(id); },
+      defaultOptions({ gatewayRoutes: new Map([["G", route]]), onSkipped: (id) => skipped.push(id) }));
+
+    return {
+      ran: labels.filter((_, i) => executed.includes(branches[i])),
+      skipped: labels.filter((_, i) => skipped.includes(branches[i])),
+    };
+  }
+
+  it.each([
+    ["valid", ["valid", "invalid"]],
+    ["valid", ["invalid", "valid"]],
+    ["safe", ["safe", "unsafe"]],
+    ["ok", ["ok", "not ok"]],
+    ["ok", ["not ok", "ok"]],
+  ])("route %j among labels %j follows only the exact label", async (route, labels) => {
+    const { ran, skipped } = await routeGateway(route, labels);
+    expect(ran).toEqual([route]);
+    expect(skipped).toEqual(labels.filter((label) => label !== route));
+  });
+
+  it("compares the route and the labels trimmed and case-insensitively", async () => {
+    const { ran, skipped } = await routeGateway("  VALID ", [" Valid", "invalid "]);
+    expect(ran).toEqual([" Valid"]);
+    expect(skipped).toEqual(["invalid "]);
+  });
+
+  it("follows every branch that carries the exact label", async () => {
+    const { ran, skipped } = await routeGateway("ok", ["ok", "OK ", "not ok"]);
+    expect(ran).toEqual(["ok", "OK "]);
+    expect(skipped).toEqual(["not ok"]);
+  });
+
+  it("still follows unlabelled edges when a label matches exactly", async () => {
+    const { ran, skipped } = await routeGateway("safe", ["safe", "unsafe", ""]);
+    expect(ran).toEqual(["safe", ""]);
+    expect(skipped).toEqual(["unsafe"]);
+  });
+
+  it("falls back to substring matching only when no label equals the route", async () => {
+    // The route sits inside a label.
+    expect(await routeGateway("backend", ["backend-api", "frontend"]))
+      .toEqual({ ran: ["backend-api"], skipped: ["frontend"] });
+    // A label sits inside the route.
+    expect(await routeGateway("approved-with-changes", ["approved", "rejected"]))
+      .toEqual({ ran: ["approved"], skipped: ["rejected"] });
+    // Several labels match by substring: all of them are followed.
+    expect(await routeGateway("api", ["backend-api", "frontend-api", "docs"]))
+      .toEqual({ ran: ["backend-api", "frontend-api"], skipped: ["docs"] });
+  });
+});

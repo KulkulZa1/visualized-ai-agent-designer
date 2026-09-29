@@ -56,7 +56,12 @@ function edgeLabel(e: Edge): string {
  * An edge is not taken when:
  * - Its source is a gateway that has set a route
  * - The edge has a non-empty label
- * - The label does not contain (or is not contained by) the chosen route
+ * - The label does not match the chosen route
+ *
+ * Route and labels are compared trimmed and case-insensitively. A label that
+ * equals the route wins outright, so "valid" does not also take an "invalid"
+ * branch. Only when no label equals the route does a label that contains (or is
+ * contained by) the route match, e.g. "approved" for "approved-with-changes".
  *
  * If the route matches none of the labels (e.g. "mixed", or an unparseable
  * reply), every branch is followed — the same as when no route was produced.
@@ -71,21 +76,26 @@ function computeSkipped(
   const gwNode = nodes.find((n) => n.id === gwId);
   if (!gwNode || gwNode.data.role !== AgentRole.Gateway) return skipped;
 
-  const route = gatewayRoutes.get(gwId);
+  const route = gatewayRoutes.get(gwId)?.trim().toLowerCase();
   if (!route) return skipped; // gateway ran but produced no routing decision → skip nothing
 
-  const taken = new Set<string>();
-  const notTaken = new Set<string>();
+  const labelled: { target: string; label: string }[] = [];
   for (const e of edges) {
     if (e.source !== gwId || !isForwardEdge(e)) continue;
     const label = edgeLabel(e);
     if (!label) continue; // unlabelled outgoing edge → always follow
-    if (label.includes(route) || route.includes(label)) taken.add(e.target);
-    else notTaken.add(e.target);
+    labelled.push({ target: e.target, label });
   }
+
+  // An exact label wins; the substring rule is only the fallback.
+  const exact = labelled.filter(({ label }) => label === route);
+  const matching = exact.length > 0
+    ? exact
+    : labelled.filter(({ label }) => label.includes(route) || route.includes(label));
+  const taken = new Set(matching.map(({ target }) => target));
   if (taken.size === 0) return skipped; // route matched no branch → follow all
 
-  for (const target of notTaken) {
+  for (const { target } of labelled) {
     if (!taken.has(target)) skipped.add(target);
   }
   return skipped;
