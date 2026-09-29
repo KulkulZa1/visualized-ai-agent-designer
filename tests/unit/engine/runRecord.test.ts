@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Edge } from "@xyflow/react";
 import {
-  definitionHash, fingerprint, reusableNodes, runRecordPath, savedNodeId, type NodeRecord, type RunRecord,
+  definitionHash, fingerprint, reusableNodes, runRecordPath, savedNodeId, sha256Hex, type NodeRecord, type RunRecord,
 } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole, type AgentNodeData } from "@/types/agent";
@@ -20,6 +20,19 @@ describe("fingerprint", () => {
     expect(fingerprint("abc")).toBe(fingerprint("abc"));
     expect(fingerprint("abc")).not.toBe(fingerprint("abd"));
     expect(fingerprint("")).toMatch(/^[0-9a-f]{14}$/);
+  });
+});
+
+describe("sha256Hex", () => {
+  it("is the SHA-256 of the text, in hex", async () => {
+    expect(await sha256Hex("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect(await sha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    // The text's UTF-8 bytes (0xC3 0xA9 for "é"), not UTF-16.
+    expect(await sha256Hex("é")).toBe("4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c");
+  });
+
+  it("differs for texts that differ by one character", async () => {
+    expect(await sha256Hex("echo hi\n")).not.toBe(await sha256Hex("echo hi"));
   });
 });
 

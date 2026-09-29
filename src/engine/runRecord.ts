@@ -56,6 +56,10 @@ export interface RunRecord {
   gatewayRoutes: Record<string, string>;
   changes: FileChange[];
   audit: AuditEntry[];
+  /** For each Hook node that runs without asking: the SHA-256 (hex) of its script as the run
+   *  first read it, or null if it could not be read. A resume compares the script with this,
+   *  not with what it finds when it starts. Absent in records from before it existed. */
+  hookScripts?: Record<string, string | null>;
 }
 
 /** A short fingerprint of a text, to notice a change (cyrb53 by bryc, public
@@ -73,6 +77,15 @@ export function fingerprint(text: string): string {
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
   h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0");
+}
+
+/** The SHA-256 of a text, as hex. Web Crypto: the app's WebView and Node 20 and later have it.
+ *  Throws where it is missing; nothing weaker stands in for it. */
+export async function sha256Hex(text: string): Promise<string> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) throw new Error("Web Crypto is not available");
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 /** What shapes a node's work, as a fingerprint. `prompt` is the prompt's text:

@@ -144,6 +144,51 @@ describe("harness run", { timeout: 60_000 }, () => {
     expect(JSON.parse(readFileSync(join(dir, trace), "utf8"))).toMatchObject({ runId, attempts: 2, status: "done" });
   });
 
+  it("drops the branch a gateway no longer chooses when a revision re-runs it, and leaves nothing of it in the saved run", () => {
+    // Draft → Gate → (Fast | Slow) → Review, and Review sends Draft back. Gate chooses Fast, then Slow.
+    const dir = workspace({
+      Draft: ["draft one", "draft two"], Gate: ['{"route":"fast"}', '{"route":"slow"}'],
+      Fast: ["fast answer"], Slow: ["slow answer"], Review: ["REVISE: try the slow way", "PASS"],
+    });
+    const link = (id: string, from: number, to: number, extra: Record<string, unknown> = {}) =>
+      ({ id, sourceAgentId: `agent-${from}`, targetAgentId: `agent-${to}`, ...extra });
+    writeFileSync(join(dir, "review.harness.yaml"), stringify({
+      meta: { name: "Gateway switch", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+      agents: [agent("Draft", "worker"), agent("Gate", "gateway"), agent("Fast", "worker"), agent("Slow", "worker"), agent("Review", "critic")],
+      connections: [
+        link("c0", 0, 1), link("c1", 1, 2, { label: "fast" }), link("c2", 1, 3, { label: "slow" }),
+        link("c3", 2, 4), link("c4", 3, 4), link("c5", 4, 0, { label: "revise", edgeKind: "feedback" }),
+      ],
+      executionSettings: { maxParallel: 2, timeoutSeconds: 300, retryOnFailure: false, maxRetries: 0 },
+      nodePositions: {},
+    }));
+
+    const run = harnessRun(dir, ["--task", "go", "--json"]);
+
+    expect(run.status, run.stderr).toBe(0);
+    const events = run.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    const finished = (agentName: string) => events
+      .filter((e) => e.type === "node_finished" && e.agent === agentName).map((e) => [e.status, e.output]);
+    expect(finished("Fast")).toEqual([["done", "fast answer"], ["skipped", undefined]]); // finished, then taken back
+    expect(finished("Slow")).toEqual([["skipped", undefined], ["done", "slow answer"]]); // skipped, then chosen
+    // The reviewer read Fast the first time and Slow, not Fast, the second.
+    const reviews = callsOf("Review", run.requests).map((r) => String(r.args.userMessage));
+    expect(reviews[0]).toContain("[From: Fast]\nfast answer");
+    expect(reviews[1]).toContain("[From: Slow]\nslow answer");
+    expect(reviews[1]).not.toContain("fast answer");
+    expect(callsOf("Fast", run.requests)).toHaveLength(1);
+    // The saved run has no output of Fast, and only the route Gate ended with.
+    const final = events.at(-1) as Record<string, unknown>;
+    expect(final).toMatchObject({ type: "run_finished", status: "done", outputs: { "agent-4": "PASS" } });
+    const record = JSON.parse(readFileSync(join(dir, String(final.trace)), "utf8")) as {
+      outputs: Record<string, string>; nodes: Record<string, { status: string; output?: string }>; gatewayRoutes: Record<string, string>;
+    };
+    expect(Object.keys(record.outputs).sort()).toEqual(["agent-0", "agent-1", "agent-3", "agent-4"]);
+    expect(record.nodes["agent-2"]).toMatchObject({ status: "skipped" });
+    expect(record.nodes["agent-2"].output).toBeUndefined();
+    expect(record.gatewayRoutes).toEqual({ "agent-1": "slow" });
+  });
+
   it("exits 2 when the run to resume is missing, of another workflow, or given another task", () => {
     const dir = workspace({ Coder: ["x"], Reviewer: ["y"] });
     expect(harnessRun(dir, ["--resume", "run-404"]).status).toBe(2);

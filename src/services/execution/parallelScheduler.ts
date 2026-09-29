@@ -101,6 +101,44 @@ function computeSkipped(
   return skipped;
 }
 
+/**
+ * The nodes `runParallel` skips for these gateway routes, by the same rules: a node
+ * with a forward input is pruned when every forward input is a pruned node or reaches
+ * it by an edge its gateway did not take (`allInputsDead`), so one live input is enough
+ * for a join to run. Pruning spreads down the graph until nothing more is pruned.
+ * Pure: the run loop asks again when a gateway has routed differently on a revision.
+ */
+export function prunedNodes(
+  nodes: AgentNode[],
+  edges: Edge[],
+  gatewayRoutes: Map<string, string>,
+): Set<string> {
+  // Forward inputs, built as runParallel builds its predecessors.
+  const inputs = new Map<string, string[]>(nodes.map((n): [string, string[]] => [n.id, []]));
+  for (const e of edges) {
+    if (!isForwardEdge(e) || !inputs.has(e.source) || !inputs.has(e.target)) continue;
+    inputs.get(e.target)!.push(e.source);
+  }
+  // Edges not taken, "source->target": by node pair, as runParallel keeps them.
+  const deadEdges = new Set<string>();
+  for (const n of nodes) {
+    for (const target of computeSkipped(n.id, nodes, edges, gatewayRoutes)) deadEdges.add(`${n.id}->${target}`);
+  }
+
+  const pruned = new Set<string>();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [id, sources] of inputs) {
+      if (pruned.has(id) || sources.length === 0) continue;
+      if (sources.every((source) => pruned.has(source) || deadEdges.has(`${source}->${id}`))) {
+        pruned.add(id);
+        grew = true;
+      }
+    }
+  }
+  return pruned;
+}
+
 // ── Main scheduler ────────────────────────────────────────────────────────────
 
 /**
