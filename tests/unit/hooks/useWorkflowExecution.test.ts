@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import { mockInvokeHandler } from "@/ipc/mockTauri";
+import { invoke as mockInvoke, mockInvokeHandler } from "@/ipc/mockTauri";
 import { useWorkflowExecution } from "@/hooks/useWorkflowExecution";
+import { runWorkflow } from "@/engine/runWorkflow";
+import type { RunRecord } from "@/engine/runRecord";
+import { defToGraph } from "@/engine/workflowGraph";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { useWorkspaceStore } from "@/store/workspaceStore";
@@ -698,7 +701,54 @@ describe("useWorkflowExecution", () => {
 
     await run();
 
-    expect(writes).toEqual([]);
+    // Only the run record is written; the agent's write never ran.
+    expect(writes.filter((w) => !(w as { relativePath: string }).relativePath.startsWith(".harness/runs/"))).toEqual([]);
+  });
+
+  it("saves each run's record in the workspace, where harness run can resume it", async () => {
+    // Canvas ids, not the file's agent-<i>: the record names nodes by their place in the file.
+    const a = { ...makeNode("A"), id: "node-1" };
+    const b = { ...makeNode("B"), id: "node-2" };
+    useWorkflowStore.setState({ nodes: [a, b], edges: [{ id: "e", source: "node-1", target: "node-2" }] });
+    const records: RunRecord[] = [];
+    mockInvokeHandler("write_workspace_file", (args) => {
+      const { relativePath, content } = args as { relativePath: string; content: string };
+      if (relativePath.startsWith(".harness/runs/")) records.push(JSON.parse(content));
+    });
+    mockInvokeHandler("call_ollama_api", (args) =>
+      (args as { system: string }).system.startsWith("You are B") ? Promise.reject(new Error("model crashed")) : "first");
+
+    const finished = await run();
+
+    const record = records.at(-1)!;
+    expect(record).toMatchObject({
+      runId: finished?.id, status: "error",
+      nodes: { "agent-0": { agent: "A", status: "done" }, "agent-1": { agent: "B", status: "error" } },
+    });
+
+    // harness run resumes it with the saved file's graph: A is reused.
+    const calls: string[] = [];
+    mockInvokeHandler("call_ollama_api", (args) => {
+      calls.push(/^You are (\w+),/.exec((args as { system: string }).system)![1]);
+      return "second";
+    });
+    const outcome = await runWorkflow({
+      graph: defToGraph(useWorkflowStore.getState().toWorkflowDef()),
+      config: { userInput: "", contextFilePaths: [], thinkDepthOverride: null, providerOverride: null },
+      provider: {
+        llmProvider: "ollama", apiKey: "", openaiApiKey: "", ollamaApiKey: "", ollamaBaseUrl: "http://localhost:11434",
+        ollamaModel: "qwen2.5-coder:7b", customApiUrl: "", customApiKey: "", customApiModel: "",
+      },
+      workspacePath: "/ws", continueOnError: true, resume: record,
+    }, {
+      invoke: mockInvoke, askCommand: async () => "deny", isCancelled: () => false, revealOutput: false,
+      events: {
+        onRunStarted: () => {}, onAgentUpdate: () => {}, onNodeStatus: () => {}, onAudit: () => {},
+        onFileChange: () => {}, onRunFinished: () => {},
+      },
+    });
+    expect(calls).toEqual(["B"]);
+    expect(outcome.started && outcome.run.agents["agent-0"]).toMatchObject({ status: "done", output: "first" });
   });
 
   it("gives the user's task to agents fed only by hook/memory nodes, not to downstream agents", async () => {

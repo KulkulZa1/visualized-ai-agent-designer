@@ -1,7 +1,15 @@
+// The core build (harness-core) serves only the commands a workflow run uses,
+// so the app's other commands are unused there.
+#![cfg_attr(not(feature = "app"), allow(dead_code))]
+
 mod commands;
 mod error;
 mod models;
 
+/// harness-core's stdin/stdout loop (`src/bin/harness-core.rs`).
+pub use commands::core_server::serve_stdio;
+
+#[cfg(feature = "app")]
 use commands::{
     api_commands::{
         call_anthropic_api, call_claude_api, call_ollama_api, call_openai_api,
@@ -17,6 +25,7 @@ use commands::{
     workflow_commands::{load_workflow, save_workflow},
 };
 
+#[cfg(feature = "app")]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Log level: DEBUG in dev builds, WARN in release.

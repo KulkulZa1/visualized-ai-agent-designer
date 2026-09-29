@@ -108,8 +108,14 @@ describe("destructive_guard template", () => {
       });
 
     it("blocks a destructive command followed by a large amount of text", () => {
-      const lines = Array.from({ length: 40_000 }, (_, i) => `line ${i}`);
-      const result = run(["rm -rf /", ...lines].join("\n"));
+      // More than a 64 KiB pipe buffer, where piping the input into grep failed
+      // open on SIGPIPE; less than the 128 KiB Linux allows one environment string.
+      const lines = Array.from({ length: 9_000 }, (_, i) => `line ${i}`);
+      const input = ["rm -rf /", ...lines].join("\n");
+      expect(input.length).toBeGreaterThan(64 * 1024);
+      expect(`HOOK_INPUT=${input}`.length).toBeLessThan(128 * 1024);
+      const result = run(input);
+      expect(result.error).toBeUndefined();
       expect(result.status).toBe(1);
     }, 30_000);
 

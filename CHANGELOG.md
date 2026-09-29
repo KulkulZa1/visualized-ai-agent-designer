@@ -6,6 +6,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (headless runs and CI)
+- **`harness run`**: runs a workflow without the app, for CI (`docs/HEADLESS.md`).
+  - It uses the app's run engine, now `src/engine/runWorkflow.ts` with the hook as its host.
+  - The Rust commands come from `harness-core`: the app's commands built without Tauri (`npm run build:core`), as JSON lines over stdin/stdout.
+  - Keys come from the environment only. Agent commands run only if passed exactly with `--allow-command`.
+  - Output is readable lines or `--json` events. Exit codes are 0/1/2/3/130. Ctrl+C stops the run and saves it.
+- **Run records and resume**: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`.
+  - `harness run --resume <runId>` reuses the agents that finished and did not change, keyed by their place in the workflow file.
+- **CI**: `.github/workflows/ci.yml` runs types, the TypeScript tests (with `harness run` end to end) and the Rust tests with and without Tauri on Linux. `examples/ci/harness-run.yml` is a template for other repositories.
+  - The Rust process tests now run on every platform, so Linux covers the `sh` path.
+
 ### Added
 - **Native tool calling** — agents with runnable tools call them through the provider's native tool calling (new Rust `chat_turn` command for Anthropic, OpenAI and compatible endpoints, and Ollama): JSON-schema tool definitions, a real message history, and every tool call of a turn answered. Models or servers that refuse tool definitions fall back to the `<tool_call>` text protocol for the rest of the run; so does the VS Code extension, whose invoke shim lacks the command.
 - **Sub-agents** — `subagent_dispatch` now starts helper agents while a node runs: each gets a fresh context, a subset of its parent's tools and the parent's provider, model, deadline and Stop, and its final report comes back as the tool result; several dispatches in one turn run in parallel. One level deep, at most 5 per node run and 3 at a time. The activity panel lists each helper (status, task, tools, time, report or error; a helper still working when the run is stopped shows as stopped); starts, reports and tool calls are also in the audit log.

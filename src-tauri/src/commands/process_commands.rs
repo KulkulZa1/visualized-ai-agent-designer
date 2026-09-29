@@ -45,7 +45,7 @@ fn interpreter_path(path: &Path) -> String {
 
 // `async`: run on Tauri's thread pool. A plain sync command runs on the main
 // thread and would freeze the whole window for the hook's full timeout.
-#[tauri::command(async)]
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn execute_hook(
     workspace_path: String,
     hook_path: String,
@@ -119,7 +119,7 @@ impl Drop for Registration {
 
 /// Run an agent's shell command line in the workspace folder: cmd.exe on Windows,
 /// sh elsewhere. The frontend asks the user to approve each command first.
-#[tauri::command(async)]
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn execute_command(
     workspace_path: String,
     command: String,
@@ -162,7 +162,7 @@ pub fn execute_command(
 
 /// Stop a running agent command: kill its whole process tree. False if no
 /// command with that id is running.
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn cancel_command(command_id: String) -> bool {
     let pid = RUNNING_COMMANDS.lock().ok().and_then(|mut running| running.remove(&command_id));
     if let Some(pid) = pid {
@@ -186,12 +186,13 @@ fn kill_tree(pid: u32) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // Agent commands start in their own process group (shell_command).
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Agent commands start in their own process group (shell_command): signal the
+        // group itself. Running `kill -KILL -<pgid>` instead is ambiguous: a kill binary
+        // may read "-<pgid>" as an option and signal pid -1, every process of the user.
+        // SAFETY: kill(2) only sends a signal; a negative pid names a process group.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
     }
 }
 
@@ -341,6 +342,15 @@ mod tests {
     use std::fs;
     use tempfile::tempdir;
 
+    /// The platform's shell running a line: cmd.exe /C on Windows, sh -c elsewhere.
+    fn shell(windows: &str, unix: &str) -> (&'static str, Vec<String>) {
+        if cfg!(target_os = "windows") {
+            ("cmd.exe", vec!["/C".to_string(), windows.to_string()])
+        } else {
+            ("sh", vec!["-c".to_string(), unix.to_string()])
+        }
+    }
+
     #[test]
     fn execute_hook_requires_explicit_consent() {
         let dir = tempdir().unwrap();
@@ -361,16 +371,17 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn execute_hook_runs_a_batch_hook_with_consent() {
+    fn execute_hook_runs_a_hook_with_consent() {
         // canonicalize() yields a \\?\ path that cmd/powershell/bash cannot open.
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("hook.bat"), "@echo hook-ran").unwrap();
+        let (file, script) =
+            if cfg!(target_os = "windows") { ("hook.bat", "@echo hook-ran") } else { ("hook.sh", "echo hook-ran") };
+        fs::write(dir.path().join(file), script).unwrap();
 
         let output = execute_hook(
             dir.path().to_string_lossy().to_string(),
-            "hook.bat".to_string(),
+            file.to_string(),
             "agent-1".to_string(),
             None,
             true,
@@ -382,16 +393,17 @@ mod tests {
         assert!(output.stdout.contains("hook-ran"));
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn execute_hook_honours_the_node_timeout() {
         let dir = tempdir().unwrap();
-        fs::write(dir.path().join("slow.bat"), "@ping -n 8 127.0.0.1 >nul").unwrap();
+        let (file, script) =
+            if cfg!(target_os = "windows") { ("slow.bat", "@ping -n 8 127.0.0.1 >nul") } else { ("slow.sh", "sleep 8") };
+        fs::write(dir.path().join(file), script).unwrap();
         let started = Instant::now();
 
         let result = execute_hook(
             dir.path().to_string_lossy().to_string(),
-            "slow.bat".to_string(),
+            file.to_string(),
             "agent-1".to_string(),
             None,
             true,
@@ -405,9 +417,10 @@ mod tests {
     #[test]
     fn run_hook_passes_custom_environment() {
         let dir = tempdir().unwrap();
+        let (program, args) = shell("echo %PHASE4_MODE%", "echo $PHASE4_MODE");
         let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "echo %PHASE4_MODE%".to_string()],
+            program,
+            &args,
             dir.path(),
             &HashMap::from([("PHASE4_MODE".to_string(), "enabled".to_string())]),
             Duration::from_secs(2),
@@ -423,9 +436,10 @@ mod tests {
         // Hooks and agent-issued commands must not be able to read the app's keys.
         std::env::set_var("OLLAMA_REMOTE_API_KEY", "probe-secret-must-not-leak");
         let dir = tempdir().unwrap();
+        let (program, args) = shell("echo key=%OLLAMA_REMOTE_API_KEY%", "echo key=$OLLAMA_REMOTE_API_KEY");
         let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "echo key=%OLLAMA_REMOTE_API_KEY%".to_string()],
+            program,
+            &args,
             dir.path(),
             &HashMap::new(),
             Duration::from_secs(5),
@@ -440,13 +454,13 @@ mod tests {
         // ~126 KB of stdout: more than the 64 KiB pipe buffer. The child must not
         // block on a full pipe while we wait for it to exit.
         let dir = tempdir().unwrap();
+        let (program, args) = shell(
+            "for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789",
+            "i=0; while [ $i -lt 3000 ]; do echo 0123456789012345678901234567890123456789; i=$((i+1)); done",
+        );
         let output = run_command_with_timeout(
-            "cmd.exe",
-            &[
-                "/C".to_string(),
-                "for /L %i in (1,1,3000) do @echo 0123456789012345678901234567890123456789"
-                    .to_string(),
-            ],
+            program,
+            &args,
             dir.path(),
             &HashMap::new(),
             Duration::from_secs(20),
@@ -459,12 +473,13 @@ mod tests {
 
     #[test]
     fn run_command_returns_when_a_background_grandchild_keeps_the_pipes_open() {
-        // `start /b` leaves ping running (holding stdout) after cmd exits.
+        // `start /b` (or `&` in sh) leaves a process running, holding stdout, after the shell exits.
         let dir = tempdir().unwrap();
         let started = Instant::now();
+        let (program, args) = shell("start /b ping -n 8 127.0.0.1 >nul & echo done", "sleep 8 & echo done");
         let output = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "start /b ping -n 8 127.0.0.1 >nul & echo done".to_string()],
+            program,
+            &args,
             dir.path(),
             &HashMap::new(),
             Duration::from_secs(20),
@@ -555,12 +570,12 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn execute_command_stops_at_the_time_limit() {
         let dir = tempdir().unwrap();
         let started = Instant::now();
-        let result = run_in(dir.path(), "ping -n 8 127.0.0.1 >nul", 1);
+        let line = if cfg!(target_os = "windows") { "ping -n 8 127.0.0.1 >nul" } else { "sleep 8" };
+        let result = run_in(dir.path(), line, 1);
 
         assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
@@ -581,12 +596,13 @@ mod tests {
         assert!(shell_command("echo hi", r"\\server\share\project").is_err());
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn agent_commands_do_not_inherit_provider_api_keys() {
         std::env::set_var("OLLAMA_REMOTE_API_KEY", "probe-secret-must-not-leak");
         let dir = tempdir().unwrap();
-        let output = run_in(dir.path(), "echo key=%OLLAMA_REMOTE_API_KEY%", 10);
+        let line =
+            if cfg!(target_os = "windows") { "echo key=%OLLAMA_REMOTE_API_KEY%" } else { "echo key=$OLLAMA_REMOTE_API_KEY" };
+        let output = run_in(dir.path(), line, 10);
         std::env::remove_var("OLLAMA_REMOTE_API_KEY");
 
         assert!(!output.unwrap().stdout.contains("probe-secret-must-not-leak"));
@@ -595,9 +611,10 @@ mod tests {
     #[test]
     fn run_hook_enforces_timeout() {
         let dir = tempdir().unwrap();
+        let (program, args) = shell("ping -n 4 127.0.0.1 > nul", "sleep 4");
         let result = run_command_with_timeout(
-            "cmd.exe",
-            &["/C".to_string(), "ping -n 4 127.0.0.1 > nul".to_string()],
+            program,
+            &args,
             dir.path(),
             &HashMap::new(),
             Duration::from_millis(100),
@@ -608,15 +625,14 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn cancel_command_kills_a_running_command() {
         let dir = tempdir().unwrap();
         let path = dir.path().to_string_lossy().to_string();
         let started = Instant::now();
+        let line = if cfg!(target_os = "windows") { "ping -n 30 127.0.0.1 >nul" } else { "sleep 30" };
         let runner = thread::spawn(move || {
-            execute_command(path, "ping -n 30 127.0.0.1 >nul".to_string(), true, 60,
-                Some("cancel-test".to_string()))
+            execute_command(path, line.to_string(), true, 60, Some("cancel-test".to_string()))
         });
         while !RUNNING_COMMANDS.lock().unwrap().contains_key("cancel-test") {
             assert!(started.elapsed() < Duration::from_secs(10), "the command never started");
@@ -628,6 +644,24 @@ mod tests {
 
         assert_ne!(output.exit_code, 0);
         assert!(started.elapsed() < Duration::from_secs(10), "took {:?}", started.elapsed());
+    }
+
+    /// Stopping a command must signal only its own process group. `kill -KILL -<pgid>`
+    /// can be read by a kill binary as option `-1…` and signal pid -1: every process
+    /// of the user. On the first Linux CI runs that ended the runner itself.
+    #[cfg(unix)]
+    #[test]
+    fn stopping_a_command_leaves_other_processes_running() {
+        let mut neighbour = Command::new("sleep").arg("30").spawn().unwrap();
+        let dir = tempdir().unwrap();
+
+        let result = run_in(dir.path(), "sleep 8", 1);
+
+        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
+        let still_running = neighbour.try_wait().unwrap().is_none();
+        let _ = neighbour.kill();
+        let _ = neighbour.wait();
+        assert!(still_running, "a process outside the command's group was killed");
     }
 
     #[test]

@@ -40,6 +40,9 @@ export interface CommandToolOptions {
   extendDeadline: (ms: number) => void;
   isCancelled: () => boolean;
   onAudit: (details: string, success: boolean) => void;
+  /** Who approves commands when it is not the user, e.g. "--allow-command"
+   *  (harness run); named in the audit and in what the agent is told. */
+  policy?: string;
 }
 
 function tail(text: string, max: number): string {
@@ -77,6 +80,11 @@ export async function runCommandTool(args: Record<string, unknown>, opts: Comman
   opts.extendDeadline(Date.now() - asked);
   if (opts.isCancelled()) throw new Error("Run stopped");
   if (approval === "deny") {
+    if (opts.policy) {
+      opts.onAudit(`${opts.agentName}: command denied (not in ${opts.policy}): ${command}`, false);
+      return `[error] This run does not allow this command (${opts.policy}), so it was not run: ${command}. ` +
+        "Do not ask for it again; continue without it or explain what you needed it for.";
+    }
     opts.onAudit(`${opts.agentName}: command denied by the user: ${command}`, false);
     return `[error] The user denied this command, so it was not run: ${command}. ` +
       "Do not ask for it again; continue without it or explain what you needed it for.";
@@ -93,8 +101,9 @@ export async function runCommandTool(args: Record<string, unknown>, opts: Comman
       `${command} did not finish within ${opts.agentName}'s time limit`,
       opts.isCancelled,
     );
+    const approved = opts.policy ? `allowed by ${opts.policy}` : APPROVED[approval];
     opts.onAudit(
-      `${opts.agentName} ran: ${command} (${APPROVED[approval]}; exit ${result.exitCode}, ${result.durationMs} ms)`,
+      `${opts.agentName} ran: ${command} (${approved}; exit ${result.exitCode}, ${result.durationMs} ms)`,
       result.exitCode === 0);
     return formatResult(command, result);
   } catch (e) {

@@ -7,7 +7,7 @@ use std::io::Write;
 const AUDIT_DIR: &str = ".harness";
 const AUDIT_FILE: &str = "audit.log.jsonl";
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn write_audit_entry(workspace_path: String, entry: AuditEntry) -> AppResult<()> {
     let audit_dir = resolve_safe_path(&workspace_path, AUDIT_DIR)?;
     fs::create_dir_all(&audit_dir)?;

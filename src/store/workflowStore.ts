@@ -6,6 +6,7 @@ import type { NodeChange, EdgeChange, Connection } from "@xyflow/react";
 import type { AgentNode, WorkflowDef, WorkflowMeta, ExecutionSettings } from "@/types/workflow";
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
+import { defToGraph } from "@/engine/workflowGraph";
 
 type WorkflowEdgeKind = NonNullable<WorkflowDef["connections"][number]["edgeKind"]>;
 type WorkflowEdgeData = { label?: string; edgeKind?: WorkflowEdgeKind };
@@ -192,24 +193,12 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
         }),
 
       loadWorkflow: (def) => {
+        const graph = defToGraph(def);
         set((state) => {
-          state.meta = def.meta;
-          state.executionSettings = def.executionSettings;
-          state.edges = def.connections.map((c) => ({
-            id: c.id,
-            source: c.sourceAgentId,
-            target: c.targetAgentId,
-            label: c.label,
-            type: c.edgeKind ?? "dataflow",
-            data: {
-              label: c.label,
-              edgeKind: c.edgeKind ?? "dataflow",
-            },
-          }));
-          state.nodes = def.agents.map((agent, i) => {
-            const pos = def.nodePositions[`agent-${i}`] ?? { x: i * 240, y: 120 };
-            return { id: `agent-${i}`, type: "agent", position: pos, data: agent } satisfies AgentNode;
-          });
+          state.meta = graph.meta;
+          state.executionSettings = graph.executionSettings;
+          state.edges = graph.edges;
+          state.nodes = graph.nodes;
           state.isDirty = false;
           state.filePath = null;
         });
