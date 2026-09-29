@@ -81,7 +81,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **CLI** — `--workspace <dir>` can appear before the command.
 - **Bundled hook scripts** — `url_allowlist.py` checks the parsed hostname and requires http/https; `destructive_guard.sh` no longer fails open on large input and catches more destructive forms; `rate_limit_sentinel.py` no longer crashes on non-UTF-8 consoles; `test_gate` defaults `WORKSPACE` to the repo root.
 - **Agent file tools** — `fs.write` no longer overwrites a file it cannot read (such a change was missing from the change log and could not be reverted), and a call without `content` or `new_string` is an error instead of an empty write.
-- **Text protocol** — a `<tool_call>` with invalid JSON goes back to the model as an error step instead of becoming the node's answer; JSON in a code fence inside the tags now parses.
+- **Text protocol** — a `<tool_call>` with invalid JSON, or one cut off before `</tool_call>`, goes back to the model as an error step instead of becoming the node's answer; JSON in a code fence inside the tags now parses.
+- **Workspace listing** — `list_workspace_files` lists symlinks and junctions without following them (a self-referencing link recursed without end), and a folder it can't read no longer fails the whole listing.
 - **Gateways and reviews** — a route that equals an edge label follows only that edge (`valid` no longer also takes `invalid`); route and verdict JSON is found even with other braces in the reply; a leading APPROVED, PASS or ESCALATE is no longer overridden by a later "action: revise"; REVISE no longer re-runs nodes a gateway pruned.
 - **Runs** — a run that fails as a whole (a cycle, blocked dependencies) says why and is audited; streamed text from a stopped run can no longer overwrite the next run's output.
 - **Ollama** — `http://[::1]` and other loopback addresses (127.x.x.x) count as local.
@@ -101,6 +102,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Protected paths** — agent file tools refuse to write git internals (any `.git` path segment, including a `.git` file), `.harness/hooks/` and `.harness/audit.log.jsonl`, so a prompt-injected agent cannot plant a git hook, rewrite an auto-run hook script or edit the audit trail. A Hook node whose script an agent wrote earlier in the same run is refused like one that needs consent. The check is on the path as written (Windows 8.3 names and NTFS streams are not covered).
 - **MCP `validate_workflow`** reads only `*.harness.yaml`/`.yml` files, checks containment on the real path (symlinks included), and no longer returns file lines in YAML errors (it could echo a line of `.env.example`).
 - **Windows command lookup** — agent commands and hooks get `NoDefaultCurrentDirectoryInExePath=1`, so cmd.exe doesn't run an `npm.cmd` or `git.bat` an agent planted in the workspace (not yet verified on Windows).
+- **UNC and device paths** — `resolve_safe_path` rejects `\\host\share`, `\\?\UNC\…` and `\\.\…` paths before touching the filesystem; on Windows, resolving one made the system try to authenticate to the remote host.
 - **Audit log** — entries are not written when `.harness/audit.log.jsonl` is a symbolic link (dangling or not), so a cloned repository can't point the log at a file outside the workspace, such as `~/.bashrc`.
 
 ### Planned

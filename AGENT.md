@@ -32,7 +32,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-29 (the checks CI runs; not a Windows re-run): `npx tsc --noEmit`
-passed; `npx vitest run` passed, 801 tests / 57 files; `cargo test` passed, 86
+passed; `npx vitest run` passed, 808 tests / 57 files; `cargo test` passed, 101
 tests (the 7 Windows-only tests are not compiled on Linux); `npm run build`
 passed with no empty `vendor-react` chunk (the large `index`/`monacoLocal`
 warning remains). `.github/workflows/ci.yml` runs the same checks on every pull
