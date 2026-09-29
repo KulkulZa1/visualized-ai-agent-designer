@@ -16,8 +16,8 @@
  * cli/dist/harness-run.mjs (npm run build:cli) and needs harness-core (npm run build:core).
  */
 
-import { readFileSync, readdirSync, lstatSync, existsSync } from "node:fs";
-import { join, resolve, basename } from "node:path";
+import { readFileSync, readdirSync, lstatSync, realpathSync, existsSync } from "node:fs";
+import { join, resolve, basename, relative, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -240,6 +240,7 @@ function findWorkspace() {
   return process.cwd();
 }
 
+// [KEEP-IN-SYNC] with isRealDirectory in mcp/server.mjs.
 // True for a real folder, false for a symlink or junction (even one that leads to a folder) and
 // for anything that does not exist.
 function isRealDirectory(path) {
@@ -247,6 +248,34 @@ function isRealDirectory(path) {
     return lstatSync(path).isDirectory();
   } catch {
     return false;
+  }
+}
+
+// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs.
+function isInsideDir(rootPath, absPath) {
+  const rel = relative(rootPath, absPath);
+  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+// [KEEP-IN-SYNC] with resolveInsideWorkspace in mcp/server.mjs: the same rule, that the REAL path
+// must be inside the real workspace. There is no project root to check here, and only a regular
+// file qualifies.
+// Returns the text of `target`, a file under `workspace` (package.json, the audit log, the snapshot
+// index), or null when there is nothing safe to read: it is missing or unreadable, it resolves
+// outside the workspace through a symlink or junction (on it or on any folder above it), or it is
+// not a regular file. A cloned repository can ship such links, and `-> /dev/zero` has no end. The
+// caller treats null as a missing file. The workspace itself is the user's choice, so it may be
+// reached through a link: only where the file resolves matters.
+function readFileInsideWorkspace(workspace, target) {
+  try {
+    const real = realpathSync(target);
+    if (!isInsideDir(realpathSync(workspace), real)) return null;
+    // The type of what the path resolves to: a link to a regular file inside the workspace still
+    // qualifies, and a FIFO or a device does not, whatever it is called or linked as.
+    if (!lstatSync(real).isFile()) return null;
+    return readFileSync(real, "utf-8");
+  } catch {
+    return null;
   }
 }
 
@@ -279,9 +308,12 @@ function findHarnessFiles(dir) {
 
 // Returns the parsed JSON object, or `fallback` when the file is missing, unreadable, not JSON,
 // or JSON that is not an object (null, an array, a string...) — callers read properties off it.
-function readJsonFile(path, fallback) {
+// The file is read by readFileInsideWorkspace, so a link or a special file counts as missing.
+function readJsonFile(workspace, path, fallback) {
+  const text = readFileInsideWorkspace(workspace, path);
+  if (text === null) return fallback;
   try {
-    const value = JSON.parse(readFileSync(path, "utf-8"));
+    const value = JSON.parse(text);
     return value !== null && typeof value === "object" && !Array.isArray(value) ? value : fallback;
   } catch {
     return fallback;
@@ -312,7 +344,10 @@ function cmdProjectStatus() {
   const harnessDir = join(workspace, ".harness");
   const auditLog   = join(harnessDir, "audit.log.jsonl");
   const snapIndex  = join(harnessDir, "snapshots", "index.json");
-  const packageJson = readJsonFile(join(workspace, "package.json"), {});
+  // package.json, the audit log and the snapshot index come from the workspace, which may be a
+  // cloned repository: each is read only if it is a regular file that resolves inside the workspace
+  // (readFileInsideWorkspace), and counts as missing otherwise.
+  const packageJson = readJsonFile(workspace, join(workspace, "package.json"), {});
   const keyDocs = KEY_DOCS.map((docPath) => ({
     path: docPath,
     exists: existsSync(join(workspace, docPath)),
@@ -320,18 +355,15 @@ function cmdProjectStatus() {
 
   // Count audit entries
   let auditCount = 0;
-  if (existsSync(auditLog)) {
-    try {
-      const lines = readFileSync(auditLog, "utf-8").split("\n").filter(Boolean);
-      auditCount = lines.length;
-    } catch { /* ignore */ }
-  }
+  const auditText = readFileInsideWorkspace(workspace, auditLog);
+  if (auditText !== null) auditCount = auditText.split("\n").filter(Boolean).length;
 
   // Count snapshots
   let snapCount = 0;
-  if (existsSync(snapIndex)) {
+  const snapText = readFileInsideWorkspace(workspace, snapIndex);
+  if (snapText !== null) {
     try {
-      const idx = JSON.parse(readFileSync(snapIndex, "utf-8"));
+      const idx = JSON.parse(snapText);
       snapCount = Object.values(idx).flat().length;
     } catch { /* ignore */ }
   }

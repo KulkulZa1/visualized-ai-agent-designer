@@ -681,6 +681,24 @@ function trackedOutsideDir() {
   return dir;
 }
 
+// True where mkfifo can make a named pipe in a workspace (not on Windows). Tests that need one are
+// skipped elsewhere.
+const canMakeFifo = (() => {
+  if (process.platform === "win32") return false;
+  const dir = makeWorkspace();
+  try {
+    return spawnSync("mkfifo", [join(dir, "pipe")]).status === 0;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+// A named pipe with nothing writing to it: opening it for reading blocks until something opens it
+// for writing.
+function makeFifo(path: string) {
+  expect(spawnSync("mkfifo", [path]).status).toBe(0);
+}
+
 // A copy of the server in a scratch project inside outputs/ (yaml and zod still resolve from
 // the repo's node_modules): the server's project root is the folder above its own file, so this
 // lets a test decide which files exist in the project, under tests/ or anywhere else.
@@ -1186,6 +1204,23 @@ describe("MCP get_recent_logs and list_artifacts: links out of the workspace", (
     expect(parsed.entries?.map((entry) => entry.id)).toEqual(["inside"]);
   });
 
+  // The link is refused for leading outside, before anything asks what it leads to: the reply must
+  // not tell a caller that an outside file is a FIFO. (A server that opened it would hang, and the
+  // timeout would kill it.)
+  it.skipIf(!canMakeFifo)("refuses an audit log that is a symlink to a FIFO outside the project as leading outside", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    makeFifo(join(outside, "pipe"));
+    mkdirSync(join(workspace, ".harness"));
+    symlinkSync(join(outside, "pipe"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectRefused(result.responses[0], "entries");
+    expectNothingOf(result.stdout, outside);
+  });
+
   it("refuses an artifacts folder that is a symlink to a folder outside the project", () => {
     const workspace = trackedWorkspace();
     const outside = trackedOutsideDir();
@@ -1242,6 +1277,54 @@ describe("MCP get_recent_logs and list_artifacts: links out of the workspace", (
     expectRefused(result.responses[0], "entries");
     expectRefused(result.responses[1], "artifacts");
     expectNothingOf(result.stdout, outside);
+  });
+});
+
+describe("MCP get_recent_logs: an audit log that is not a regular file", () => {
+  // The refusal for a log the tool will not open: no entries, and fixed text that names no path.
+  function expectNotRegular(response: JsonRpcResponse) {
+    expect(response.result?.isError).toBeUndefined();
+    expect(contentJson(response)).toEqual({
+      count: 0,
+      entries: [],
+      error: "Path rejected: the audit log is not a regular file.",
+    });
+  }
+
+  it("refuses an audit log that is a folder", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness", "audit.log.jsonl"), { recursive: true });
+
+    const result = callTool("get_recent_logs", { workspace });
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
+  });
+
+  // A FIFO that has no writer blocks whoever opens it to read, and the server is single-threaded.
+  // A server that reads it never answers: the timeout kills it, and it then has no exit status and
+  // has sent nothing.
+  it.skipIf(!canMakeFifo)("returns at once for an audit log that is a FIFO", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness"));
+    makeFifo(join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
+  });
+
+  it.skipIf(!canMakeFifo)("returns at once for an audit log that is a symlink to a FIFO inside the workspace", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness"));
+    makeFifo(join(workspace, ".harness", "pipe"));
+    symlinkSync(join(workspace, ".harness", "pipe"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
   });
 });
 

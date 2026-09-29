@@ -172,11 +172,22 @@ const PROVIDER_CATALOG = [
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// [KEEP-IN-SYNC] with isRealDirectory in cli/harness.mjs.
 // True for a real folder, false for a symlink or junction (even one that leads to a folder) and
 // for anything that does not exist.
 function isRealDirectory(path) {
   try {
     return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// True for a regular file, false for a folder, a FIFO, a device, a link, and for anything that does
+// not exist.
+function isRegularFile(path) {
+  try {
+    return lstatSync(path).isFile();
   } catch {
     return false;
   }
@@ -209,6 +220,7 @@ function findFiles(dir, ext, max = 50) {
   return result;
 }
 
+// [KEEP-IN-SYNC] with isInsideDir in cli/harness.mjs.
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
@@ -240,6 +252,8 @@ function resolveWorkspacePath(inputPath) {
   return resolveSafePath(inputPath);
 }
 
+// [KEEP-IN-SYNC] with readFileInsideWorkspace in cli/harness.mjs (the containment rule: the CLI has
+// no project root to check, and reads a regular file only).
 // Resolves `target`, a file or folder under `workspace` (the audit log, the artifacts folder), for
 // reading: { path } (its real path), { missing: true } when there is nothing to read (a link that
 // dangles or loops included), or { error } when it leads out of the workspace through a symlink or
@@ -770,6 +784,13 @@ const TOOLS = {
           invalidLines: 0,
           note: "No audit log exists for this workspace.",
         };
+      }
+      // Only a regular file is read: opening a FIFO that has no writer blocks this single-threaded
+      // server for good. log.path is the real path, so this is the type of what the log resolves to
+      // (a link to a regular file inside the workspace still reads). The reply is fixed text: it
+      // names no path.
+      if (!isRegularFile(log.path)) {
+        return { count: 0, entries: [], error: "Path rejected: the audit log is not a regular file." };
       }
 
       const cappedLimit = clampLimit(limit, 20, 100);

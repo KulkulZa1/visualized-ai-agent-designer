@@ -1,6 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -17,6 +17,24 @@ function makeScratchDir() {
   const dir = mkdtempSync(join(tmpdir(), "harness-cli-t-"));
   scratchDirs.push(dir);
   return dir;
+}
+
+// True where mkfifo can make a named pipe here (not on Windows). Tests that need one are skipped
+// elsewhere.
+const canMakeFifo = (() => {
+  if (process.platform === "win32") return false;
+  const dir = mkdtempSync(join(tmpdir(), "harness-cli-t-"));
+  try {
+    return spawnSync("mkfifo", [join(dir, "pipe")]).status === 0;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+// A named pipe with nothing writing to it: opening it for reading blocks until something opens it
+// for writing.
+function makeFifo(path: string) {
+  expect(spawnSync("mkfifo", [path]).status).toBe(0);
 }
 
 // A valid workflow with `agentCount` agents (saved ids agent-0, agent-1, ...) and the given
@@ -234,6 +252,8 @@ describe("harness CLI project status: workspace discovery", () => {
     workflows: string[];
     exampleWorkflowCount: number;
     packageName: string;
+    auditEntries: number;
+    snapshots: number;
   }
 
   function status(args: string[], timeoutMs?: number) {
@@ -389,4 +409,117 @@ describe("harness CLI project status: workspace discovery", () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("App: Harness Studio (unknown)");
   });
+
+  // The three files project status reads: where each is, what it holds, the JSON field that shows
+  // it, and that field's value when the file is read and when it counts as missing.
+  const readFiles = [
+    { file: "package.json", content: '{ "name": "demo-app" }', field: "packageName", read: "demo-app", missing: "unknown" },
+    { file: ".harness/audit.log.jsonl", content: '{"id":1}\n\n{"id":2}\n{"id":3}\n', field: "auditEntries", read: 3, missing: 0 },
+    { file: ".harness/snapshots/index.json", content: '{ "a": [1, 2], "b": [3] }', field: "snapshots", read: 3, missing: 0 },
+  ] as const;
+
+  // Writes `content` to `path`, making its folders, and returns `path`.
+  function writeFileIn(path: string, content: string) {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, content, "utf8");
+    return path;
+  }
+
+  it("reads package.json, the audit log and the snapshot index when they are regular files", () => {
+    const workspace = makeScratchDir();
+    for (const { file, content } of readFiles) writeFileIn(join(workspace, file), content);
+
+    const text = runHarness(["project", "status", "--workspace", workspace]);
+
+    // The blank line in the audit log is not an entry.
+    expect(status(["--workspace", workspace])).toMatchObject({ packageName: "demo-app", auditEntries: 3, snapshots: 3 });
+    expect(text.stdout).toContain("App: Harness Studio (demo-app)");
+    expect(text.stdout).toContain("Audit entries  : 3");
+    expect(text.stdout).toContain("Snapshots      : 3");
+  });
+
+  it("still reads the files of a workspace that is given as a symlink, since the user chose it", () => {
+    const real = makeScratchDir();
+    for (const { file, content } of readFiles) writeFileIn(join(real, file), content);
+    const link = join(makeScratchDir(), "workspace-link");
+    symlinkSync(real, link, "junction");
+
+    expect(status(["--workspace", link])).toMatchObject({ packageName: "demo-app", auditEntries: 3, snapshots: 3 });
+  });
+
+  it("still reads the audit log and the snapshot index behind a .harness folder that is a symlink to a folder inside the workspace", () => {
+    const workspace = makeScratchDir();
+    writeFileIn(join(workspace, "store", "audit.log.jsonl"), '{"id":1}\n{"id":2}\n');
+    writeFileIn(join(workspace, "store", "snapshots", "index.json"), '{ "a": [1] }');
+    // "junction" needs no privileges on Windows; other platforms create a directory symlink.
+    symlinkSync(join(workspace, "store"), join(workspace, ".harness"), "junction");
+
+    expect(status(["--workspace", workspace])).toMatchObject({ auditEntries: 2, snapshots: 1 });
+  });
+
+  it.skipIf(process.platform === "win32").each(readFiles)(
+    "still reads $file when it is a symlink to a file inside the workspace",
+    ({ file, content, field, read }) => {
+      const workspace = makeScratchDir();
+      const target = writeFileIn(join(workspace, "real", "data.txt"), content);
+      mkdirSync(dirname(join(workspace, file)), { recursive: true });
+      symlinkSync(target, join(workspace, file));
+
+      expect(status(["--workspace", workspace])[field]).toBe(read);
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each(readFiles)(
+    "shows no data of $file when it is a symlink to a file outside the workspace",
+    ({ file, content, field, missing }) => {
+      const workspace = makeScratchDir();
+      const outside = writeFileIn(join(makeScratchDir(), "outside.txt"), content);
+      mkdirSync(dirname(join(workspace, file)), { recursive: true });
+      symlinkSync(outside, join(workspace, file));
+
+      const result = runHarness(["project", "status", "--json", "--workspace", workspace]);
+
+      expect(result.status).toBe(0);
+      expect((JSON.parse(result.stdout) as Status)[field]).toBe(missing);
+      // The package name it would have shown.
+      expect(result.stdout).not.toContain("demo-app");
+    },
+  );
+
+  it("shows no audit or snapshot data behind a .harness folder that is a symlink to a folder outside the workspace", () => {
+    const workspace = makeScratchDir();
+    const outside = makeScratchDir();
+    // The files themselves are regular files: only the folder above them is a link.
+    writeFileIn(join(outside, "audit.log.jsonl"), '{"id":1}\n{"id":2}\n{"id":3}\n');
+    writeFileIn(join(outside, "snapshots", "index.json"), '{ "a": [1, 2], "b": [3] }');
+    symlinkSync(outside, join(workspace, ".harness"), "junction");
+
+    expect(status(["--workspace", workspace])).toMatchObject({ auditEntries: 0, snapshots: 0 });
+  });
+
+  it.skipIf(process.platform !== "linux").each(readFiles)(
+    "returns promptly when $file is a symlink to /dev/zero",
+    ({ file, field, missing }) => {
+      const workspace = makeScratchDir();
+      mkdirSync(dirname(join(workspace, file)), { recursive: true });
+      symlinkSync("/dev/zero", join(workspace, file));
+
+      // A CLI that reads it never reaches an end: it dies of memory exhaustion (std::bad_alloc), or
+      // the timeout kills it. Either way it has no exit status.
+      expect(status(["--workspace", workspace], 20_000)[field]).toBe(missing);
+    },
+  );
+
+  it.skipIf(!canMakeFifo).each(readFiles)(
+    "returns promptly when $file is a FIFO",
+    ({ file, field, missing }) => {
+      const workspace = makeScratchDir();
+      mkdirSync(dirname(join(workspace, file)), { recursive: true });
+      makeFifo(join(workspace, file));
+
+      // Opening a FIFO that has no writer blocks for good: the timeout kills the CLI, which then
+      // has no exit status.
+      expect(status(["--workspace", workspace], 20_000)[field]).toBe(missing);
+    },
+  );
 });
