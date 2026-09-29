@@ -377,12 +377,14 @@ function isProtectedPath(path: string): boolean {
   return parts.some((part, i) =>
     part === ".git" ||
     (part === ".harness" && (i === 0 || !atRoot) &&
-      (parts[i + 1] === "hooks" || (parts[i + 1] === "audit.log.jsonl" && i + 2 === parts.length))));
+      // runs: a resumed run trusts its saved record (hook script hashes included).
+      (parts[i + 1] === "hooks" || parts[i + 1] === "runs" ||
+        (parts[i + 1] === "audit.log.jsonl" && i + 2 === parts.length))));
 }
 
 function protectedPathError(tool: string, path: string): string {
   return `[error] ${tool} refused: ${path.trim()} is a protected path ` +
-    "(git internals, .harness/hooks and the audit log); nothing was written.";
+    "(git internals, .harness/hooks, .harness/runs and the audit log); nothing was written.";
 }
 
 // ── Tool executor ─────────────────────────────────────────────────────────────

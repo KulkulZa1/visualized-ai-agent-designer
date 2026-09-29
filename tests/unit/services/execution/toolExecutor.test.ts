@@ -810,6 +810,9 @@ const PROTECTED_PATHS = [
   ".harness/hooks/nested/guard.py",
   ".harness/hooks",
   ".harness/audit.log.jsonl",
+  // run records, which a resumed run trusts
+  ".harness/runs/run-1/run.json",
+  ".harness/runs",
   // the same places, spelled another way
   ".git\\hooks\\pre-commit",
   "./.git/config",
@@ -819,6 +822,7 @@ const PROTECTED_PATHS = [
   ".GIT/Config",
   ".Harness/HOOKS/x.sh",
   ".harness\\Audit.Log.JSONL",
+  ".Harness\\RUNS\\run-1\\run.json",
   "  .git/config  ",
   // Their text cannot place them under the workspace root, yet the backend accepts
   // an absolute or ../<workspace> path that lands inside it.
@@ -827,6 +831,7 @@ const PROTECTED_PATHS = [
   "../ws/.harness/hooks/x.sh",
   "src/../../ws/.harness/audit.log.jsonl",
   "/home/user/ws/.git/config",
+  "../ws/.harness/runs/run-1/run.json",
 ];
 
 const LOOKALIKE_PATHS = [
@@ -835,6 +840,7 @@ const LOOKALIKE_PATHS = [
   "src/git/x.ts",
   ".harness/hooks-old/a.sh",
   ".harness/audit.log.jsonl.bak",
+  ".harness/runs-old/run.json",
   ".harness/inputs/requirements.yaml",
   "hooks/pre-commit",
 ];
