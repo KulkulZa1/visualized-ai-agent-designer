@@ -89,6 +89,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **CLI and MCP** — `workflow validate` / `validate_workflow` report connections to agents that don't exist; MCP `project_status` counts `.test.tsx` files and a `null` limit gets the default; the CLI skips only directories named exactly `node_modules` or `target`, accepts `--workspace=<dir>`, and no longer crashes on a non-object package.json.
 - **Build** — React lands in its `vendor-react` chunk (it was emitted empty), and the main chunk shrank from 727 kB to 537 kB.
 - **Tests** — the suites pass on Linux too (five Rust tests hard-coded cmd.exe; one hook test exceeded Linux's size limit for one environment variable), without React act() warnings or missing-mock noise.
+- **Streaming** — a streamed tool-call index above 64 is a stream error; before, a server that sent a huge index made the app allocate until it aborted.
 
 ### Security
 - **Agent shell execution disabled** — model-issued `bash`/`run_command` calls are refused and no longer advertised to the model; the `execute_inline_command` IPC command was removed. Re-enabling needs a per-command consent system.
@@ -100,6 +101,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Protected paths** — agent file tools refuse to write git internals (any `.git` path segment, including a `.git` file), `.harness/hooks/` and `.harness/audit.log.jsonl`, so a prompt-injected agent cannot plant a git hook, rewrite an auto-run hook script or edit the audit trail. A Hook node whose script an agent wrote earlier in the same run is refused like one that needs consent. The check is on the path as written (Windows 8.3 names and NTFS streams are not covered).
 - **MCP `validate_workflow`** reads only `*.harness.yaml`/`.yml` files, checks containment on the real path (symlinks included), and no longer returns file lines in YAML errors (it could echo a line of `.env.example`).
 - **Windows command lookup** — agent commands and hooks get `NoDefaultCurrentDirectoryInExePath=1`, so cmd.exe doesn't run an `npm.cmd` or `git.bat` an agent planted in the workspace (not yet verified on Windows).
+- **Audit log** — entries are not written when `.harness/audit.log.jsonl` is a symbolic link (dangling or not), so a cloned repository can't point the log at a file outside the workspace, such as `~/.bashrc`.
 
 ### Planned
 - Live streaming execution traces

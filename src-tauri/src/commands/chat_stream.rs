@@ -50,6 +50,20 @@ fn sse_data(line: &str) -> Option<&str> {
     line.strip_prefix("data:").map(str::trim)
 }
 
+/// The highest `index` accepted for a tool call (OpenAI) or content block
+/// (Anthropic). The server picks each index and the accumulators grow to fit
+/// it, so `"index": 4000000000` would otherwise allocate until the app aborts.
+const MAX_STREAM_INDEX: usize = 64;
+
+/// Fails when a server-supplied `index` is over the limit. Call it before
+/// growing anything to fit the index.
+fn check_index(index: usize, what: &str) -> Result<(), String> {
+    if index > MAX_STREAM_INDEX {
+        return Err(format!("Unreadable stream event: {what} index {index} is over the limit of {MAX_STREAM_INDEX}"));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct PartialCall {
     id: String,
@@ -81,6 +95,7 @@ impl StreamAccumulator for OpenAiStream {
         let delta = &choice["delta"];
         for call in delta["tool_calls"].as_array().map(Vec::as_slice).unwrap_or_default() {
             let index = call["index"].as_u64().unwrap_or(0) as usize;
+            check_index(index, "tool call")?;
             while self.calls.len() <= index {
                 self.calls.push(PartialCall::default());
             }
@@ -142,6 +157,7 @@ impl StreamAccumulator for AnthropicStream {
         let index = event["index"].as_u64().unwrap_or(0) as usize;
         match event["type"].as_str().unwrap_or_default() {
             "content_block_start" => {
+                check_index(index, "content block")?;
                 while self.blocks.len() <= index {
                     self.blocks.push(Value::Null);
                     self.inputs.push(String::new());
@@ -381,5 +397,65 @@ mod tests {
         }
         lines.extend(buffer.finish());
         assert_eq!(lines, ["data: 한글", "second", "last"]);
+    }
+
+    /// One OpenAI stream event carrying a single tool-call delta at `index`.
+    fn openai_call_event(index: u64) -> String {
+        let call = json!({"index": index, "id": "call_1", "function": {"name": "read_file", "arguments": "{}"}});
+        format!("data: {}", json!({"choices": [{"delta": {"tool_calls": [call]}}]}))
+    }
+
+    /// One Anthropic `content_block_start` event at `index`.
+    fn anthropic_block_start(index: u64) -> String {
+        let block = json!({"type": "text", "text": ""});
+        format!("data: {}", json!({"type": "content_block_start", "index": index, "content_block": block}))
+    }
+
+    #[test]
+    fn openai_stream_rejects_a_huge_tool_call_index_without_allocating() {
+        let mut stream = OpenAiStream::default();
+        let error = stream.line(&openai_call_event(4_000_000_000)).unwrap_err();
+        assert!(error.contains("4000000000"), "{error}");
+        assert!(stream.calls.is_empty());
+
+        // The same event arriving through the chunked reader fails the read.
+        let raw = format!("{}\n\n", openai_call_event(4_000_000_000));
+        let error = feed::<OpenAiStream>(&raw).unwrap_err();
+        assert!(error.contains("4000000000"), "{error}");
+    }
+
+    #[test]
+    fn openai_stream_accepts_tool_call_index_64_and_rejects_65() {
+        let mut stream = OpenAiStream::default();
+        stream.line(&openai_call_event(64)).unwrap();
+        assert_eq!(stream.calls.len(), 65);
+
+        let error = stream.line(&openai_call_event(65)).unwrap_err();
+        assert!(error.contains("65"), "{error}");
+        assert_eq!(stream.calls.len(), 65);
+    }
+
+    #[test]
+    fn anthropic_stream_rejects_a_huge_block_index_without_allocating() {
+        let mut stream = AnthropicStream::default();
+        let error = stream.line(&anthropic_block_start(4_000_000_000)).unwrap_err();
+        assert!(error.contains("4000000000"), "{error}");
+        assert!(stream.blocks.is_empty() && stream.inputs.is_empty());
+
+        // The same event arriving through the chunked reader fails the read.
+        let raw = format!("{}\n\n", anthropic_block_start(4_000_000_000));
+        let error = feed::<AnthropicStream>(&raw).unwrap_err();
+        assert!(error.contains("4000000000"), "{error}");
+    }
+
+    #[test]
+    fn anthropic_stream_accepts_block_index_64_and_rejects_65() {
+        let mut stream = AnthropicStream::default();
+        stream.line(&anthropic_block_start(64)).unwrap();
+        assert_eq!((stream.blocks.len(), stream.inputs.len()), (65, 65));
+
+        let error = stream.line(&anthropic_block_start(65)).unwrap_err();
+        assert!(error.contains("65"), "{error}");
+        assert_eq!((stream.blocks.len(), stream.inputs.len()), (65, 65));
     }
 }
