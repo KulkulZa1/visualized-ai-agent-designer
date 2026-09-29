@@ -108,7 +108,9 @@ describe("destructive_guard template", () => {
       });
 
     it("blocks a destructive command followed by a large amount of text", () => {
-      const lines = Array.from({ length: 40_000 }, (_, i) => `line ${i}`);
+      // About 97 KB: more than a 64 KiB pipe buffer, less than the 128 KiB
+      // Linux allows for one environment variable.
+      const lines = Array.from({ length: 10_000 }, (_, i) => `line ${i}`);
       const result = run(["rm -rf /", ...lines].join("\n"));
       expect(result.status).toBe(1);
     }, 30_000);
