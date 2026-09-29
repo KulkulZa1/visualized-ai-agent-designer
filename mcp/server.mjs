@@ -7,7 +7,8 @@
  * Tools (v0 — read + test):
  *   run_tests            Run `npx vitest run` and return pass/fail counts
  *   run_cargo_tests      Run `cargo test` and return Rust test results
- *   validate_workflow    Zod-validate a .harness.yaml file
+ *   validate_workflow    Validate a .harness.yaml/.harness.yml file: schema shape and
+ *                        that every connection refers to an existing agent
  *   project_status       Summary of workspace files, test counts, and docs
  *   list_workflows       List all .harness.yaml files under a directory
  *   list_providers       Provider metadata and capability flags (no credential values)
@@ -22,7 +23,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, readdirSync, statSync, lstatSync, openSync, readSync, closeSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
 import { resolve, join, basename, dirname, relative, isAbsolute, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
@@ -171,7 +172,9 @@ const PROVIDER_CATALOG = [
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// `ext` is one suffix or a list of them; pass `max = Infinity` to count without a cap.
 function findFiles(dir, ext, max = 50) {
+  const exts = Array.isArray(ext) ? ext : [ext];
   const result = [];
   const walk = (d) => {
     if (result.length >= max) return;
@@ -182,7 +185,7 @@ function findFiles(dir, ext, max = 50) {
         try {
           const stat = statSync(full);
           if (stat.isDirectory()) walk(full);
-          else if (entry.endsWith(ext)) result.push(full);
+          else if (exts.some((e) => entry.endsWith(e))) result.push(full);
         } catch {}
       }
     } catch {}
@@ -191,9 +194,13 @@ function findFiles(dir, ext, max = 50) {
   return result;
 }
 
-function isInsideProject(absPath) {
-  const rel = relative(PROJECT_ROOT, absPath);
+function isInsideDir(rootPath, absPath) {
+  const rel = relative(rootPath, absPath);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function isInsideProject(absPath) {
+  return isInsideDir(PROJECT_ROOT, absPath);
 }
 
 function resolveSafePath(inputPath) {
@@ -219,9 +226,85 @@ function resolveWorkspacePath(inputPath) {
 }
 
 function clampLimit(value, fallback, max) {
-  const num = Number(value);
+  // Only a number or a numeric string is a limit. Number() maps null, "", false and [] to 0,
+  // which would clamp to 1 instead of falling back to the default.
+  const num = typeof value === "number" ? value
+    : typeof value === "string" && value.trim() !== "" ? Number(value)
+    : NaN;
   if (!Number.isFinite(num)) return fallback;
   return Math.max(1, Math.min(max, Math.floor(num)));
+}
+
+const WORKFLOW_FILE_ERROR = "Only .harness.yaml or .harness.yml workflow files can be validated.";
+
+function isWorkflowFilePath(path) {
+  return path.endsWith(".harness.yaml") || path.endsWith(".harness.yml");
+}
+
+// Resolves a workflow path for reading: { path } (the real path) or { error }. Only workflow
+// files inside the project qualify. The file type is checked on the path as given, before the
+// disk is touched, so a refusal reveals nothing about other files; then containment and file
+// type are checked again on the REAL path, so a symlink or junction can neither lead outside the
+// project nor dress up another file as a workflow.
+function resolveWorkflowFile(inputPath) {
+  let abs;
+  try {
+    abs = resolveSafePath(inputPath);
+  } catch (e) {
+    return { error: `Path rejected: ${e.message}` };
+  }
+  if (!isWorkflowFilePath(abs)) return { error: WORKFLOW_FILE_ERROR };
+
+  let real;
+  try {
+    real = realpathSync(abs);
+  } catch (e) {
+    const missing = e?.code === "ENOENT" || e?.code === "ENOTDIR";
+    return { error: missing ? `File not found: ${abs}` : `Cannot resolve path (${e?.code ?? "error"}): ${abs}` };
+  }
+  if (!isInsideDir(realpathSync(PROJECT_ROOT), real)) {
+    // The link target is not named: it is outside the project, so it is none of the caller's business.
+    return { error: "Path rejected: Path resolves outside the Harness Studio project (symlink or junction)." };
+  }
+  if (!isWorkflowFilePath(real)) return { error: WORKFLOW_FILE_ERROR };
+  return { path: real };
+}
+
+// Builds the message from fixed text, the library's error code and the position only. The yaml
+// library's own message is never used: it embeds the offending source line and the one before it,
+// and some messages (block scalar headers, aliases, escapes) interpolate file text as well. Errors
+// that are not parse errors (e.g. an unresolved alias) carry no position and get no detail.
+function describeYamlError(e) {
+  const pos = Array.isArray(e?.linePos) ? e.linePos[0] : undefined;
+  // Codes are fixed upper-case names, some with digits (KEY_OVER_1024_CHARS); anything else is dropped.
+  const code = typeof e?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? ` (${e.code})` : "";
+  return Number.isInteger(pos?.line) && Number.isInteger(pos?.col)
+    ? `YAML parse error${code} at line ${pos.line}, column ${pos.col}.`
+    : "YAML parse error: the file is not valid YAML.";
+}
+
+// [KEEP-IN-SYNC] with findDanglingConnections in cli/harness.mjs.
+// A saved workflow identifies its agents by list position ("agent-<i>"), the rule the app's
+// loadWorkflow and generators use, so every connection endpoint must be one of those ids.
+function findDanglingConnections(workflow) {
+  const count = workflow.agents.length;
+  const known = new Set(workflow.agents.map((_, i) => `agent-${i}`));
+  const validIds = count === 0 ? "the workflow has no agents"
+    : count === 1 ? "valid id: agent-0"
+    : `valid ids: agent-0 to agent-${count - 1}`;
+  const quote = (id) => {
+    const text = JSON.stringify(id);
+    return text.length > 66 ? `${text.slice(0, 65)}…"` : text;
+  };
+  const issues = [];
+  workflow.connections.forEach((connection, index) => {
+    for (const key of ["sourceAgentId", "targetAgentId"]) {
+      if (!known.has(connection[key])) {
+        issues.push({ path: `connections.${index}.${key}`, message: `Unknown agent ${quote(connection[key])} (${validIds})` });
+      }
+    }
+  });
+  return issues;
 }
 
 function toProjectRelativePath(absPath, workspace) {
@@ -468,45 +551,51 @@ const TOOLS = {
   },
 
   validate_workflow: {
-    description: "Validate a .harness.yaml file against the workflow schema.",
+    description: "Validate a .harness.yaml or .harness.yml file inside the project against the workflow schema, including that every connection refers to an existing agent (agent-0, agent-1, ...).",
     inputSchema: {
       type: "object",
       required: ["path"],
       properties: {
-        path: { type: "string", description: "Path to the .harness.yaml file" },
+        path: { type: "string", description: "Path to the .harness.yaml or .harness.yml file, inside the project root" },
       },
     },
     async run({ path: filePath }) {
-      let abs;
+      const file = resolveWorkflowFile(filePath);
+      if (file.error) return { valid: false, error: file.error };
+
+      let text;
       try {
-        abs = resolveSafePath(filePath);
+        if (!statSync(file.path).isFile()) return { valid: false, error: "Path is not a regular file." };
+        text = readFileSync(file.path, "utf-8");
       } catch (e) {
-        return { valid: false, error: `Path rejected: ${e.message}` };
-      }
-      if (!existsSync(abs)) {
-        return { valid: false, error: `File not found: ${abs}` };
+        return { valid: false, error: `Cannot read file (${e?.code ?? "error"}).` };
       }
       let raw;
       try {
-        raw = parseYaml(readFileSync(abs, "utf-8"));
+        // logLevel "error": the library prints its warnings (e.g. an unresolved tag) to stderr,
+        // quoting the offending source line. Parse errors still throw.
+        raw = parseYaml(text, { logLevel: "error" });
       } catch (e) {
-        return { valid: false, error: `YAML parse error: ${e.message}` };
+        return { valid: false, error: describeYamlError(e) };
       }
       const result = workflowSchema.safeParse(raw);
-      if (result.success) {
-        return {
-          valid: true,
-          name: result.data.meta.name,
-          version: result.data.meta.version,
-          agents: result.data.agents.length,
-          connections: result.data.connections.length,
-        };
+      if (!result.success) {
+        const issues = result.error.issues.map((i) => ({
+          path: i.path.join(".") || "(root)",
+          message: i.message,
+        }));
+        return { valid: false, issues };
       }
-      const issues = result.error.issues.map((i) => ({
-        path: i.path.join(".") || "(root)",
-        message: i.message,
-      }));
-      return { valid: false, issues };
+      // The schema only checks shape: a connection to an agent that does not exist still parses.
+      const dangling = findDanglingConnections(result.data);
+      if (dangling.length > 0) return { valid: false, issues: dangling };
+      return {
+        valid: true,
+        name: result.data.meta.name,
+        version: result.data.meta.version,
+        agents: result.data.agents.length,
+        connections: result.data.connections.length,
+      };
     },
   },
 
@@ -515,7 +604,8 @@ const TOOLS = {
     inputSchema: { type: "object", properties: {} },
     async run() {
       const workflows = findFiles(PROJECT_ROOT, ".harness.yaml");
-      const testFiles = findFiles(join(PROJECT_ROOT, "tests"), ".test.ts");
+      // Every test file, so no 50-entry cap; .test.tsx counts too.
+      const testFiles = findFiles(join(PROJECT_ROOT, "tests"), [".test.ts", ".test.tsx"], Infinity);
       const hasAgent  = existsSync(join(PROJECT_ROOT, "AGENT.md"));
       const hasTodo   = existsSync(join(PROJECT_ROOT, "docs", "TODO.md"));
 

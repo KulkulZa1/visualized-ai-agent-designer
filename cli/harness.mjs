@@ -3,7 +3,7 @@
  * harness-cli v0 — read-only CLI for Harness Studio
  *
  * Usage:
- *   node cli/harness.mjs project status                   [--workspace <path>]
+ *   node cli/harness.mjs project status                   [--workspace <path> | --workspace=<path>]
  *   node cli/harness.mjs workflow validate <path>
  *   node cli/harness.mjs provider list                    [--json]
  *
@@ -191,6 +191,7 @@ const PROVIDER_CATALOG = [
 // ---------------------------------------------------------------------------
 const args    = process.argv.slice(2);
 const jsonOut = args.includes("--json");
+const WORKSPACE_FLAG_EQ = "--workspace=";
 
 function fail(msg, hint = "") {
   const out = { error: { code: "CLI_ERROR", message: msg, hint } };
@@ -224,8 +225,13 @@ function table(rows, cols) {
 }
 
 function findWorkspace() {
-  const wIdx = args.indexOf("--workspace");
-  if (wIdx !== -1 && args[wIdx + 1]) return resolve(args[wIdx + 1]);
+  // Both "--workspace <path>" and "--workspace=<path>"; the first one given wins.
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--workspace" && args[i + 1]) return resolve(args[i + 1]);
+    if (args[i].startsWith(WORKSPACE_FLAG_EQ) && args[i].length > WORKSPACE_FLAG_EQ.length) {
+      return resolve(args[i].slice(WORKSPACE_FLAG_EQ.length));
+    }
+  }
   const env = process.env.HARNESS_WORKSPACE;
   if (env) return resolve(env);
   return process.cwd();
@@ -241,7 +247,8 @@ function findHarnessFiles(dir) {
         const full = join(d, entry);
         try {
           const stat = statSync(full);
-          if (stat.isDirectory() && !entry.includes("node_modules") && !entry.includes("target")) {
+          // Exact directory names: "targets/" or "retargeting/" are ordinary folders.
+          if (stat.isDirectory() && entry !== "node_modules" && entry !== "target") {
             walk(full);
           } else if (entry.endsWith(".harness.yaml") || entry.endsWith(".harness.yml")) {
             result.push(full);
@@ -254,9 +261,12 @@ function findHarnessFiles(dir) {
   return result;
 }
 
+// Returns the parsed JSON object, or `fallback` when the file is missing, unreadable, not JSON,
+// or JSON that is not an object (null, an array, a string...) — callers read properties off it.
 function readJsonFile(path, fallback) {
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    const value = JSON.parse(readFileSync(path, "utf-8"));
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value : fallback;
   } catch {
     return fallback;
   }
@@ -343,6 +353,30 @@ function cmdProjectStatus() {
   console.log();
 }
 
+// [KEEP-IN-SYNC] with findDanglingConnections in mcp/server.mjs.
+// A saved workflow identifies its agents by list position ("agent-<i>"), the rule the app's
+// loadWorkflow and generators use, so every connection endpoint must be one of those ids.
+function findDanglingConnections(workflow) {
+  const count = workflow.agents.length;
+  const known = new Set(workflow.agents.map((_, i) => `agent-${i}`));
+  const validIds = count === 0 ? "the workflow has no agents"
+    : count === 1 ? "valid id: agent-0"
+    : `valid ids: agent-0 to agent-${count - 1}`;
+  const quote = (id) => {
+    const text = JSON.stringify(id);
+    return text.length > 66 ? `${text.slice(0, 65)}…"` : text;
+  };
+  const issues = [];
+  workflow.connections.forEach((connection, index) => {
+    for (const key of ["sourceAgentId", "targetAgentId"]) {
+      if (!known.has(connection[key])) {
+        issues.push({ path: `connections.${index}.${key}`, message: `Unknown agent ${quote(connection[key])} (${validIds})` });
+      }
+    }
+  });
+  return issues;
+}
+
 function cmdWorkflowValidate(filePath) {
   if (!filePath) fail("Usage: harness workflow validate <path>", "Provide a path to a .harness.yaml file.");
   const abs = resolve(filePath);
@@ -357,7 +391,15 @@ function cmdWorkflowValidate(filePath) {
 
   const result = workflowDefSchema.safeParse(raw);
 
-  if (result.success) {
+  // The schema only checks shape: a connection to an agent that does not exist still parses.
+  const issues = result.success
+    ? findDanglingConnections(result.data)
+    : result.error.issues.map((i) => ({
+        path: i.path.join("."),
+        message: i.message,
+      }));
+
+  if (issues.length === 0) {
     const wf = result.data;
     const data = {
       valid: true,
@@ -373,10 +415,6 @@ function cmdWorkflowValidate(filePath) {
     console.log(`  Agents     : ${wf.agents.length}`);
     console.log(`  Connections: ${wf.connections.length}\n`);
   } else {
-    const issues = result.error.issues.map((i) => ({
-      path: i.path.join("."),
-      message: i.message,
-    }));
     if (jsonOut) { out({ valid: false, file: abs, issues }); process.exit(1); }
     console.error(`\n✕ INVALID  ${basename(abs)}`);
     for (const i of issues) {
@@ -436,7 +474,8 @@ Commands:
   provider list                       Show the provider catalog
 
 Options:
-  --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env)
+  --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env);
+  --workspace=<path>   the same, in one argument
   --json               Emit JSON output (machine-readable)
 
 Examples:
