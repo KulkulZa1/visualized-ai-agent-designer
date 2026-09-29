@@ -37,7 +37,7 @@ Windows rows. Other rows come from earlier passes and were not re-run.
 | harness run output on Windows | Redirected from cmd.exe; captured by Windows PowerShell 5.1 | cmd.exe: UTF-8. Windows PowerShell 5.1 in a default console decodes it with the console code page (`??`), and its `>` writes UTF-16: see `docs/HEADLESS.md` (Troubleshooting) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | TypeScript (Linux) | `npx tsc --noEmit` | Passed (2026-09-29, Linux) |
-| Frontend tests (Linux) | `npx vitest run` | Passed, 1019 tests / 66 files (2026-09-29, Linux) |
+| Frontend tests (Linux) | `npx vitest run` | Passed, 1042 tests / 66 files (2026-09-29, Linux) |
 | Rust tests (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml` | Passed, 116 tests (2026-09-29, Linux; the 2 Windows-only tests are not compiled there) |
 | Rust tests without Tauri (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core` | Passed, 116 + 2 (2026-09-29, Linux) |
 | Frontend build (Linux) | `npx vite build` | Passed (2026-09-29, Linux); no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains |

@@ -16,7 +16,7 @@
   - `--resume` refused it again (exit 1), although the summary prints a `Resume:` line. A new run took the changed script as its baseline and ran it (exit 0).
   - With `node --no-experimental-global-webcrypto` (Node 22) the run did not start: exit 3, with the Web Crypto message.
 - **Verification** (Linux):
-  - `npx tsc --noEmit`, and `npx vitest run`: 1019 tests / 66 files.
+  - `npx tsc --noEmit`, and `npx vitest run`: 1042 tests / 66 files.
   - `cargo test`: 116 tests, and 116 + 2 in the core build (`--no-default-features --features core`). The 2 Windows-only tests are not compiled on Linux.
   - `npx vite build`: no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains.
 - **Not verified:** Windows and macOS (this pass is Linux only); the Tauri window, where the hash needs `crypto.subtle` in the WebView (only Node's was exercised); a live `harness run` with a model.

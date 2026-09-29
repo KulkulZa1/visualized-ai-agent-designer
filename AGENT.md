@@ -37,7 +37,7 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-29 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1019 tests / 66 files;
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1042 tests / 66 files;
 `cargo test` passed, 116 tests (the 2 Windows-only tests are not compiled on
 Linux); `cargo test --no-default-features --features core` passed, 116 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
