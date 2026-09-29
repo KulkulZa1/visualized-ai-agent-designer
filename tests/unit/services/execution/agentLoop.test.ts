@@ -163,6 +163,32 @@ describe("runAgentLoop — text protocol", () => {
     expect(callText.mock.calls[2][1]).toContain("<tool_result>R:read_file</tool_result>");
   });
 
+  it("answers a call cut off before its closing tag by an error step, and carries on instead of finishing", async () => {
+    // A reply that hit Max tokens in the middle of a call has no </tool_call>.
+    const cutOff = `Let me look.\n<tool_call>{"name":"read_file","args":{"path":"a`;
+    const callText = vi.fn()
+      .mockResolvedValueOnce(cutOff)
+      .mockResolvedValueOnce(`<tool_call>{"name":"read_file","args":{"path":"a"}}</tool_call>`)
+      .mockResolvedValueOnce("final");
+    const opts = options({ preferText: true, callText });
+
+    const result = await runAgentLoop(opts);
+
+    // The cut-off reply is not the node's answer, and it ran no tool.
+    expect(result).toMatchObject({ text: "final", toolCalls: 1, mode: "text" });
+    expect(callText).toHaveBeenCalledTimes(3);
+    expect(opts.runTool).toHaveBeenCalledTimes(1);
+    const retry = callText.mock.calls[1][1] as string;
+    expect(retry).toContain("Let me look.");
+    expect(retry).toContain(
+      "<tool_result>[error] Your <tool_call> could not be parsed: the call was cut off before </tool_call>. " +
+      "Send a valid tool call, or answer without tool-call tags.</tool_result>",
+    );
+    // The half call is not echoed back, as a whole garbled one is not either.
+    expect(retry).not.toContain(`{"name":"read_file"`);
+    expect(callText.mock.calls[2][1]).toContain("<tool_result>R:read_file</tool_result>");
+  });
+
   it("answers a call that is valid JSON but has no tool name the same way", async () => {
     const callText = vi.fn()
       .mockResolvedValueOnce(`<tool_call>{"args":{"path":"a"}}</tool_call>`)

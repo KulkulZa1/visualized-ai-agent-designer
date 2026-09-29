@@ -43,7 +43,7 @@ describe("parseToolCall", () => {
     expect(parseToolCall(`<tool_call>{"args":{}}</tool_call>`)).toBeNull();
   });
 
-  it("parses JSON wrapped in a ``` or ```json fence inside the tags", () => {
+  it("parses JSON wrapped in a ```, ```json, ```jsonc or ```javascript fence inside the tags", () => {
     const call = { name: "read_file", args: { path: "src/main.ts" } };
     const json = JSON.stringify(call);
     const bodies = [
@@ -51,6 +51,9 @@ describe("parseToolCall", () => {
       `${FENCE}\n${json}\n${FENCE}`,
       `\n  ${FENCE}JSON\r\n${json}\r\n${FENCE}\n`,
       `${FENCE}json ${json}${FENCE}`,
+      `${FENCE}jsonc\n${json}\n${FENCE}`,
+      `${FENCE}javascript\n${json}\n${FENCE}`,
+      `${FENCE}JavaScript\r\n${json}\r\n${FENCE}`,
     ];
     for (const body of bodies) {
       expect(parseToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual(call);
@@ -63,11 +66,16 @@ describe("parseToolCall", () => {
     expect(parseToolCall(`<tool_call>${FENCE}json\n${JSON.stringify(call)}\n${FENCE}</tool_call>`)).toEqual(call);
   });
 
-  it("does not stall on a very long run of whitespace inside the block", () => {
+  it("does not stall on a very long run of whitespace inside the block, fenced or not", () => {
+    // A regex that scans for the closing fence backtracks quadratically over the run (about
+    // 4 s at this size) once the body is fenced; an unfenced body never reaches that regex.
     const call = { name: "fs.write", args: { path: "a.txt", content: " ".repeat(100_000) } };
-    const started = Date.now();
-    expect(parseToolCall(`<tool_call>${JSON.stringify(call)}</tool_call>`)).toEqual(call);
-    expect(Date.now() - started).toBeLessThan(1000);
+    const json = JSON.stringify(call);
+    for (const [label, body] of [["unfenced", json], ["fenced", `${FENCE}json\n${json}\n${FENCE}`]]) {
+      const started = Date.now();
+      expect(parseToolCall(`<tool_call>${body}</tool_call>`), label).toEqual(call);
+      expect(Date.now() - started, label).toBeLessThan(1000);
+    }
   });
 
   it("gives a call without args (or with null args) an empty args object", () => {
@@ -91,6 +99,14 @@ describe("readToolCall", () => {
       `<tool_call>${FENCE}python\nprint(1)\n${FENCE}</tool_call>`,
       "<tool_call>[1, 2]</tool_call>",
       "<tool_call></tool_call>",
+      // The tag mentioned without a closing tag: what follows it is not a call either.
+      "Wrap the call in a <tool_call>",
+      "Use <tool_call>read_file a.ts and stop.",
+      `<tool_call>${FENCE}python\nprint(1)`,
+      "<tool_call>[1, 2]",
+      // A closed mention, and a stray closing tag.
+      "Use <tool_call>x</tool_call> like so.",
+      "</tool_call> ends a call.",
     ]) {
       expect(readToolCall(text), text).toEqual({ kind: "none" });
     }
@@ -114,6 +130,48 @@ describe("readToolCall", () => {
       }
     }
   });
+
+  it("reports a call cut off before </tool_call> as malformed, whatever it holds so far", () => {
+    const jsons = [
+      `{"name":"read_file","args":{"path":"a`,     // cut off inside a string
+      `{"name":"read_file","args":`,                // cut off after a key
+      `{"name":"read_file","args":{"path":"a"}}`,  // complete JSON, but the tag is never closed
+      "{",
+    ];
+    for (const json of jsons) {
+      for (const body of [json, `\n  ${json}`, `${FENCE}json\n${json}`, `${FENCE}javascript\n${json}\n${FENCE}`]) {
+        for (const text of [`<tool_call>${body}`, `Reading a.\n<tool_call>${body}`]) {
+          const reading = readToolCall(text);
+          expect(reading.kind, text).toBe("malformed");
+          expect(reading.kind === "malformed" && reading.reason, text).toMatch(/cut off before <\/tool_call>/);
+        }
+      }
+    }
+  });
+
+  it("reports the cut-off call when an earlier mention of the tag is closed or unclosed", () => {
+    for (const text of [
+      `Use <tool_call>x</tool_call> like so.\n<tool_call>{"name":"read_file","args":{"path":"a`,
+      `Use the <tool_call> tag.\n<tool_call>{"name":"read_file","args":{"path":"a`,
+    ]) {
+      const reading = readToolCall(text);
+      expect(reading.kind, text).toBe("malformed");
+      expect(reading.kind === "malformed" && reading.reason, text).toMatch(/cut off before <\/tool_call>/);
+    }
+  });
+
+  it("reads the first closed call even when a later one is cut off", () => {
+    const text = `<tool_call>{"name":"list_files"}</tool_call>\n<tool_call>{"name":"read_file","args":{"path":"a`;
+    expect(readToolCall(text)).toEqual({ kind: "call", call: { name: "list_files", args: {} } });
+  });
+
+  it("does not stall on a very long run of whitespace in a call cut off inside a fence", () => {
+    // Cut off after the run, so the body has an opening fence, no closing one, and text after the spaces.
+    const text = `<tool_call>${FENCE}json\n{"name":"fs.write","args":{"path":"a.txt","content":"${" ".repeat(100_000)}tail`;
+    const started = Date.now();
+    expect(readToolCall(text).kind).toBe("malformed");
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });
 
 // ── stripToolCall ─────────────────────────────────────────────────────────────
@@ -126,6 +184,17 @@ describe("stripToolCall", () => {
 
   it("no-ops when tag absent", () => {
     expect(stripToolCall("plain text")).toBe("plain text");
+  });
+
+  it("removes a call cut off before its closing tag, keeping the text around the rest", () => {
+    expect(stripToolCall(`Before\n<tool_call>{"name":"read_file","args":{"path":"a`)).toBe("Before");
+    expect(stripToolCall(`Before\n<tool_call>${FENCE}json\n{"name":"read_file"`)).toBe("Before");
+    expect(stripToolCall(`<tool_call>{"name":"x","args":{}}</tool_call>\nAfter\n<tool_call>{"name":"y"`)).toBe("After");
+  });
+
+  it("keeps the tag mentioned in prose", () => {
+    expect(stripToolCall("Use the <tool_call> tag.")).toBe("Use the <tool_call> tag.");
+    expect(stripToolCall("Use <tool_call>read_file a.ts")).toBe("Use <tool_call>read_file a.ts");
   });
 });
 

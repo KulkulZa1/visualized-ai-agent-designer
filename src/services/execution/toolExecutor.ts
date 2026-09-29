@@ -263,26 +263,43 @@ function argText(value: unknown): string {
 /** What a reply holds for the text protocol.
  *  none: no <tool_call> block, or one whose body does not start with "{" (the
  *        tag mentioned in prose).
- *  malformed: a block that looks like a call ("{…") but is not a valid one. */
+ *  malformed: a block that looks like a call ("{…") but is not a valid one, or
+ *        that is cut off before its closing tag (a reply that hit Max tokens). */
 export type ToolCallReading =
   | { kind: "none" }
   | { kind: "call"; call: ToolCall }
   | { kind: "malformed"; reason: string };
 
-/** Models often wrap the JSON inside the tags in a ``` or ```json fence. (No regex
- *  that scans for the closing fence: on a long run of spaces it backtracks for seconds.) */
+/** Models often wrap the JSON inside the tags in a ``` fence, tagged json, jsonc or
+ *  javascript or not. (No regex that scans for the closing fence: on a long run of
+ *  spaces it backtracks for seconds.) */
 function unfence(body: string): string {
   let text = body.trim();
-  if (text.startsWith("```")) text = text.replace(/^```(?:json)?/i, "");
+  if (text.startsWith("```")) text = text.replace(/^```(?:jsonc?|javascript)?/i, "");
   if (text.endsWith("```")) text = text.slice(0, -3);
   return text.trim();
 }
 
+/** Where a call was cut off before its closing tag, or -1: the last "<tool_call>", when
+ *  no "</tool_call>" follows it and its body starts with "{". A reply that stops in the
+ *  middle of a call ends like this. The tag mentioned in prose (a body that does not
+ *  start with "{") is not one. */
+function cutOffCallAt(text: string): number {
+  const at = text.lastIndexOf("<tool_call>");
+  if (at < 0) return -1;
+  const body = text.slice(at + "<tool_call>".length);
+  return !body.includes("</tool_call>") && unfence(body).startsWith("{") ? at : -1;
+}
+
 export function readToolCall(text: string): ToolCallReading {
   const match = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-  if (!match) return { kind: "none" };
-  const body = unfence(match[1]);
-  if (!body.startsWith("{")) return { kind: "none" };
+  const body = match ? unfence(match[1]) : "";
+  if (!body.startsWith("{")) {
+    // No closed call. A reply cut off in the middle of one is no answer either.
+    return cutOffCallAt(text) < 0
+      ? { kind: "none" }
+      : { kind: "malformed", reason: "the call was cut off before </tool_call>" };
+  }
   let parsed: { name?: unknown; args?: unknown };
   try {
     parsed = JSON.parse(body);
@@ -304,9 +321,12 @@ export function parseToolCall(text: string): ToolCall | null {
   return reading.kind === "call" ? reading.call : null;
 }
 
-/** Strip the tool_call tag from text, returning just the surrounding content. */
+/** Strip the tool_call tag from text, returning just the surrounding content. A call
+ *  cut off before its closing tag goes too (readToolCall counts it as a broken call). */
 export function stripToolCall(text: string): string {
-  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+  const closed = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "");
+  const cutOff = cutOffCallAt(closed);
+  return (cutOff < 0 ? closed : closed.slice(0, cutOff)).trim();
 }
 
 // ── Permission helpers ────────────────────────────────────────────────────────
