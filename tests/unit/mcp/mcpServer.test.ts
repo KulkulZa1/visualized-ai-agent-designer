@@ -937,6 +937,18 @@ describe("MCP validate_workflow: which files it reads", () => {
 
     expect(parsed).toMatchObject({ valid: true, agents: 2, connections: 1 });
   });
+
+  it("validates a workflow in a project folder named ..data, as in a Kubernetes ConfigMap mount: not a way out", async () => {
+    const { dir, server } = await makeSandboxProject();
+    // Relative to the project root the path starts with "..data", which is not "..".
+    mkdirSync(join(dir, "..data"));
+    writeFileSync(join(dir, "..data", "wf.harness.yaml"), workflowYaml(2, [["agent-0", "agent-1"]]));
+
+    const result = callTool("validate_workflow", { path: join(dir, "..data", "wf.harness.yaml") }, {}, server);
+
+    expect(result.status).toBe(0);
+    expect(contentJson(result.responses[0])).toMatchObject({ valid: true, agents: 2, connections: 1 });
+  });
 });
 
 describe("MCP validate_workflow: YAML errors carry no file content", () => {

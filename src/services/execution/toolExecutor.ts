@@ -357,9 +357,11 @@ export function isNotFound(error: unknown): boolean {
 /**
  * Paths an agent may read but never write: a ".git" folder or file at any depth
  * (a changed hook or config runs code the next time git runs), ".harness/hooks"
- * and everything under it, and ".harness/audit.log.jsonl". Judged on the path's
- * text, not on the disk: "\" counts as "/", "." and ".." segments are resolved,
- * case is ignored, and a symlink is not followed.
+ * and everything under it, ".harness/runs" and everything under it (a resumed run
+ * trusts its saved record, the hook-script hashes included), and
+ * ".harness/audit.log.jsonl". Judged on the path's text, not on the disk: "\"
+ * counts as "/", "." and ".." segments are resolved, case is ignored, and a
+ * symlink is not followed.
  */
 function isProtectedPath(path: string): boolean {
   const text = path.trim().replace(/\\/g, "/");

@@ -24,7 +24,7 @@
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
-import { resolve, join, basename, dirname, relative, isAbsolute, normalize } from "node:path";
+import { resolve, join, basename, dirname, relative, isAbsolute, normalize, sep as pathSep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -223,7 +223,9 @@ function findFiles(dir, ext, max = 50) {
 // [KEEP-IN-SYNC] with isInsideDir in cli/harness.mjs.
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
+  // ConfigMap mount has one) is inside. An absolute rel is another drive on Windows.
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + pathSep) && !isAbsolute(rel));
 }
 
 function isInsideProject(absPath) {

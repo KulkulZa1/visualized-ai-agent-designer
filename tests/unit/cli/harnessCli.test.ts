@@ -470,6 +470,19 @@ describe("harness CLI project status: workspace discovery", () => {
   );
 
   it.skipIf(process.platform === "win32").each(readFiles)(
+    "still reads $file when it is a symlink into a folder named ..data, as in a Kubernetes ConfigMap mount",
+    ({ file, content, field, read }) => {
+      const workspace = makeScratchDir();
+      // The real path of the file starts with "..data" under the workspace: that is inside it, not a way out.
+      const target = writeFileIn(join(workspace, "..data", "data.txt"), content);
+      mkdirSync(dirname(join(workspace, file)), { recursive: true });
+      symlinkSync(target, join(workspace, file));
+
+      expect(status(["--workspace", workspace])[field]).toBe(read);
+    },
+  );
+
+  it.skipIf(process.platform === "win32").each(readFiles)(
     "shows no data of $file when it is a symlink to a file outside the workspace",
     ({ file, content, field, missing }) => {
       const workspace = makeScratchDir();

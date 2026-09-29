@@ -15,7 +15,7 @@
  * hooks/useWorkflowExecution.ts.
  */
 
-import { AgentRole, type AgentNodeData } from "@/types/agent";
+import { AgentRole, type AgentNodeData, type HookConfig } from "@/types/agent";
 import type { AuditEntry } from "@/types/audit";
 import type { AgentRun, SubAgentRecord, WorkflowRun } from "@/types/execution";
 import type { HookResult } from "@/types/hookResult";
@@ -23,7 +23,7 @@ import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import {
-  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, sha256Hex, type RunRecord,
+  definitionHash, hookFingerprint, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, type RunRecord,
 } from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
@@ -450,11 +450,13 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     updateNodeData(nodeId, { status: "done" });
   };
 
-  // ── Hook scripts, as the run first started ────────────────────────────────
+  // ── Hooks, as the run first started ───────────────────────────────────────
   // A Hook node without requireConsent runs its script unasked, so it must run the script
-  // that was set up. An agent's file tools leave a change log, but a shell command it ran
-  // (bash), a link or another spelling of the path change the file without one. So the
-  // script of every hook node is fingerprinted (SHA-256; the text is not kept) when the run
+  // that was set up, with the env that was set up (the backend applies preHook.env as it is:
+  // a BASH_ENV or PATH in it changes what the script runs, and an agent can edit the workflow
+  // file). An agent's file tools leave a change log, but a shell command it ran (bash), a link
+  // or another spelling of the path change the file without one. So every hook node's script
+  // and env are fingerprinted (SHA-256, hookFingerprint; the text is not kept) when the run
   // first starts, and an unasked hook's again just before it runs: any difference refuses it.
   // The record's hookScripts keeps the fingerprints and a resume carries them on as they
   // are, so a change made during an earlier attempt never becomes a later attempt's
@@ -462,18 +464,18 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // requirement (an agent can write that file) does not start a new baseline. Only an attempt
   // with none to start from (a new run, or a record from before hookScripts) takes baselines;
   // a resume adds none. So an unasked hook with no baseline (a node added to the workflow
-  // since) is refused, as is one whose script is not the one that was fingerprinted; the way
-  // on is the Hooks tab or a new run. The record itself is trusted: the agents' file tools
-  // cannot write it (isProtectedPath), but a shell command can.
-  // null: the script cannot be read. A failed read never fails the run.
-  const scriptDigest = async (ws: string, path: string): Promise<string | null> => {
+  // since) is refused, as is one whose script or env is not the one that was fingerprinted;
+  // the way on is the Hooks tab or a new run. The record itself is trusted: the agents' file
+  // tools cannot write it (isProtectedPath), but a shell command can.
+  // null: the script cannot be read (its env does not matter then). A failed read never fails the run.
+  const hookDigest = async (ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
     let text: string;
     try {
       text = await readWorkspaceFile(ws, path);
     } catch {
       return null;
     }
-    return sha256Hex(text);
+    return hookFingerprint(text, env);
   };
   // By node key. Without Web Crypto (the check above lets a run start only when no hook runs
   // unasked) there is nothing to take.
@@ -482,19 +484,20 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   if (savedScripts === undefined && workspacePath && globalThis.crypto?.subtle) {
     await Promise.all(nodes.map(async (n, i) => {
       const path = hookScriptPath(n);
-      if (path) hookScripts[savedNodeId(i)] = await scriptDigest(workspacePath, path);
+      if (path) hookScripts[savedNodeId(i)] = await hookDigest(workspacePath, path, n.data.preHook?.env);
     }));
   }
-  /** Why the script of a hook that runs without asking must not run now, or undefined when it may. */
-  const hookScriptRefusal = async (nodeId: string, ws: string, path: string): Promise<string | undefined> => {
+  /** Why a hook that runs without asking must not run now, or undefined when it may. */
+  const hookScriptRefusal = async (nodeId: string, ws: string, hook: HookConfig): Promise<string | undefined> => {
     const key = savedNodeId(nodes.findIndex((n) => n.id === nodeId));
     if (!Object.prototype.hasOwnProperty.call(hookScripts, key)) {
-      return `Hook script ${path} has no baseline from this run's first attempt, so it is not run unasked; ` +
+      return `Hook script ${hook.path} has no baseline from this run's first attempt, so it is not run unasked; ` +
         "run it from the Hooks tab or start a new run.";
     }
-    // A script that was not there (null) and is now, or was and no longer is, counts as changed.
-    if (hookScripts[key] === await scriptDigest(ws, path)) return undefined;
-    return `Hook script ${path} was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
+    // A script that was not there (null) and is now, or was and no longer is, counts as changed, and so does its env.
+    if (hookScripts[key] === await hookDigest(ws, hook.path, hook.env)) return undefined;
+    return `Hook script ${hook.path} or its environment was changed during this run; ` +
+      "review it, then run it from the Hooks tab or start a new run.";
   };
 
   const buildRecord = (): RunRecord => ({
@@ -614,7 +617,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
             "review it, then run it from the Hooks tab or start a new run.";
         } else {
           // What the change log cannot see: another spelling of the path, a link, a shell command.
-          refusal = await hookScriptRefusal(nodeId, workspacePath, data.preHook.path);
+          refusal = await hookScriptRefusal(nodeId, workspacePath, data.preHook);
           if (isRunCancelled()) {
             // Stopped while the script was being read: the hook has not started, whatever the script says.
             updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
@@ -1029,13 +1032,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   };
   /** The nodes the current routes prune; those of them that already ran are dropped. A node still
    *  working when its gateway routes elsewhere is not interrupted. One that failed is dropped only
-   *  when the run goes on past failures: otherwise the run is ending because of it, and its error
-   *  must stay where it can be read. */
+   *  when the run goes on past failures, and a Hook is never: a failed Hook stops the run whatever
+   *  continueOnError says, and the error of the node the run is ending because of must stay where
+   *  it can be read. */
   const dropPruned = (): Set<string> => {
     const pruned = prunedNodes(nodes, edges, gatewayRoutes);
     for (const id of pruned) {
       const status = run.agents[id]?.status;
-      if (status === "done" || (status === "error" && continueOnError)) dropNode(id);
+      const keepsError = !continueOnError || nodes.find((n) => n.id === id)?.data.role === AgentRole.Hook;
+      if (status === "done" || (status === "error" && !keepsError)) dropNode(id);
     }
     return pruned;
   };

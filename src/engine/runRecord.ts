@@ -56,10 +56,11 @@ export interface RunRecord {
   gatewayRoutes: Record<string, string>;
   changes: FileChange[];
   audit: AuditEntry[];
-  /** For each Hook node with a script, whether or not it runs without asking: the SHA-256 (hex)
-   *  of the script as the run first read it, or null if it could not be read. A resume carries
-   *  these on and compares an unasked hook's script with them, not with what it finds when it
-   *  starts. Always written ({} when there is none); absent in a record from before it existed. */
+  /** For each Hook node with a script, whether or not it runs without asking: the hookFingerprint
+   *  (SHA-256, hex) of the script as the run first read it and of the node's env, or null if the
+   *  script could not be read. A resume carries these on and compares an unasked hook's with them,
+   *  not with what it finds when it starts. Always written ({} when there is none); absent in a
+   *  record from before it existed. */
   hookScripts?: Record<string, string | null>;
 }
 
@@ -103,6 +104,16 @@ export async function sha256Hex(text: string): Promise<string> {
   if (!subtle) throw new Error("Web Crypto is not available");
   const digest = await subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+/** What a hook runs as, fingerprinted: the SHA-256 (hex) of its script's text and of the env it is
+ *  given (preHook.env, which the backend applies as it is, so a BASH_ENV, PATH or PYTHONPATH in it
+ *  changes what the script runs). The env goes in as JSON with its names sorted, so the order it
+ *  was written in does not matter; an empty one is part of it too, so adding a variable always
+ *  changes the result. Throws where Web Crypto is missing, as sha256Hex does. */
+export function hookFingerprint(script: string, env: Record<string, string> | undefined): Promise<string> {
+  const vars = env ?? {};
+  return sha256Hex(JSON.stringify([script, Object.keys(vars).sort().map((name) => [name, vars[name]])]));
 }
 
 /** What shapes a node's work, as a fingerprint. `prompt` is the prompt's text:

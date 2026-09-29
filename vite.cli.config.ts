@@ -17,7 +17,7 @@ export default defineConfig({
     ssr: "src/cli/runCli.ts",
     outDir: "cli/dist",
     emptyOutDir: true,
-    target: "node18",
+    target: "node20",
     minify: false,
     rollupOptions: { output: { entryFileNames: "harness-run.mjs", format: "es" } },
   },

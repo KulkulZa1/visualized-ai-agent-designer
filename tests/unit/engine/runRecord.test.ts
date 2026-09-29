@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { Edge } from "@xyflow/react";
 import {
-  definitionHash, fingerprint, reusableNodes, runRecordPath, savedHookScripts, savedNodeId, sha256Hex, type NodeRecord,
-  type RunRecord,
+  definitionHash, fingerprint, hookFingerprint, reusableNodes, runRecordPath, savedHookScripts, savedNodeId, sha256Hex,
+  type NodeRecord, type RunRecord,
 } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole, type AgentNodeData } from "@/types/agent";
@@ -34,6 +35,45 @@ describe("sha256Hex", () => {
 
   it("differs for texts that differ by one character", async () => {
     expect(await sha256Hex("echo hi\n")).not.toBe(await sha256Hex("echo hi"));
+  });
+});
+
+describe("hookFingerprint", () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  it("is the SHA-256 of the JSON of the script's text and the env's names and values, sorted by name", async () => {
+    expect(await hookFingerprint("echo hi\n", { B: "2", A: "1" })).toBe(sha('["echo hi\\n",[["A","1"],["B","2"]]]'));
+  });
+
+  it("counts an empty env, so that adding a variable always changes it", async () => {
+    const bare = await hookFingerprint("echo hi\n", undefined);
+
+    expect(bare).toBe(sha('["echo hi\\n",[]]'));
+    expect(await hookFingerprint("echo hi\n", {})).toBe(bare);
+    expect(await hookFingerprint("echo hi\n", { BASH_ENV: "/tmp/x" })).not.toBe(bare);
+  });
+
+  it("does not depend on the order the env is written in, and does on each of its names and values", async () => {
+    const base = await hookFingerprint("echo hi\n", { A: "1", B: "2" });
+
+    expect(await hookFingerprint("echo hi\n", { B: "2", A: "1" })).toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1", B: "3" })).not.toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1", C: "2" })).not.toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1" })).not.toBe(base);
+  });
+
+  it("differs for another script, and from the script's plain SHA-256", async () => {
+    expect(await hookFingerprint("echo hi", undefined)).not.toBe(await hookFingerprint("echo hi\n", undefined));
+    expect(await hookFingerprint("echo hi\n", undefined)).not.toBe(await sha256Hex("echo hi\n"));
+  });
+
+  it("rejects where Web Crypto is missing: nothing weaker stands in for it", async () => {
+    vi.stubGlobal("crypto", undefined);
+    try {
+      await expect(hookFingerprint("echo hi\n", undefined)).rejects.toThrow("Web Crypto");
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

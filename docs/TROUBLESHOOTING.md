@@ -77,11 +77,12 @@ Hooks marked `requireConsent` cannot run automatically from workflow execution.
 Run the hook manually from the Hooks tab, or disable `requireConsent` only after
 reviewing the script.
 
-### Hook node fails with "Hook script … was changed during this run"
+### Hook node fails with "Hook script … or its environment was changed during this run"
 
-A hook that runs without asking is refused when its script changed after the run
-started (an agent or a command changed it), or, in a resumed run, when it has no
-baseline from the run's first attempt. Review the script, then run it from the
+A hook that runs without asking is refused when its script or its `env` changed
+after the run started (an agent or a command changed the script; the `env` in the
+workflow file was edited), or, in a resumed run, when it has no baseline from the
+run's first attempt. Review the script, then run it from the
 Hooks tab or start a new run: a resume refuses it again.
 
 ### Artifacts look fake

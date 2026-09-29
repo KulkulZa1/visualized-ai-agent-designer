@@ -23,7 +23,7 @@ executes workflows (`docs/HEADLESS.md`). MCP is read/test-only.
 |---|---|---|
 | API key leakage | CLI/MCP print credential references only; `.env*` ignored; Ollama errors redact submitted token; hook processes do not inherit provider API keys; network errors no longer echo URL query strings | Replace localStorage with OS keychain |
 | Path traversal | Rust file commands use `resolve_safe_path()`, which resolves the deepest existing ancestor for new files so a symlink/junction inside the workspace cannot redirect writes outside it, and rejects UNC and device paths before any filesystem call; the workspace listing does not follow links; audit entries are not written through a symlinked audit log; MCP `validate_workflow` reads only `*.harness.yaml`/`.yml` files and rejects paths, symlinks included, that resolve outside the project | Add more MCP path tests as tools expand |
-| Hook execution | Rust command requires a `consentGranted` flag (set by the caller, not a user-verified token); the Hooks tab asks before running hooks marked `requireConsent`; during runs only Hook-role nodes run their pre-hook, a `requireConsent` hook fails its node and stops the run, and hooks on agent nodes are not run (only manually from the Hooks tab); timeout is the Hook node's `timeoutSeconds` (default 30 s, max 1 h), 30 s from the Hooks tab. A Hook node without `requireConsent` is refused, and stops the run, when its script changed during the run: by an agent's file tools (the change log, in any attempt of the run), or by anything else, as the script's SHA-256 taken for every Hook node when the run first starts and again just before the hook runs (this catches other spellings of the path, links and approved shell commands). The hashes are kept in the run record (`hookScripts`; never the script text). A resume never takes new ones (a record saved before the field is the exception), so a hook without a baseline is refused until a new run. Refusals are audited. The hash needs Web Crypto: `harness run` needs Node 20 or later, else a run with such a hook does not start (exit 3) | Hash the script in Rust, from its bytes, and verify the hash in `execute_hook`. The limits are listed below. Add nonce-based consent if hooks become remotely callable |
+| Hook execution | Rust command requires a `consentGranted` flag (set by the caller, not a user-verified token); the Hooks tab asks before running hooks marked `requireConsent`; during runs only Hook-role nodes run their pre-hook, a `requireConsent` hook fails its node and stops the run, and hooks on agent nodes are not run (only manually from the Hooks tab); timeout is the Hook node's `timeoutSeconds` (default 30 s, max 1 h), 30 s from the Hooks tab. A Hook node without `requireConsent` is refused, and stops the run, when its script or env changed during the run: the script by an agent's file tools (the change log, in any attempt of the run), or either by anything else, as the SHA-256 of the script and of the node's `env` (the backend applies `preHook.env` as it is, and an agent can edit the workflow file to add a `BASH_ENV` or `PATH`) taken for every Hook node when the run first starts and again just before the hook runs (this catches other spellings of the path, links, approved shell commands and a changed `env`). The hashes are kept in the run record (`hookScripts`; never the script text or the env). A resume never takes new ones (a record saved before the field is the exception), so a hook without a baseline is refused until a new run. Refusals are audited. The hash needs Web Crypto: `harness run` needs Node 20 or later, else a run with such a hook does not start (exit 3) | Hash the script in Rust, from its bytes, and verify the hash in `execute_hook`. The limits are listed below. Add nonce-based consent if hooks become remotely callable |
 | Frontend shell access | `shell:allow-execute` and `shell:allow-kill` removed from default Tauri capabilities | Remove unused shell plugin dependency later if no feature needs it |
 | Debug tooling | DevTools are not enabled in release builds (tauri `devtools` feature removed); debug builds still open them | None |
 | Hidden cloud calls | No hidden provider calls added; health checks are explicit run/setup actions and a run's preflight contacts only providers that run will use; the billing-error fallback only goes to a local Ollama server | Show exact payload previews before remote calls |
@@ -41,16 +41,16 @@ The check has these limits:
 
 - Scripts that aren't valid UTF-8 are covered only by the change log. The engine
   reads the script as text, so one it cannot read has no hash before or after, and
-  the two compare equal.
+  the two compare equal; its `env` is not checked either.
 - Files a script sources or imports are not covered: only the hook script's own
-  text is hashed.
+  text and the node's `env` are hashed.
 - There is a gap between the check and the hook's start: the engine hashes the
   script, and then `execute_hook` runs it by path.
 - An approved `bash` command can still write anywhere in the workspace, run
   records included. The hash catches a rewritten script, not a rewritten record
   that a later resume trusts.
-- A new run takes the scripts as they are as its baseline: a script changed before
-  the run, or by an earlier run, is accepted.
+- A new run takes the scripts and envs as they are as its baseline: a script
+  changed before the run, or by an earlier run, is accepted.
 - A record saved before the `hookScripts` field existed has no baselines, and
   resuming it takes them from the scripts as they are then.
 

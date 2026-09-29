@@ -17,7 +17,7 @@
  */
 
 import { readFileSync, readdirSync, lstatSync, realpathSync, existsSync } from "node:fs";
-import { join, resolve, basename, relative, isAbsolute } from "node:path";
+import { join, resolve, basename, relative, isAbsolute, sep as pathSep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -254,7 +254,9 @@ function isRealDirectory(path) {
 // [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs.
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
+  // ConfigMap mount has one) is inside. An absolute rel is another drive on Windows.
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + pathSep) && !isAbsolute(rel));
 }
 
 // [KEEP-IN-SYNC] with resolveInsideWorkspace in mcp/server.mjs: the same rule, that the REAL path

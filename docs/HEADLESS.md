@@ -113,26 +113,30 @@ timeout. A Hook node that fails or is refused stops the run, even with
 `--continue-on-error`.
 
 A hook marked `requireConsent` is not run. A hook without it runs with nobody
-asking, so it is also refused when its script is not the one the run started with:
-- an agent's file tools changed it, in any attempt of the run; or
-- its SHA-256 differs from the one taken when the run first started. The run
-  hashes every Hook node's script at its start (`requireConsent` ones too) and
-  hashes an unasked hook's script again just before it runs. This also catches
-  other spellings of the path, links and shell commands you allowed. A script that
-  was there and is gone, or the other way round, counts as changed.
+asking, so it is also refused when its script or its `env` is not what the run
+started with:
+- an agent's file tools changed the script, in any attempt of the run; or
+- its SHA-256 differs from the one taken when the run first started. The hash is
+  of the script's text and the node's `env` (the hook runs with it as it is, and an
+  agent can edit the workflow file to add a `BASH_ENV` or `PATH`). The run hashes
+  every Hook node at its start (`requireConsent` ones too) and hashes an unasked
+  hook again just before it runs. This also catches other spellings of the path,
+  links and shell commands you allowed. A script that was there and is gone, or
+  the other way round, counts as changed.
 
 A refusal goes to `.harness/audit.log.jsonl`, and is the hook's error in the
 output, for example:
 
 ```
-✗ Gate failed: Hook script .harness/hooks/gate.sh was changed during this run; review it, then run it from the Hooks tab or start a new run.
+✗ Gate failed: Hook script .harness/hooks/gate.sh or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.
 ```
 
 The Hooks tab is in the app. Here, review the script and start a new run.
 
 The hashes are the run's baselines. They are saved in the run record
 (`hookScripts`, see below) and a resume keeps them; it takes no new ones. So:
-- a script changed during an earlier attempt is refused on every resume;
+- a script changed during an earlier attempt, or an `env` changed in the workflow
+  file since, is refused on every resume;
 - a Hook node added to the workflow file, or given a script, since the first
   attempt has no baseline and is refused;
 - after a refusal a resume refuses again, even though the summary prints a
@@ -143,8 +147,8 @@ The one exception is a record saved before `hookScripts` existed: it has no
 baselines, and resuming it takes them from the scripts as they are then.
 
 The check does not cover scripts that aren't valid UTF-8 (only the change log
-does), files a script sources or imports, or a change between the check and the
-hook's start. See `docs/SECURITY.md`.
+does; their `env` is not checked either), files a script sources or imports, or a
+change between the check and the hook's start. See `docs/SECURITY.md`.
 
 ## Output
 
@@ -223,8 +227,8 @@ The record holds:
 - the text each agent passed on, the memory, the gateway routes, the files the
   run changed, and the audit;
 - `hookScripts`: for each Hook node with a script, the SHA-256 (hex) of the script
-  as the run first read it, or `null` if it could not be read. Never the script's
-  text (see Hooks).
+  as the run first read it and of the node's `env`, or `null` if the script could
+  not be read. Never the script's text or the `env` (see Hooks).
 
 To resume a run that failed or was stopped:
 
@@ -257,7 +261,7 @@ Done in 23.5 s · run run-1790348292064
 - The provider settings are recorded, not compared. A finished agent is reused
   even if you resume with another `--provider`, `--base-url` or `--model`.
 - The hook baselines carry over and a resume takes no new ones (see Hooks). A
-  hook refused for its script is refused again on resume.
+  hook refused for its script or `env` is refused again on resume.
 
 A run saved by the app can be resumed with `harness run` on the same workflow
 file: the record names agents by their place in the file.
