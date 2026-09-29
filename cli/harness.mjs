@@ -16,7 +16,7 @@
  * cli/dist/harness-run.mjs (npm run build:cli) and needs harness-core (npm run build:core).
  */
 
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, lstatSync, existsSync } from "node:fs";
 import { join, resolve, basename } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -240,6 +240,16 @@ function findWorkspace() {
   return process.cwd();
 }
 
+// True for a real folder, false for a symlink or junction (even one that leads to a folder) and
+// for anything that does not exist.
+function isRealDirectory(path) {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function findHarnessFiles(dir) {
   if (!existsSync(dir)) return [];
   const result = [];
@@ -249,11 +259,14 @@ function findHarnessFiles(dir) {
         if (entry.startsWith(".")) continue;
         const full = join(d, entry);
         try {
-          const stat = statSync(full);
+          // lstat: a symlink or junction is never followed, since it can lead outside the workspace
+          // or back up to a parent folder, and a walk into such a loop never ends. A link is neither
+          // isDirectory() nor isFile(), so it is skipped (the same rule as findFiles in mcp/server.mjs).
+          const stat = lstatSync(full);
           // Exact directory names: "targets/" or "retargeting/" are ordinary folders.
           if (stat.isDirectory() && entry !== "node_modules" && entry !== "target") {
             walk(full);
-          } else if (entry.endsWith(".harness.yaml") || entry.endsWith(".harness.yml")) {
+          } else if (stat.isFile() && (entry.endsWith(".harness.yaml") || entry.endsWith(".harness.yml"))) {
             result.push(full);
           }
         } catch { /* skip permission errors */ }
@@ -291,7 +304,11 @@ const KEY_DOCS = [
 function cmdProjectStatus() {
   const workspace = findWorkspace();
   const files = findHarnessFiles(workspace);
-  const exampleFiles = findHarnessFiles(join(workspace, "examples"));
+  // examples/ comes from the repository, and a link there could lead anywhere (`examples -> /`
+  // would walk the whole disk): it is searched only when it is a real folder. The workspace itself
+  // is the user's choice, so it may be reached through a link.
+  const examplesDir = join(workspace, "examples");
+  const exampleFiles = isRealDirectory(examplesDir) ? findHarnessFiles(examplesDir) : [];
   const harnessDir = join(workspace, ".harness");
   const auditLog   = join(harnessDir, "audit.log.jsonl");
   const snapIndex  = join(harnessDir, "snapshots", "index.json");

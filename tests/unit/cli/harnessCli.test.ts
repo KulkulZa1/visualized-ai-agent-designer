@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -56,10 +56,12 @@ function workflowYaml(agentCount: number, connections: Array<[string, string]> =
   ].join("\n");
 }
 
-function runHarness(args: string[]) {
+// `timeoutMs` kills a CLI that has not finished by then (it has no exit status afterwards).
+function runHarness(args: string[], timeoutMs?: number) {
   return spawnSync(process.execPath, [cliPath, ...args], {
     cwd: root,
     encoding: "utf8",
+    timeout: timeoutMs,
     env: {
       ...process.env,
       OPENAI_API_KEY: "",
@@ -230,11 +232,12 @@ describe("harness CLI project status: workspace discovery", () => {
     workspace: string;
     workflowCount: number;
     workflows: string[];
+    exampleWorkflowCount: number;
     packageName: string;
   }
 
-  function status(args: string[]) {
-    const result = runHarness(["project", "status", "--json", ...args]);
+  function status(args: string[], timeoutMs?: number) {
+    const result = runHarness(["project", "status", "--json", ...args], timeoutMs);
     expect(result.status).toBe(0);
     return JSON.parse(result.stdout) as Status;
   }
@@ -293,6 +296,70 @@ describe("harness CLI project status: workspace discovery", () => {
       "top.harness.yaml",
     ]);
     expect(found.workflowCount).toBe(4);
+  });
+
+  it("does not follow symlinked folders, so a link loop cannot hang the workflow search", () => {
+    const workspace = makeScratchDir();
+    mkdirSync(join(workspace, "flows"));
+    writeFileSync(join(workspace, "flows", "real.harness.yaml"), "", "utf8");
+    // Two links back to the workspace itself: a search that follows them visits about 2^40 folders
+    // (the system stops resolving a path after 40 links), which is as good as endless.
+    // "junction" needs no privileges on Windows; other platforms create a directory symlink.
+    symlinkSync(workspace, join(workspace, "flows", "loop1"), "junction");
+    symlinkSync(workspace, join(workspace, "flows", "loop2"), "junction");
+
+    // A search that ends takes well under a second. One stuck in the loop is killed by the
+    // timeout instead, and then has no exit status.
+    const found = status(["--workspace", workspace], 20_000);
+
+    expect(found.workflows).toEqual(["real.harness.yaml"]);
+  });
+
+  it("lists no workflow behind a symlinked folder, whether the link leads out of the workspace or not", () => {
+    const workspace = makeScratchDir();
+    mkdirSync(join(workspace, "flows"));
+    writeFileSync(join(workspace, "flows", "real.harness.yaml"), "", "utf8");
+    const outside = makeScratchDir();
+    writeFileSync(join(outside, "outside.harness.yml"), "", "utf8");
+    symlinkSync(outside, join(workspace, "outside"), "junction");
+    symlinkSync(join(workspace, "flows"), join(workspace, "alias"), "junction");
+    // A linked folder is not a workflow file either, whatever it is called.
+    symlinkSync(join(workspace, "flows"), join(workspace, "named.harness.yaml"), "junction");
+
+    const found = status(["--workspace", workspace]);
+
+    expect(found.workflows).toEqual(["real.harness.yaml"]);
+    expect(found.workflowCount).toBe(1);
+  });
+
+  it("does not search an examples/ folder that is itself a symlink", () => {
+    const workspace = makeScratchDir();
+    const outside = makeScratchDir();
+    writeFileSync(join(outside, "outside.harness.yaml"), "", "utf8");
+    // `examples -> /` would walk the whole disk.
+    symlinkSync(outside, join(workspace, "examples"), "junction");
+
+    const found = status(["--workspace", workspace]);
+
+    expect(found.exampleWorkflowCount).toBe(0);
+    expect(found.workflowCount).toBe(0);
+  });
+
+  it("still searches a workspace that is given as a symlink, since the user chose it", () => {
+    const real = makeScratchDir();
+    writeFileSync(join(real, "flow.harness.yaml"), "", "utf8");
+    const link = join(makeScratchDir(), "workspace-link");
+    symlinkSync(real, link, "junction");
+
+    expect(status(["--workspace", link]).workflows).toEqual(["flow.harness.yaml"]);
+  });
+
+  it.skipIf(process.platform === "win32")("does not list a symlink to a workflow file", () => {
+    const workspace = makeScratchDir();
+    writeFileSync(join(workspace, "real.harness.yaml"), "", "utf8");
+    symlinkSync(join(workspace, "real.harness.yaml"), join(workspace, "linked.harness.yml"));
+
+    expect(status(["--workspace", workspace]).workflows).toEqual(["real.harness.yaml"]);
   });
 
   it("reads the package name from a package.json object", () => {
