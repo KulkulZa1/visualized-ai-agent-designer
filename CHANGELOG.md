@@ -56,6 +56,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **MCP server has 8 tools** — added `list_providers` (credential references only), `list_artifacts` (file metadata; empty until runs persist artifacts) and `get_recent_logs` (audit entries with best-effort secret redaction). Still read/test only.
 - **Generate** — generated CLAUDE.md names `<slug>.harness.yaml` (same as Save) and no longer claims every hook is consented and logged; the Generate panel asks before overwriting an existing file with different content.
 - **Repository** — root `CLAUDE.md` is a short pointer to `AGENT.md` (the generated 12-agent harness moved to `examples/harness-studio-project.CLAUDE.md`); `src-tauri/target-codex-verify*` and `.claude/settings.local.json` untracked; `outputs/` ignored; the empty-state screenshot moved to `docs/assets/empty-state.png`; `.gitattributes` added (LF).
+- **CI** — GitHub Actions runs `tsc`, vitest, the build and `cargo test` on ubuntu-latest for every pull request and push to master.
 
 ### Fixed
 - **Stopped nodes** — a node still working when you press Stop now shows as stopped (grey ■, also on the canvas node, in the run panel and in the timeline; saved to the workflow file as idle) instead of "Skipped by gateway" with a red "Stopped by user" error.
@@ -79,6 +80,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **MCP protocol** — notifications get no reply; parse / invalid-request / unknown-tool errors return -32700 / -32600 / -32602; tool failures return `isError` results; `run_tests` rejects filters starting with `-`; npx runs with `--no-install`; `serverInfo.version` is 0.1.0.
 - **CLI** — `--workspace <dir>` can appear before the command.
 - **Bundled hook scripts** — `url_allowlist.py` checks the parsed hostname and requires http/https; `destructive_guard.sh` no longer fails open on large input and catches more destructive forms; `rate_limit_sentinel.py` no longer crashes on non-UTF-8 consoles; `test_gate` defaults `WORKSPACE` to the repo root.
+- **Agent file tools** — `fs.write` no longer overwrites a file it cannot read (such a change was missing from the change log and could not be reverted), and a call without `content` or `new_string` is an error instead of an empty write.
+- **Text protocol** — a `<tool_call>` with invalid JSON goes back to the model as an error step instead of becoming the node's answer; JSON in a code fence inside the tags now parses.
+- **Gateways and reviews** — a route that equals an edge label follows only that edge (`valid` no longer also takes `invalid`); route and verdict JSON is found even with other braces in the reply; a leading APPROVED, PASS or ESCALATE is no longer overridden by a later "action: revise"; REVISE no longer re-runs nodes a gateway pruned.
+- **Runs** — a run that fails as a whole (a cycle, blocked dependencies) says why and is audited; streamed text from a stopped run can no longer overwrite the next run's output.
+- **Ollama** — `http://[::1]` and other loopback addresses (127.x.x.x) count as local.
+- **Stop and timeouts on Linux and macOS** — the process-group kill was a no-op with procps-ng 4.x, so an agent command's or hook's children kept running. Hooks now also run in their own process group and get no input, and a Stop that arrives before a command starts still ends it.
+- **CLI and MCP** — `workflow validate` / `validate_workflow` report connections to agents that don't exist; MCP `project_status` counts `.test.tsx` files and a `null` limit gets the default; the CLI skips only directories named exactly `node_modules` or `target`, accepts `--workspace=<dir>`, and no longer crashes on a non-object package.json.
+- **Build** — React lands in its `vendor-react` chunk (it was emitted empty), and the main chunk shrank from 727 kB to 537 kB.
+- **Tests** — the suites pass on Linux too (five Rust tests hard-coded cmd.exe; one hook test exceeded Linux's size limit for one environment variable), without React act() warnings or missing-mock noise.
 
 ### Security
 - **Agent shell execution disabled** — model-issued `bash`/`run_command` calls are refused and no longer advertised to the model; the `execute_inline_command` IPC command was removed. Re-enabling needs a per-command consent system.
@@ -87,6 +97,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Workspace paths** — `resolve_safe_path` resolves the deepest existing ancestor for new files, so a symlink/junction inside the workspace cannot redirect writes outside it; atomic writes use unique temp names and refuse directory targets.
 - **Provider traffic** — the billing-error fallback only goes to a local Ollama server; network errors no longer echo URL query strings.
 - **VS Code extension host** (experimental scaffold) — file access is confined to the open workspace folder, and the stored OpenAI key is sent only to api.openai.com.
+- **Protected paths** — agent file tools refuse to write git internals (any `.git` path segment, including a `.git` file), `.harness/hooks/` and `.harness/audit.log.jsonl`, so a prompt-injected agent cannot plant a git hook, rewrite an auto-run hook script or edit the audit trail. A Hook node whose script an agent wrote earlier in the same run is refused like one that needs consent. The check is on the path as written (Windows 8.3 names and NTFS streams are not covered).
+- **MCP `validate_workflow`** reads only `*.harness.yaml`/`.yml` files, checks containment on the real path (symlinks included), and no longer returns file lines in YAML errors (it could echo a line of `.env.example`).
+- **Windows command lookup** — agent commands and hooks get `NoDefaultCurrentDirectoryInExePath=1`, so cmd.exe doesn't run an `npm.cmd` or `git.bat` an agent planted in the workspace (not yet verified on Windows).
 
 ### Planned
 - Live streaming execution traces

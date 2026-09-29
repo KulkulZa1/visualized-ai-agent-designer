@@ -15,8 +15,9 @@ clearer production-grade error recovery.
 
 ## Evidence From This Pass
 
-Rows marked 2026-09-24 were re-run in the 2026-09-24 defect-fix pass. Other
-rows come from earlier passes and were not re-run.
+Rows marked 2026-09-24 were re-run in the 2026-09-24 defect-fix pass. Rows
+marked Linux come from a 2026-09-29 pass on Linux and do not replace the
+Windows rows. Other rows come from earlier passes and were not re-run.
 
 | Area | Command or action | Result |
 |---|---|---|
@@ -24,6 +25,11 @@ rows come from earlier passes and were not re-run.
 | Frontend tests | `npx vitest run` | Passed, 593 tests / 57 files (2026-09-25) |
 | Rust tests | `npm run test:rust` | Passed, 86 Rust tests (2026-09-25) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
+| TypeScript (Linux) | `npx tsc --noEmit` | Passed (2026-09-29, Linux) |
+| Frontend tests (Linux) | `npx vitest run` | Passed, 801 tests / 57 files (2026-09-29, Linux) |
+| Rust tests (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml` | Passed, 86 tests (2026-09-29, Linux; the 7 Windows-only tests are not compiled there) |
+| Frontend build (Linux) | `npm run build` | Passed (2026-09-29, Linux); no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains |
+| CI | `.github/workflows/ci.yml` | Added 2026-09-29: the four Linux checks above on ubuntu-latest for every pull request and push to master |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |
 | CLI status | `npm run harness -- project status` | Passed (2026-09-24); printed read-only v0 note, 7 workflows, docs present |

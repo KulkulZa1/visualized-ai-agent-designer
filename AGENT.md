@@ -31,6 +31,13 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 | CLI | Read-only commands tested |
 | MCP | stdio server and read/test tools tested |
 
+Linux pass, 2026-09-29 (the checks CI runs; not a Windows re-run): `npx tsc --noEmit`
+passed; `npx vitest run` passed, 801 tests / 57 files; `cargo test` passed, 86
+tests (the 7 Windows-only tests are not compiled on Linux); `npm run build`
+passed with no empty `vendor-react` chunk (the large `index`/`monacoLocal`
+warning remains). `.github/workflows/ci.yml` runs the same checks on every pull
+request and push to master.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -49,7 +56,7 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 - Rule-based Workflow Wizard / Create from Goal, including blog automation and Harness Studio self-improvement templates.
 - Rule-based Guide Assistant. It makes no live AI calls.
 - Provider settings and adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
-- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for nodes with `fs.write`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback.
+- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for nodes with `fs.write`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback. Writes to git internals, `.harness/hooks/` and `.harness/audit.log.jsonl` are refused.
 - Coding core:
   - Every file a run's agents write is in the run's change log (`changeLog.ts`). The Changes dialog shows a diff and reverts per file or all (`revertChanges.ts`, Rust `delete_workspace_file`).
   - Native tool-calling turns stream live (`chat_stream.rs`).
@@ -124,6 +131,6 @@ Last execution pass: 2026-09-25 (the `npm run tauri -- dev` and
 2. Persist real per-run artifacts and context traces into `.harness/artifacts/`.
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
 4. Add installer smoke tests on a clean Windows user profile.
-5. Wire real GitHub Actions CI (tsc + vitest + cargo test on every push).
+5. Add a Windows CI job for the Windows-only Rust tests and the Tauri build (`.github/workflows/ci.yml` runs tsc, vitest, the build and cargo test on Linux).
 
 
