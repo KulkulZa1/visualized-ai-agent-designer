@@ -39,12 +39,36 @@ describe("parseGatewayRoute", () => {
     ["Verdict: **REVISE**", "revise"],
     ["Verdict: `REVISE`", "revise"],
     ["**Verdict:** **REVISE**", "revise"],
-    // JSON that does not parse: cut off (Max tokens), or with a trailing comma.
-    ['{"verdict":"REVISE","issues":[{"file":"a.ts"', "revise"],
-    ['{"verdict": "REVISE",}', "revise"],
-    ['{"route": "Backend", "why": "api",}', "backend"],
   ])("accepts %j", (text, route) => {
     expect(parseGatewayRoute(text)).toBe(route);
+  });
+
+  // JSON that does not parse: cut off (Max tokens), or with a trailing comma. Only a call that passes
+  // the keys reads it (a reviewer's verdict); a gateway's route does not (see the test after this one).
+  it.each([
+    ['{"verdict":"REVISE","issues":[{"file":"a.ts"', ["verdict"], "revise"],
+    ['{"verdict": "REVISE",}', ["verdict"], "revise"],
+    ['{"route": "Backend", "why": "api",}', ["route"], "backend"],
+  ])("accepts %j for the keys %j", (text, keys, route) => {
+    expect(parseGatewayRoute(text, keys)).toBe(route);
+  });
+
+  it("routes nothing on JSON that did not parse, an echoed template, a list of routes or a quoted phrase", () => {
+    // No route means every branch is followed. A quoted `"key": "value"` pair anywhere in the reply is
+    // not a route: it would send the run down one branch on a template the model echoes, the first of
+    // a list of objects, a phrase in prose, or an argument of a tool call.
+    for (const reply of [
+      '{"route": "ship" | "revise" | "escalate"}',
+      '{"routes":[{"route":"a"},{"route":"b"}]}',
+      'I will not use "action": "delete" here.',
+      '{"tool_call":{"name":"grep","args":{"target":"src"}}}',
+      '{"route": "Backend", "why": "api",}', // a trailing comma
+      '{"verdict": "REVISE",}',
+      '{"verdict":"REVISE","issues":[{"file":"a.ts"', // cut off
+      '{"route":"backend","why":"api"',
+    ]) {
+      expect(parseGatewayRoute(reply), reply).toBeNull();
+    }
   });
 
   it("finds the object when prose with braces follows it", () => {
@@ -93,10 +117,31 @@ describe("parseGatewayRoute", () => {
   });
 
   it("reads a quoted pair of JSON that did not parse only when its value is a string", () => {
-    expect(parseGatewayRoute('{"verdict": 5,}')).toBeNull();
-    expect(parseGatewayRoute('{"verdict": "  ",}')).toBeNull();
-    expect(parseGatewayRoute('{"name": "x",}')).toBeNull();
-    expect(parseGatewayRoute('{"verdict": null, "route": "a",}')).toBe("a");
+    expect(parseGatewayRoute('{"verdict": 5,}', ["verdict"])).toBeNull();
+    expect(parseGatewayRoute('{"verdict": "  ",}', ["verdict"])).toBeNull();
+    expect(parseGatewayRoute('{"name": "x",}', ["verdict"])).toBeNull();
+    expect(parseGatewayRoute('{"verdict": null, "route": "a",}', ["verdict", "route"])).toBe("a");
+  });
+
+  it("reads a parenthesized options list before the colon of a keyword only when given the keys", () => {
+    for (const [text, verdict] of [
+      ["Verdict (PASS/REVISE): PASS", "pass"],
+      ["Verdict (PASS/REVISE): REVISE - intro", "revise"],
+      ["**Verdict (PASS/REVISE):** REVISE", "revise"],
+      ["**Verdict** (PASS/REVISE): **REVISE**", "revise"],
+      ["Verdict (APPROVED / REVISE / ESCALATE): REVISE", "revise"], // blanks around the slashes
+      ["Verdict (PASS or REVISE): PASS", "pass"], // any note, not only a slash
+      ["Verdict (PASS/REVISE): PASS\nVerdict (PASS/REVISE): REVISE", "pass"], // the first, as for a plain keyword
+    ] as const) {
+      expect(parseGatewayRoute(text, ["verdict"]), text).toBe(verdict);
+    }
+    // Not a route: with no keys the reply names none, so a gateway follows every branch.
+    expect(parseGatewayRoute("Verdict (PASS/REVISE): PASS")).toBeNull();
+    expect(parseGatewayRoute("Route (backend/frontend): backend")).toBeNull();
+    // The note must be closed on its line and followed by the colon.
+    for (const text of ["Verdict (PASS/REVISE is next", "Verdict (PASS/REVISE) is REVISE", "Verdict (PASS/\nREVISE): REVISE"]) {
+      expect(parseGatewayRoute(text, ["verdict"]), text).toBeNull();
+    }
   });
 
   it("takes the keys it is given literally, not as a pattern", () => {
@@ -194,6 +239,34 @@ describe("firedFeedbackEdges", () => {
     for (const reply of replies) expect(fired(reply), reply).toEqual(["W"]);
   });
 
+  it("lets an explicit verdict win over another key or keyword that comes first", () => {
+    // Reading every key finds route, target or domain before verdict, and an earlier keyword before a later one.
+    const replies = [
+      '{"verdict":"REVISE","target":"frontend","issues":["a"]}',
+      '{"verdict":"REVISE","domain":"frontend","issues":["a"]}',
+      '{"verdict":"REVISE","route":"frontend","issues":["a"]}',
+      // Cut off (no object closes around the verdict), with a `target:` in a message before the cut.
+      '{"verdict":"REVISE","issues":[{"severity":"error","file":"src/a.ts","message":"Path traversal: target: user input reaches fs"},{"severity":"warn","file":"src/b.ts","message":"missing',
+      "Action: rewrite the intro.\nVerdict: REVISE",
+      "Route: frontend\nVerdict: REVISE",
+      "Target: docs. **Verdict:** REVISE",
+      "Domain: ui\nVerdict (PASS/REVISE): REVISE",
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual(["W"]);
+    // A verdict that closes still closes.
+    for (const reply of [
+      '{"verdict":"PASS","target":"frontend","issues":[]}',
+      "Action: rewrite the intro.\nVerdict: PASS",
+      "Route: frontend\nVerdict (PASS/REVISE): PASS",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+    // And it can name the edge to fire.
+    const two = [feedback("R", "A", "code-fix"), feedback("R", "B", "rust-fix")];
+    expect(fired('{"verdict":"rust-fix","target":"frontend"}', two)).toEqual(["B"]);
+    expect(fired("Action: rewrite the intro.\nVerdict: rust-fix", two)).toEqual(["B"]);
+  });
+
   it("does not take a first word for a verdict when another word, a question or an alternative follows it", () => {
     const replies = [
       "Pass 1 of the review is done. Verdict: REVISE - intro is weak.",
@@ -234,6 +307,10 @@ describe("firedFeedbackEdges", () => {
       "Notes:\n- Revise: none\n- **Verdict:** PASS",
       "PASS/REVISE: PASS - all good",
       "APPROVED/REVISE: APPROVED",
+      // An echo of the options that makes no choice leaves REVISE open, unless there is a verdict.
+      "PASS/REVISE: fix the intro.\nVerdict: PASS",
+      "Review complete.\nPASS/REVISE:\nVerdict: PASS",
+      'Review complete.\nPASS/REVISE\n{"verdict":"PASS"}',
     ];
     for (const reply of replies) expect(fired(reply), reply).toEqual([]);
     // Without a verdict of its own, the REVISE still counts.
@@ -247,6 +324,123 @@ describe("firedFeedbackEdges", () => {
     }
     // A choice that is not one of them, or none, leaves both options open: it revises.
     for (const reply of ["PASS/REVISE: fix the intro.", "PASS/REVISE:", "PASS/REVISE", "**PASS/REVISE:** REVISE"]) {
+      expect(fired(reply), reply).toEqual(["W"]);
+    }
+  });
+
+  it("reads the choice after an options label at the start of any line, as at the start of the reply", () => {
+    for (const reply of [
+      "Review complete.\nPASS/REVISE: REVISE",
+      "Review complete.\n\n**PASS/REVISE:** REVISE - the intro is weak.",
+      "Review complete.\n**PASS/REVISE**: REVISE",
+      "Review complete.\n- Pass/Revise: revise",
+      "Review complete.\n> PASS/REVISE:\nREVISE",
+      "Review complete.\nAPPROVED/REVISE/ESCALATE: REVISE",
+      // A choice that is not one of the options or a closing verdict, one that does not stand alone, or
+      // none, leaves REVISE open.
+      "Review complete.\nPASS/REVISE: fix the intro.",
+      "Review complete.\nPASS/REVISE: Pass 1 of the review is done.",
+      "Review complete.\nPASS/REVISE:",
+      "Review complete.\nPASS/REVISE",
+      "Review complete.\r\nPASS/REVISE\r\nThe intro is weak.", // Windows line breaks
+    ]) {
+      expect(fired(reply), reply).toEqual(["W"]);
+    }
+    for (const reply of [
+      "Review complete.\nPASS/REVISE: PASS",
+      "Review complete.\n**PASS/REVISE:** **APPROVED**",
+      "Review complete.\nPASS/REVISE:\nPASS - all good",
+      "Review complete.\n- Pass/Fail: PASS - all green",
+      "Review complete.\nApprove/Revise: Approve", // the choice is one of its options
+      "Review complete.\nPASS/REVISE: PASS\nPASS/REVISE: PASS",
+      "Review complete.\r\nPASS/REVISE: PASS\r\n",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+    // The choice can name the edge to fire.
+    const two = [feedback("R", "A", "code-fix"), feedback("R", "B", "rust-fix")];
+    expect(fired("Review complete.\nPASS/REVISE: rust-fix", two)).toEqual(["B"]);
+  });
+
+  it("reads an options label that has blanks around its slashes, as the example prompts write them", () => {
+    // "Return APPROVED / REVISE / ESCALATE." is how the example reviewers are told to answer.
+    for (const reply of [
+      "APPROVED / REVISE / ESCALATE: REVISE",
+      "PASS / REVISE: REVISE - intro",
+      "PASS /REVISE: REVISE",
+      "PASS/ REVISE: REVISE",
+      "**PASS / REVISE:** REVISE",
+      "Review complete.\nAPPROVED / REVISE / ESCALATE: REVISE",
+      "Review complete.\n- Pass / Revise: revise",
+      // A choice that is not one of the options, or none, leaves REVISE open.
+      "PASS / REVISE: fix the intro.",
+      "PASS / REVISE:",
+      "PASS / REVISE",
+      "Review complete.\nAPPROVED / REVISE / ESCALATE",
+    ]) {
+      expect(fired(reply), reply).toEqual(["W"]);
+    }
+    for (const reply of [
+      "APPROVED / REVISE / ESCALATE: APPROVED",
+      "APPROVED / REVISE / ESCALATE: ESCALATE",
+      "PASS / REVISE: PASS - all good",
+      "**PASS / REVISE:** **PASS**",
+      "PASS / REVISE:\nPASS",
+      "Pass / Fail: PASS - all green",
+      "Review complete.\nAPPROVED / REVISE / ESCALATE: APPROVED",
+      "Review complete.\nPASS / REVISE: PASS",
+      "Review complete.\nApprove / Revise: Approve", // the choice is one of its options
+      // The choice that opens the reply settles it, as a leading closing word does.
+      "PASS / REVISE: PASS\nOptional follow-up action: revise the headline.",
+      "APPROVED / REVISE / ESCALATE: APPROVED. Optional follow-up action: revise the headline.",
+      // No verdict word among the options: nothing to read.
+      "Input / output: fine",
+      "Review complete.\nInput / output: fine",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+    const two = [feedback("R", "A", "code-fix"), feedback("R", "B", "rust-fix")];
+    expect(fired("Review complete.\nAPPROVED / REVISE / ESCALATE: rust-fix", two)).toEqual(["B"]);
+  });
+
+  it("keeps the blanks of an options label on one line, and takes a slash in prose for no label", () => {
+    for (const reply of [
+      "PASS\n/ REVISE: fix the intro.", // a line that starts with a slash is no label; PASS stands alone
+      "Review complete.\nPASS\n/ REVISE: fix the intro.",
+      "Approve / revise later, once the tests pass.", // text follows the options: not an echo
+      "Review complete.\nApprove / revise later, once the tests pass.",
+      "lib / revise.js looks correct.",
+      "The change in lib / revise looks correct.",
+      "All good. See ` / revise`.",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+  });
+
+  it("does not take a REVISE after a slash for a stated one", () => {
+    // Before, a REVISE that followed a "/" anywhere counted: most of these revised.
+    for (const reply of [
+      "Verdict (PASS/REVISE): PASS",
+      "Review complete.\nPASS/REVISE: PASS",
+      "The change in lib/revise.js looks correct. No issues found.",
+      "All good. See `/revise`.",
+      "Looks fine. See https://example.com/revise for the guide.",
+      "Looks fine. Compare src/revise/index.ts with docs/revise.md.",
+      "lib/revise.js: looks correct", // a path with an extension is no options label
+      "- src/revise/index.ts:12: renamed",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+    // The options after a verdict's colon are read, not the ones before it.
+    expect(fired("Verdict (PASS/REVISE): REVISE")).toEqual(["W"]);
+    expect(fired("Verdict (APPROVED / REVISE / ESCALATE): REVISE - intro")).toEqual(["W"]);
+    expect(fired("**Verdict (PASS/REVISE):** REVISE")).toEqual(["W"]);
+  });
+
+  it("revises on a REVISE line after a passing one, as it always did", () => {
+    // A false revise costs up to two rounds; a false close ships work that needed changes. So a line that
+    // opens with "Revise:" counts even when it says "none". This pins that behavior; it is not a goal.
+    for (const reply of ["Overall: PASS\nRevise: none", "Looks good.\nRevise: nothing."]) {
       expect(fired(reply), reply).toEqual(["W"]);
     }
   });
@@ -276,7 +470,7 @@ describe("firedFeedbackEdges", () => {
     }
   });
 
-  it("reads a REVISE that stands alone at the start of a later sentence, line or alternative", () => {
+  it("reads a REVISE that stands alone at the start of a later sentence or line", () => {
     for (const reply of [
       "Here is my review.\n\nREVISE - the intro is weak.",
       "Review notes.\nRevise: the intro is weak.",
@@ -317,6 +511,35 @@ describe("firedFeedbackEdges", () => {
       '"verdict":"'.repeat(5_000),
       "a/".repeat(25_000),
       `${"a".repeat(1_000)}/`.repeat(50),
+      // The options label at the start of every line, the choice after it, and the note before a colon.
+      "a/b\n".repeat(12_500),
+      "a/b:\n".repeat(10_000),
+      "PASS/REVISE\n".repeat(5_000),
+      "a/b: ".repeat(10_000),
+      `a/b:${"\n".repeat(50_000)}!`,
+      `a/b:${" ".repeat(50_000)}!`,
+      `a/b:${"*".repeat(50_000)}`,
+      `${" ".repeat(50_000)}a/b`,
+      `${"-".repeat(50_000)}x`,
+      `a/b${"*".repeat(50_000)}x`,
+      "verdict (".repeat(30_000),
+      `verdict (${"x".repeat(50_000)}`,
+      `verdict (${"a/".repeat(25_000)}`,
+      `verdict ${" ".repeat(50_000)}(x`,
+      `verdict (x)${"*".repeat(50_000)}!`,
+      `verdict (x)${" ".repeat(50_000)}!`,
+      "verdict (x) ".repeat(5_000),
+      // Blanks around the slashes of an options label: a long list, one that fails at its end, long runs of blanks.
+      "a / ".repeat(12_500),
+      "a /".repeat(16_000),
+      "a  /  ".repeat(8_000) + "b!",
+      `${"a".repeat(1_000)} / `.repeat(50),
+      `${"a / ".repeat(1_000)}\n`.repeat(50),
+      "a / b\n".repeat(8_000),
+      `a${" ".repeat(50_000)}x`,
+      `a${" ".repeat(50_000)}/`,
+      `a /${" ".repeat(50_000)}!`,
+      "a\t/\t".repeat(12_500),
     ]) {
       fired(reply);
     }
