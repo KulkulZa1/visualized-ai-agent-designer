@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { act, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ContextInspectorTab } from "@/components/config-panel/tabs/ContextInspectorTab";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
@@ -19,10 +19,12 @@ beforeEach(() => {
 });
 
 describe("ContextInspectorTab", () => {
-  it("previews the context without persisting a snapshot just because the tab was opened", () => {
+  it("previews the context without persisting a snapshot just because the tab was opened", async () => {
     useWorkflowStore.getState().addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
 
-    render(<ContextInspectorTab nodeId="n1" />);
+    // SnapshotHistory loads its list in an effect and sets state when that resolves. Render inside
+    // an async act() so that update settles in the act scope rather than after render() returns.
+    await act(async () => { render(<ContextInspectorTab nodeId="n1" />); });
 
     expect(createSnapshot).not.toHaveBeenCalled();
   });
