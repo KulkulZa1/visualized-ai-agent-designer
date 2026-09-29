@@ -7,8 +7,8 @@ import { useWorkspaceStore } from "@/store/workspaceStore";
 
 vi.mock("@/components/editor/monacoLocal", () => ({
   default: () => null,
-  DiffEditor: ({ original, modified }: { original: string; modified: string }) => (
-    <pre data-testid="diff">{`${original}|${modified}`}</pre>
+  DiffEditor: ({ original, modified, theme }: { original: string; modified: string; theme?: string }) => (
+    <pre data-testid="diff" data-theme={theme}>{`${original}|${modified}`}</pre>
   ),
 }));
 
@@ -36,6 +36,12 @@ describe("ChangesDialog", () => {
 
     fireEvent.click(screen.getByText("src/new.ts"));
     expect((await screen.findByTestId("diff")).textContent).toBe("|x\n");
+  });
+
+  it("shows the diff in Monaco's dark theme, like the rest of the app", async () => {
+    render(<ChangesDialog onClose={() => {}} />);
+
+    expect((await screen.findByTestId("diff")).getAttribute("data-theme")).toBe("vs-dark");
   });
 
   it("reverts a file and drops it from the list", async () => {

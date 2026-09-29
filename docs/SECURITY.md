@@ -130,7 +130,10 @@ Current audit path is:
 Hook runs inside workflows and manual runs from the Hooks tab are appended to it
 when a workspace is open, and so is every Hook node the engine refused to run (a
 refusal says why). So is every agent shell command: approved and run
-(with its exit code), denied, or failed to start (`command_executed`). The old `.agent-audit/` path is deprecated and should
+(with its exit code), denied, or failed to start (`command_executed`), and a run
+that failed as a whole (`run_failed`: a cycle, blocked dependencies). Every other
+event of a run is shown in the app and kept in the run record, not written to this
+file. The old `.agent-audit/` path is deprecated and should
 not be used in new docs or code. `.harness/snapshots/` and `.harness/artifacts/`
 are ignored by git.
 

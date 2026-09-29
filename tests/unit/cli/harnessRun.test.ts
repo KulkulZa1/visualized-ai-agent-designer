@@ -171,6 +171,9 @@ describe("harness run", { timeout: 60_000 }, () => {
       .filter((e) => e.type === "node_finished" && e.agent === agentName).map((e) => [e.status, e.output]);
     expect(finished("Fast")).toEqual([["done", "fast answer"], ["skipped", undefined]]); // finished, then taken back
     expect(finished("Slow")).toEqual([["skipped", undefined], ["done", "slow answer"]]); // skipped, then chosen
+    // The drop is a revision's doing: `harness run` reports it as a revision event, in text mode as a line of its own.
+    expect(events.filter((e) => e.type === "revision").map((e) => e.details)).toContain(
+      "↺ Fast skipped: a gateway now routes around it, so its earlier result is dropped");
     // The reviewer read Fast the first time and Slow, not Fast, the second.
     const reviews = callsOf("Review", run.requests).map((r) => String(r.args.userMessage));
     expect(reviews[0]).toContain("[From: Fast]\nfast answer");

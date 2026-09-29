@@ -24,7 +24,7 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | Check | Result |
 |---|---|
 | `npx tsc --noEmit` | Passed |
-| `npx vitest run` | Passed, 669 tests / 65 files |
+| `npx vitest run` | Passed, 706 tests / 69 files |
 | `cargo test` | Passed, 95 tests (the app build) |
 | `cargo test --no-default-features --features core` | Passed, 95 + 1 tests; no Tauri, WebView or GTK in the dependency tree |
 | `npm run build` | Passed; Vite empty `vendor-react` and large `index`/`monacoLocal` chunk warnings remain |
@@ -33,11 +33,12 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | `npm run tauri -- build` | Produced MSI and NSIS installers |
 | CLI | Read-only commands tested; `harness run` end to end against a fake `harness-core` |
 | `harness run` (live) | 2026-09-26: the real `harness-core` and a free keyless endpoint; an agent fixed a bug and ran an allowed `node --test`, and `--resume` reused it (see `docs/DEVELOPMENT_LOG.md`) |
-| App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. UI issues found are listed in `docs/DEPLOYMENT_READINESS.md` |
+| App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. The UI issues it found are fixed and were re-checked the same way (see `docs/DEVELOPMENT_LOG.md`) |
 | MCP | stdio server and read/test tools tested |
 
-Linux pass, 2026-09-29 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1042 tests / 66 files;
+Linux pass, 2026-09-29, with master's #10 (the UI fixes) merged (not a Windows
+re-run: the rows above stand): `npx tsc --noEmit` passed; `npx vitest run`
+passed, 1082 tests / 70 files;
 `cargo test` passed, 116 tests (the 2 Windows-only tests are not compiled on
 Linux); `cargo test --no-default-features --features core` passed, 116 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
@@ -100,7 +101,7 @@ request and push to master.
 - Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (the loop is `runWithRevisions` in `src/engine/runWorkflow.ts`; verdicts are read in `src/services/execution/routing.ts`). Gateway routing prunes skipped branches. A revision follows the gateways' current routes:
   - It skips the nodes the current routes prune.
   - When a gateway on the path switches route, a node it routed away from that had already run is dropped: marked skipped, and its output removed from later inputs, the run record and memory. So `harness run --json` can report a node `done` and later `skipped`; the last event, and `run_finished.agents`, count.
-  - A node the new route makes live but that is off the revision path does not run; an audit entry says so.
+  - A node the new route makes live but that is off the revision path does not run; an audit warning (a `revision` entry with `warning`) says so.
   - A failed node is dropped only with `continueOnError`, and a failed Hook never is (it fails the run even then), so a failed run keeps its reason.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).

@@ -82,9 +82,28 @@ beforeEach(() => {
   mockInvokeHandler("write_audit_entry", (args) => {
     auditWrites.push(args as (typeof auditWrites)[number]);
   });
+  mockInvokeHandler("list_workspace_files", () => []);
 });
 
 describe("useWorkflowExecution", () => {
+  it("leaves a saved workflow saved: a run's node status is not an edit", async () => {
+    useWorkflowStore.setState({ isDirty: false });
+
+    await run();
+
+    expect(useWorkflowStore.getState().nodes.map((n) => n.data.status)).toEqual(["done", "done"]);
+    expect(useWorkflowStore.getState().isDirty).toBe(false);
+  });
+
+  it("re-reads the workspace's files after a run, so the files agents created show up", async () => {
+    mockInvokeHandler("list_workspace_files", () => [{ name: "notes.md", path: "notes.md", isDirectory: false }]);
+    useWorkspaceStore.setState({ fileTree: [] });
+
+    await run();
+
+    expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]);
+  });
+
   it("reports the run as failed when an agent errors, even with continueOnError", async () => {
     mockInvokeHandler("call_ollama_api", (args) =>
       (args as { system: string }).system.startsWith("You are B")
@@ -116,7 +135,7 @@ describe("useWorkflowExecution", () => {
       const message: string = onError.mock.calls[0][0];
       expect(message).toMatch(/^Run failed: .*cycle.*\bA\b.*\bB\b/i);
       const entry = useAuditStore.getState().entries.find((e) => e.details === message);
-      expect(entry).toMatchObject({ action: "workflow_loaded", agentId: "system", success: false });
+      expect(entry).toMatchObject({ action: "run_failed", agentId: "system", success: false });
       expect(auditWrites).toEqual([{ workspacePath: "/ws", entry }]); // and .harness/audit.log.jsonl
     });
 
@@ -137,6 +156,39 @@ describe("useWorkflowExecution", () => {
       expect(finished?.status).toBe("error");
       expect(onError).toHaveBeenCalledWith(expect.stringMatching(/^Run failed: .*\bX\b.*\bY\b/));
       expect(auditWrites).toHaveLength(1);
+    });
+
+    it("still re-reads the workspace's files, since the agents that ran before the failure may have created some", async () => {
+      mockInvokeHandler("list_workspace_files", () => [{ name: "notes.md", path: "notes.md", isDirectory: false }]);
+      useWorkspaceStore.setState({ fileTree: [] });
+      useWorkflowStore.setState({
+        nodes: [makeNode("Start"), makeNode("X"), makeNode("Y")],
+        edges: [
+          { id: "s-x", source: "Start", target: "X" },
+          { id: "x-y", source: "X", target: "Y" }, { id: "y-x", source: "Y", target: "X" },
+        ],
+      });
+      const onError = vi.fn();
+
+      await run(onError);
+
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/^Run failed: /));
+      expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]);
+    });
+
+    it("does not re-read the workspace's files when the run never started: it created none", async () => {
+      const listed = vi.fn(() => []);
+      mockInvokeHandler("list_workspace_files", listed);
+      mockInvokeHandler("check_provider_health", (args) => ({
+        ok: false, provider: (args as { provider: string }).provider, latency_ms: 1,
+        message: "Ollama is not running", model_available: false, pull_command: null,
+      }));
+      const onError = vi.fn();
+
+      await run(onError);
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(listed).not.toHaveBeenCalled();
     });
 
     it("reports the failure without a workspace too, with no audit file to write", async () => {
@@ -415,7 +467,9 @@ describe("useWorkflowExecution", () => {
 
       expect([calls.W.length, calls.R.length, calls.D.length]).toEqual([1 + MAX_REVISION_ROUNDS, 1 + MAX_REVISION_ROUNDS, 1]);
       expect(finished?.status).toBe("done");
-      expect(useAuditStore.getState().entries.some((e) => /revision limit/.test(e.details ?? ""))).toBe(true);
+      // The run goes on with the latest version: a warning, not a failure.
+      expect(useAuditStore.getState().entries.find((e) => /revision limit/.test(e.details ?? "")))
+        .toMatchObject({ action: "revision", success: true, warning: true });
     });
 
     it("re-runs every node between the target and a gateway that routes back, then follows its final route", async () => {

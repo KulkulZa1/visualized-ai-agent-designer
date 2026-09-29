@@ -68,6 +68,7 @@ export function MarkdownEditor({ path }: MarkdownEditorProps) {
     }>
       <MonacoEditor
         height="100%"
+        theme="vs-dark"
         language={path.endsWith(".yaml") || path.endsWith(".yml") ? "yaml" : "markdown"}
         value={content}
         onChange={(v) => {
@@ -89,7 +90,6 @@ export function MarkdownEditor({ path }: MarkdownEditorProps) {
           scrollBeyondLastLine: false,
           lineNumbers: "on",
           renderLineHighlight: "line",
-          theme: "vs",
         }}
       />
     </React.Suspense>

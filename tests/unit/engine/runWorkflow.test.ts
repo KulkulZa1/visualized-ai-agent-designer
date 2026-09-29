@@ -133,6 +133,58 @@ describe("runWorkflow", () => {
     expect(commands).not.toContain("call_ollama_api");
   });
 
+  describe("the local Ollama probe", () => {
+    const OLLAMA_DOWN = "Ollama is selected, but the local Ollama server is not reachable at " +
+      "http://localhost:11434. Please start Ollama and try again.";
+    /** Local Ollama is down; every other provider is healthy and answers "done". */
+    const probeHandlers = (probed: string[]): Record<string, Handler> => ({
+      check_provider_health: (args) => {
+        probed.push(String(args.provider));
+        return args.provider === "ollama"
+          ? { ok: false, provider: "ollama", latency_ms: 0, message: OLLAMA_DOWN, model_available: false, pull_command: null }
+          : { ok: true, provider: args.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null };
+      },
+      call_openai_api: () => "done",
+    });
+    const nodeOn = (model: string) => {
+      const node = makeNode("A");
+      node.data.model = model;
+      return node;
+    };
+    const provider = (settings: Partial<RunInput["provider"]>): Partial<RunInput> => ({
+      provider: { ...runInput([]).provider, ...settings },
+    });
+
+    it("is skipped for a run on a Custom endpoint, which never falls back to it", async () => {
+      const probed: string[] = [];
+      const { host } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("openai")], [], provider({
+        llmProvider: "openai-compatible", customApiUrl: "https://llm.example/v1", customApiModel: "openai",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect(probed).toEqual(["openai-compatible"]);
+    });
+
+    it("warns, without blocking the run, that OpenAI's billing fallback is down", async () => {
+      const probed: string[] = [];
+      const { host, log } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("gpt-4o-mini")], [], provider({
+        llmProvider: "openai", openaiApiKey: "sk-test",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect([...probed].sort()).toEqual(["ollama", "openai"]);
+      expect(log.audit.find((e) => e.details?.includes("ollama"))).toMatchObject({
+        details: "⚠ ollama — not available at http://localhost:11434, so a billing error from OpenAI " +
+          "cannot fall back to local Ollama",
+        success: true,
+      });
+    });
+  });
+
   /** Node A asks to run `npm test` with bash, then answers. */
   function commandRun(): { nodes: AgentNode[]; handlers: Record<string, Handler> } {
     let calls = 0;
@@ -159,6 +211,37 @@ describe("runWorkflow", () => {
       { runId: outcome.run.id, agentName: "A", command: "npm test", workspacePath: "/ws" });
     expect(commands).toContain("execute_command");
     expect(outcome.run.agents.A.status).toBe("done");
+  });
+
+  it("names a run's audit entries by what happened", async () => {
+    const { nodes, handlers } = commandRun();
+    const { host, log } = fakeHost(handlers, { askCommand: async () => "granted" });
+
+    await runWorkflow(runInput(nodes), host);
+
+    const entries = log.audit.filter((e) => e.agentId === "A");
+    expect(entries.map((e) => e.action)).toEqual(
+      ["agent_started", "tool_call", "command_executed", "provider_fallback", "agent_finished"]);
+    // The model refused native tool calls (noted once the loop ends): a warning, not a failure.
+    expect(entries[3]).toMatchObject({ success: true, warning: true });
+  });
+
+  it("records a billing fallback to local Ollama as a warning", async () => {
+    const { host, log } = fakeHost({
+      call_openai_api: () => { throw new Error("insufficient_quota: you exceeded your current quota"); },
+    });
+    const node = makeNode("A");
+    node.data.model = "gpt-4o-mini";
+
+    const outcome = await runWorkflow(runInput([node], [], {
+      provider: { ...runInput([]).provider, llmProvider: "openai", openaiApiKey: "sk-test" },
+    }), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(outcome.run.agents.A.status).toBe("done");
+    expect(log.audit.find((e) => e.action === "provider_fallback")).toMatchObject({
+      details: "Billing error — fell back to Ollama (qwen2.5-coder:7b)", success: true, warning: true,
+    });
   });
 
   it("does not run a shell command the host denies", async () => {
@@ -1112,7 +1195,7 @@ describe("a run that fails as a whole", () => {
     expect(outcome.run.status).toBe("error");
     expect(outcome.error).toMatch(/^Run failed: .*cycle.*\bA\b.*\bB\b/i);
     const entry = log.audit.find((e) => e.details === outcome.error);
-    expect(entry).toMatchObject({ action: "workflow_loaded", agentId: "system", success: false });
+    expect(entry).toMatchObject({ action: "run_failed", agentId: "system", success: false });
     expect(audited).toEqual([{ workspacePath: "/ws", entry }]);
     expect(records.at(-1)?.audit.some((e) => e.details === outcome.error)).toBe(true);
     expect(log.finished).toEqual(["error"]);
@@ -1244,7 +1327,15 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(outcome.run.status).toBe("done");
     expect(log.agents.filter(([id, partial]) => id === "Fast" && partial.status === "skipped")).toHaveLength(1);
     expect(log.nodeStatus.filter(([id]) => id === "Fast").at(-1)).toEqual(["Fast", "idle"]);
-    expect(log.audit.map((e) => e.details)).toContain("↺ Fast skipped: a gateway now routes around it, so its earlier result is dropped");
+    // A revision's doing, so `harness run` prints it (the reporter classifies by action): not a warning, the run did as asked.
+    expect(log.audit.find((e) => e.agentId === "Fast" && /routes around it/.test(e.details ?? ""))).toMatchObject({
+      action: "revision", success: true, details: "↺ Fast skipped: a gateway now routes around it, so its earlier result is dropped",
+    });
+    expect(log.audit.find((e) => e.agentId === "Fast" && /routes around it/.test(e.details ?? ""))).not.toHaveProperty("warning");
+    // Slow was skipped by the scheduler first, when Gate chose Fast.
+    expect(log.audit.find((e) => e.agentId === "Slow" && e.details === "skipped by gateway routing")).toMatchObject({
+      action: "agent_skipped", success: true,
+    });
     // The record has no output of it, and only the route the gateway ended with.
     expect(record.outputs).toEqual({
       "agent-0": "draft-out 2", "agent-1": '{"route":"slow"}', "agent-3": "slow-out 1", "agent-4": "PASS",
@@ -1314,9 +1405,12 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(outcome.run.agents.Review).toEqual({ agentId: "Review", agentName: "Review", status: "skipped" });
     expect(outcome.run.agents.Slow.status).toBe("skipped"); // live now, but off the path: it did not run
     // The run says so: the chosen branch is empty, and the record should not leave that unexplained.
-    expect(log.audit.filter((e) => /not on the revision path/.test(e.details ?? "")).map((e) => [e.agentId, e.details])).toEqual([
+    const offPath = log.audit.filter((e) => /not on the revision path/.test(e.details ?? ""));
+    expect(offPath.map((e) => [e.agentId, e.details])).toEqual([
       ["Slow", "↺ Slow: a gateway now routes to it, but it is not on the revision path, so it did not run"],
     ]);
+    // A revision's entry, and a warning: the run goes on, though the branch the gateway chose did not run.
+    expect(offPath[0]).toMatchObject({ action: "revision", success: true, warning: true });
     expect(record.outputs).toEqual({ "agent-0": "draft-out 2", "agent-1": '{"route":"slow"}' });
     expect(outcome.run.status).toBe("done");
   });
@@ -1381,7 +1475,9 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 1, Slow: 1, Review: 2, Side: 0 });
     expect(outcome.run.agents.Side).toEqual({ agentId: "Side", agentName: "Side", status: "skipped" });
     expect(record.outputs).not.toHaveProperty("agent-5"); // Side is the sixth node
-    expect(log.audit.some((e) => e.agentId === "Side" && e.details === "skipped by gateway routing")).toBe(true);
+    expect(log.audit.find((e) => e.agentId === "Side" && e.details === "skipped by gateway routing")).toMatchObject({
+      action: "agent_skipped", success: true,
+    });
     expect(outcome.run.status).toBe("done");
   });
 

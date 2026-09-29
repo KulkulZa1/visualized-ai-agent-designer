@@ -5,6 +5,7 @@ import {
   filterAuditEntries,
   getAuditEmptyMessage,
   orderAuditEntries,
+  type AuditFilterKind,
 } from "@/utils/auditFilters";
 
 function entry(
@@ -57,6 +58,39 @@ describe("auditFilters", () => {
       agentId: "all",
     });
     expect(fileReadWithErrors.map((e) => e.id)).toEqual(["2"]);
+  });
+
+  describe("kind filters on a run's entries", () => {
+    const run: AuditEntry[] = [
+      entry("1", "agent_started", "A", true, "▶ Coder — openai via openai-compatible"),
+      entry("2", "tool_call", "A", true, 'Tool: read_file({"path":"sum.mjs"})'),
+      entry("3", "command_executed", "A", true, "Coder ran: node --test (approved once; exit 0, 398 ms)"),
+      entry("4", "hook_executed", "A", true, ".harness/hooks/gate.sh exited 0"),
+      entry("5", "hook_executed", "B", false,
+        "Hook requires explicit manual consent. Open the Hooks tab and run it there."),
+      { ...entry("6", "provider_fallback", "A", true, "Billing error — fell back to Ollama (qwen2.5-coder:7b)"),
+        warning: true },
+      entry("7", "agent_finished", "A", true, "✓ Coder — 689 est. tokens (1 tool call)"),
+      entry("8", "run_failed", "system", false, "Run failed: No runnable nodes remain. Workflow may contain a cycle: A, B"),
+    ];
+    // Errors (5, and 8: a run that failed as a whole) show under every kind.
+    const ids = (kind: AuditFilterKind) => filterAuditEntries(run, { kind, agentId: "all" }).map((e) => e.id);
+
+    it("tool shows tool calls and commands", () => {
+      expect(ids("tool")).toEqual(["2", "3", "5", "8"]);
+    });
+
+    it("consent shows commands, which all need approval, and hooks waiting for consent", () => {
+      expect(ids("consent")).toEqual(["3", "5", "8"]);
+    });
+
+    it("warn shows non-fatal problems", () => {
+      expect(ids("warn")).toEqual(["5", "6", "8"]);
+    });
+
+    it("error shows failures only, a run that failed as a whole included", () => {
+      expect(ids("error")).toEqual(["5", "8"]);
+    });
   });
 
   it("keeps existing newest-first order unless oldest-first is requested", () => {

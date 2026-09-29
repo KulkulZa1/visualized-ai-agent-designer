@@ -23,7 +23,7 @@ Windows rows. Other rows come from earlier passes and were not re-run.
 | Area | Command or action | Result |
 |---|---|---|
 | TypeScript | `npx tsc --noEmit` | Passed (2026-09-24) |
-| Frontend tests | `npx vitest run` | Passed, 669 tests / 65 files (2026-09-26) |
+| Frontend tests | `npx vitest run` | Passed, 706 tests / 69 files (2026-09-26) |
 | Rust tests | `npm run test:rust` | Passed, 95 Rust tests (2026-09-26) |
 | Rust tests without Tauri | `cargo test --no-default-features --features core` | Passed, 95 + 1 (2026-09-26); `cargo tree` shows no Tauri, WebView or GTK |
 | harness-core and the CLI bundle | `npm run build:core`, `npm run build:cli` | Passed (2026-09-26); 5.6 MB `harness-core.exe`, a 498 KB bundle with no React, stores or Tauri |
@@ -37,7 +37,7 @@ Windows rows. Other rows come from earlier passes and were not re-run.
 | harness run output on Windows | Redirected from cmd.exe; captured by Windows PowerShell 5.1 | cmd.exe: UTF-8. Windows PowerShell 5.1 in a default console decodes it with the console code page (`??`), and its `>` writes UTF-16: see `docs/HEADLESS.md` (Troubleshooting) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
 | TypeScript (Linux) | `npx tsc --noEmit` | Passed (2026-09-29, Linux) |
-| Frontend tests (Linux) | `npx vitest run` | Passed, 1042 tests / 66 files (2026-09-29, Linux) |
+| Frontend tests (Linux) | `npx vitest run` | Passed, 1082 tests / 70 files (2026-09-29, Linux, with master's #10 merged) |
 | Rust tests (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml` | Passed, 116 tests (2026-09-29, Linux; the 2 Windows-only tests are not compiled there) |
 | Rust tests without Tauri (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core` | Passed, 116 + 2 (2026-09-29, Linux) |
 | Frontend build (Linux) | `npx vite build` | Passed (2026-09-29, Linux); no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains |
@@ -115,7 +115,7 @@ Installer outputs:
 | Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook. A Hook node fails, and the run stops, instead of running when it is marked `requireConsent`; or, if it has no `requireConsent`, when its script or env changed during the run. Two checks: an agent's file tools changed the script (the change log, in any attempt of the run), or the SHA-256 of the script and of the node's `env`, taken for every Hook node when the run first starts, differs from one taken just before the hook runs (this catches other spellings of the path, links, approved shell commands and a changed `env`). The hashes are saved in the run record (`hookScripts`); a resume never takes new ones (except for a record saved before the field), so a hook without a baseline is refused until a new run, and a new run takes the scripts as they are. Refusals are audited. The hash needs Web Crypto: `harness run` needs Node 20 or later, else a run with such a hook does not start (exit 3). Not covered: scripts that aren't valid UTF-8 (change log only), files a script sources or imports, the gap between the check and the hook's start, and an approved `bash` command that writes anywhere in the workspace, run records included; see `docs/SECURITY.md`. Agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |
 | Tauri shell permissions | `shell:allow-execute` and `shell:allow-kill` removed from default capabilities |
-| Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and always probes local Ollama as the billing fallback; the billing-error fallback only goes to a local Ollama server |
+| Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and probes local Ollama only when the run uses it or as the billing fallback of OpenAI and Anthropic; the billing-error fallback only goes to a local Ollama server |
 
 ## Runtime UI Findings
 
@@ -129,21 +129,20 @@ Verified through browser DOM inspection and Chrome headless screenshot of the fr
 - Empty-canvas minimap is hidden until the workflow has nodes.
 - AuditStrip empty state says no events yet and includes the All chip.
 
-Found by the Windows QA on 2026-09-26 and not fixed yet (details in
-`docs/DEVELOPMENT_LOG.md`):
+The Windows QA on 2026-09-26 found nine UI issues, now fixed and re-checked in
+a browser with a real run (details in `docs/DEVELOPMENT_LOG.md`):
 
-- The top bar needs about 1,230 px with a workflow open, but the window may be
-  1,024 px wide: below that, Save and Run are cut off.
-- A workflow shows "● unsaved" as soon as it is opened.
-- After another workflow is opened, the node inspector shows the previous run's
-  output for the node with the same id.
-- Audit labels: tool calls show as "file read", an agent's start and end as
-  "hook executed", provider checks as "workflow loaded".
-- A Custom-endpoint run still probes local Ollama and warns "Ollama is selected".
-- Shortcut hints use the Mac ⌘ on Windows.
-- The Changes diff uses a light theme.
-- The file search box and the workspace cog do nothing.
-- The page title is still "Tauri + React + Typescript".
+- The top bar fits a 1,024 px window: Save and Run stay visible.
+- A workflow is "unsaved" only after an edit: opening it, selecting and
+  running no longer count.
+- Opening another workflow clears the last run's results from the panels.
+- Audit entries are named by what happened, and the tool, consent and warn
+  chips match them.
+- Local Ollama is probed only when the run uses it or can fall back to it.
+- Shortcut hints say Ctrl on Windows.
+- The code editors use a dark theme.
+- The file search box works, and a Refresh button replaced the dead gear.
+- The page title is "Harness Studio".
 
 Screenshot evidence: `docs/assets/empty-state.png` shows the empty
 onboarding state after hiding the blank minimap when no nodes exist. Playwright's

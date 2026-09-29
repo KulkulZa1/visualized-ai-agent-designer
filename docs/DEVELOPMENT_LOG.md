@@ -4,11 +4,16 @@
 
 - **Goal:** this branch merged master (#9: the shared run engine, `harness-core`, `harness run`, CI). The run-loop fixes its own review had found lived in the old React hook, so they were ported into `src/engine/runWorkflow.ts`, and the review of the port was closed.
   - The merge took master's CI workflow and `kill(2)`: they replaced this branch's own workflow and its `kill -s KILL --` fix.
+- **Second merge** (master's #10, the Windows QA's UI fixes; 5 conflicts, one hunk each):
+  - `runWorkflow.ts`: `onSkipped` is this branch's `skipNode`, which writes #10's `agent_skipped`.
+  - The app hook reports a started run's `error` and keeps #10's file-tree refresh (also after a run that failed as a whole).
+  - Both sides' tests, the `HEADLESS.md` table row and the two log entries were kept.
+  - This branch's audit entries moved onto #10's actions: a drop is a `revision` (so `harness run` still prints it), the notice for a node a gateway routes to that could not run is a `revision` with `warning`, and a run that failed as a whole is the new `run_failed`. It is red in the audit strip and shows under the error chip. With hooks and commands it is the third kind of entry that is also saved to `audit.log.jsonl`.
 - **Hooks:** a Hook node without `requireConsent` is refused, and the run stops, when its script changed during the run.
-  - Two checks: the change log (an agent's file tools, in any attempt), and the script's SHA-256, taken for every Hook node when the run first starts and again just before an unasked hook runs.
+  - Two checks: the change log (an agent's file tools, in any attempt), and the SHA-256 of the script and of the node's `env`, taken for every Hook node when the run first starts and again just before an unasked hook runs.
   - The hashes are saved in the run record (`hookScripts`). A resume keeps them and takes no new ones, so a refused hook is refused again on every resume. A record from before the field gets baselines when it is resumed.
   - `harness run` needs Node 20 or later when such a hook exists (else exit 3). Agents' file tools also refuse `.harness/runs/`.
-- **Revision loops:** a revision follows the gateways' current routes. A node a gateway routes away from is dropped (skipped, its output removed), so `harness run --json` can report a node `done` and later `skipped`. A node the new route makes live but that is off the revision path does not run, and the audit says so.
+- **Revision loops:** a revision follows the gateways' current routes. A node a gateway routes away from is dropped (skipped, its output removed), so `harness run --json` can report a node `done` and later `skipped`. A node the new route makes live but that is off the revision path does not run, and a warning in the audit says so.
 - **Routing:** an explicit verdict wins over a leading `Pass`, `Approved` or `Escalate`, which counts only when it stands alone. Tool calls in js, ts, typescript and json5 fences are read.
 - **MCP and CLI:** the file walks don't follow links, and `.harness.yml` is listed. `get_recent_logs` and `list_artifacts` refuse paths that resolve outside the workspace or the project, and `get_recent_logs` refuses a file that is not a regular file (a FIFO). `harness project status` reads only regular files inside the workspace. CI has `permissions: contents: read`.
 - **Hook check by hand:** a scratch workflow of two Hook nodes through the real `harness-core`, with no model.
@@ -16,11 +21,51 @@
   - `--resume` refused it again (exit 1), although the summary prints a `Resume:` line. A new run took the changed script as its baseline and ran it (exit 0).
   - With `node --no-experimental-global-webcrypto` (Node 22) the run did not start: exit 3, with the Web Crypto message.
 - **Verification** (Linux):
-  - `npx tsc --noEmit`, and `npx vitest run`: 1042 tests / 66 files.
+  - `npx tsc --noEmit`, and `npx vitest run`: 1082 tests / 70 files, with #10 merged.
   - `cargo test`: 116 tests, and 116 + 2 in the core build (`--no-default-features --features core`). The 2 Windows-only tests are not compiled on Linux.
   - `npx vite build`: no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains.
-- **Not verified:** Windows and macOS (this pass is Linux only); the Tauri window, where the hash needs `crypto.subtle` in the WebView (only Node's was exercised); a live `harness run` with a model.
+- **Not verified:** Windows and macOS (this pass is Linux only); the Tauri window, where the hash needs `crypto.subtle` in the WebView (only Node's was exercised); a live `harness run` with a model; the merged UI in a browser (after the second merge only the tests ran).
 - **Known gaps** (`docs/SECURITY.md`): the hook script check does not cover scripts that aren't valid UTF-8, files a script sources or imports, the gap between the check and the hook's start, or an approved `bash` command that writes anywhere in the workspace. A new run takes the scripts as they are as its baseline.
+
+## 2026-09-26 - Fixes for the Windows QA's UI findings
+
+- **Scope:** the nine UI issues the Windows QA below found, all also on master. Branch `claude/ui-fixes`, stacked on `claude/headless-ci`, one commit per fix, each test-first where it can be tested.
+- **Design choices** (agreed before the work):
+  - A compact top bar in a narrow window, rather than an overflow menu or a larger minimum window.
+  - Honest audit types, with working filter chips.
+  - A working file search and a Refresh button.
+  - Dark editors.
+- **Top bar:**
+  - The labels of Create from Goal, Examples, Generate and Permissions hide below 1,440 px (App.css).
+  - The buttons, the stats and "harness-studio" no longer shrink or wrap; the workspace and file names shorten with "…".
+  - The static phase badge left the top bar, and the Ctrl+K palette gained "Run workflow".
+  - Measured in a browser:
+    - With the labels, the bar needs 1,168 px before the names, so the breakpoint moved from the planned 1,280 px to 1,440 px.
+    - At 1,024 px, with a long workspace name, a long file name and "unsaved", Save ends at 940 px and Run at 1,010 px.
+    - At 1,280 px, both names show in full.
+- **The unsaved flag:**
+  - React Flow's measuring and selecting no longer mark a workflow unsaved.
+  - A run's node status and token counts are written with `setNodeRunState`, which does not either. The browser check found this second case once opening a file stopped showing "unsaved".
+- **Stale results:** loading a workflow, or starting a new one, clears a finished run (`clearRun`); a run still going is kept.
+- **Audit:**
+  - New action types: `provider_check`, `provider_fallback`, `agent_started`, `agent_finished`, `agent_failed`, `agent_skipped`, `agent_reused`, `tool_call`, `subagent`, `revision`, `compaction`, `gateway_route`, `memory_write` and `run_record`.
+  - A `warning` flag marks the problems a run goes on after. The chips match on types and that flag.
+  - `harness run` classifies events by action and adds `warning: true` to its JSON events.
+  - Commands and hooks, the only entries saved to `audit.log.jsonl`, keep their names.
+- **Ollama probe:** only when the run uses Ollama, or uses OpenAI or Anthropic (billing fallback). A fallback that is down is a warning worded as such.
+- **Also:**
+  - `modShortcut()` for Ctrl/⌘ hints;
+  - `vs-dark` for both Monaco editors;
+  - `filterFileTree()`, `refreshWorkspaceFiles()`, and a refresh after each run;
+  - the page title.
+- **Re-checked live** in the browser against the real `harness-core` and the free endpoint:
+  - one health check (the Custom endpoint), with no Ollama probe;
+  - the audit read provider check, file read, agent started, tool call ×4, command executed, agent finished;
+  - the tool chip showed the 4 tool calls and the command, and the consent chip showed the command;
+  - the Changes diff was dark;
+  - the file search showed only the matches;
+  - the workflow stayed "Saved" through the run (55.9 s).
+- **Verification:** `npx tsc --noEmit`; `npx vitest run`: 706 tests / 69 files.
 
 ## 2026-09-26 - Visual QA on Windows (the app, with a free model)
 

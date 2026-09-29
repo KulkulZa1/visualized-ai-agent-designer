@@ -7,6 +7,7 @@ import type { AgentNode, WorkflowDef, WorkflowMeta, ExecutionSettings } from "@/
 import type { Edge } from "@xyflow/react";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import { defToGraph } from "@/engine/workflowGraph";
+import { useExecutionStore } from "@/store/executionStore";
 
 type WorkflowEdgeKind = NonNullable<WorkflowDef["connections"][number]["edgeKind"]>;
 type WorkflowEdgeData = { label?: string; edgeKind?: WorkflowEdgeKind };
@@ -29,6 +30,12 @@ function getEdgeKind(edge: Edge): WorkflowEdgeKind {
   const dataKind = getEdgeData(edge).edgeKind;
   if (isWorkflowEdgeKind(dataKind)) return dataKind;
   return isWorkflowEdgeKind(edge.type) ? edge.type : "dataflow";
+}
+
+/** React Flow also reports measuring and selecting nodes and edges, which change
+ *  nothing that is saved: only the other changes make the workflow unsaved. */
+function changesSavedState(changes: Array<NodeChange<AgentNode> | EdgeChange>): boolean {
+  return changes.some((change) => change.type !== "dimensions" && change.type !== "select");
 }
 
 const DEFAULT_META: WorkflowMeta = {
@@ -64,6 +71,8 @@ interface WorkflowStoreActions {
   removeNode: (nodeId: string) => void;
   duplicateNode: (nodeId: string) => void;
   updateNodeData: (nodeId: string, data: Partial<AgentNode["data"]>) => void;
+  /** A run's status and token count for a node: not an edit, so the workflow stays saved. */
+  setNodeRunState: (nodeId: string, status: AgentNode["data"]["status"], tokens?: AgentNode["data"]["tokens"]) => void;
   /** Set model on all nodes, optionally filtered by role. Returns the count changed. */
   bulkSetModel: (model: string, roleFilter?: AgentRole) => number;
   updateEdgeLabel: (edgeId: string, label: string) => void;
@@ -92,13 +101,13 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
       onNodesChange: (changes) =>
         set((state) => {
           state.nodes = applyNodeChanges(changes, state.nodes) as AgentNode[];
-          state.isDirty = true;
+          if (changesSavedState(changes)) state.isDirty = true;
         }),
 
       onEdgesChange: (changes) =>
         set((state) => {
           state.edges = applyEdgeChanges(changes, state.edges);
-          state.isDirty = true;
+          if (changesSavedState(changes)) state.isDirty = true;
         }),
 
       onConnect: (connection) =>
@@ -155,6 +164,14 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           state.isDirty = true;
         }),
 
+      setNodeRunState: (nodeId, status, tokens) =>
+        set((state) => {
+          const node = state.nodes.find((n) => n.id === nodeId);
+          if (!node) return;
+          node.data.status = status;
+          if (tokens) node.data.tokens = tokens;
+        }),
+
       bulkSetModel: (model, roleFilter) => {
         const targets = get().nodes.filter(
           (n) => !roleFilter || n.data.role === roleFilter
@@ -205,6 +222,9 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
         // A loaded workflow starts a fresh history: undoing past the load would put the
         // previous graph under this workflow's name and file path.
         useWorkflowStore.temporal.getState().clear();
+        // Node ids are places in the file, so the last run's results would show on this
+        // workflow's nodes. They stay in .harness/runs.
+        useExecutionStore.getState().clearRun();
       },
 
       markClean: (filePath) =>
@@ -220,6 +240,7 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
           meta: { ...DEFAULT_META, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
         }));
         useWorkflowStore.temporal.getState().clear();
+        useExecutionStore.getState().clearRun();
       },
 
       toWorkflowDef: () => {

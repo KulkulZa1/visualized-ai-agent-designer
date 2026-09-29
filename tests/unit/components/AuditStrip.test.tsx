@@ -90,3 +90,41 @@ describe("AuditStrip agent filters", () => {
     expect(screen.queryByText("frontend event")).not.toBeInTheDocument();
   });
 });
+
+describe("AuditStrip entries", () => {
+  it("names each entry by what happened and marks warnings", () => {
+    useAuditStore.setState({
+      entries: [
+        { id: "1", timestamp: "2026-05-17T00:00:01.000Z", action: "tool_call", agentId: "agent-1",
+          details: 'Tool: read_file({"path":"a.md"})', success: true },
+        { id: "2", timestamp: "2026-05-17T00:00:02.000Z", action: "provider_fallback", agentId: "agent-1",
+          details: "Billing error — fell back to Ollama (qwen2.5-coder:7b)", success: true, warning: true },
+      ],
+      maxEntries: 500,
+    });
+
+    render(<AuditStrip />);
+
+    expect(screen.getByText("tool call")).toBeInTheDocument();
+    expect(screen.getByText("⚠ provider fallback")).toBeInTheDocument();
+  });
+
+  it("names a run that failed as a whole, and the error chip shows it", async () => {
+    useAuditStore.setState({
+      entries: [
+        { id: "1", timestamp: "2026-05-17T00:00:01.000Z", action: "agent_finished", agentId: "agent-1",
+          details: "✓ Project Orchestrator — 120 est. tokens", success: true },
+        { id: "2", timestamp: "2026-05-17T00:00:02.000Z", action: "run_failed", agentId: "system",
+          details: "Run failed: No runnable nodes remain. Workflow may contain a cycle: agent-1, agent-2", success: false },
+      ],
+      maxEntries: 500,
+    });
+
+    render(<AuditStrip />);
+
+    expect(screen.getByText("run failed")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "error" }));
+    expect(screen.getByText(/^Run failed:/)).toBeInTheDocument();
+    expect(screen.queryByText(/est\. tokens/)).not.toBeInTheDocument();
+  });
+});

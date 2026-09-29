@@ -39,6 +39,7 @@ export function NodeIcon({ name, size = 14, stroke = 1.6, color = "currentColor"
     case "undo":   return <svg {...p}><path d="M3 7v6h6"/><path d="M21 17a9 9 0 00-15-6.7L3 13"/></svg>;
     case "redo":   return <svg {...p}><path d="M21 7v6h-6"/><path d="M3 17a9 9 0 0115-6.7L21 13"/></svg>;
     case "history":return <svg {...p}><path d="M3 12a9 9 0 1 0 9-9 9.7 9.7 0 0 0-6.4 2.6L3 8"/><path d="M3 3v5h5M12 7v5l3 3"/></svg>;
+    case "refresh":return <svg {...p}><path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/></svg>;
     case "lock":   return <svg {...p}><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>;
     case "plus":   return <svg {...p}><path d="M12 5v14M5 12h14"/></svg>;
     case "alert":  return <svg {...p}><path d="M10.3 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><path d="M12 9v4M12 17h.01"/></svg>;
