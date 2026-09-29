@@ -11,7 +11,7 @@
  *   fs.append / append_file — append to a file
  *   edit_file               — replace an exact snippet (comes with fs.write)
  *   None of them writes a protected path (a ".git" folder or file at any depth,
- *   ".harness/hooks", the audit log); reads are not restricted.
+ *   ".harness/hooks", ".harness/runs", the audit log); reads are not restricted.
  *
  * Execute tool (requires "bash" in node's allowedTools):
  *   bash / run_command — run a shell command line in the workspace. It runs only
