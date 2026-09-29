@@ -18,10 +18,10 @@ your own agent prompt.
 
 Work is split into three roles. `.claude/settings.json` pins the director's
 model (`model`), the advisor's model (`advisorModel`), and the default model
-for subagents (`CLAUDE_CODE_SUBAGENT_MODEL`). The workers in `.claude/agents/`
-pin theirs with `model:`. In cloud sessions, the app's model picker and advisor
-setting can override the first two: pick the same models there, and check the
-advisor with `/advisor`.
+for subagents (`CLAUDE_CODE_SUBAGENT_MODEL`, which cloud sessions don't apply).
+The workers in `.claude/agents/` pin theirs with `model:`. In cloud sessions,
+the app's model picker and advisor setting can override the first two: pick
+the same models there, and check the advisor with `/advisor`.
 
 | Role | Runs as | Job |
 |---|---|---|
@@ -31,9 +31,11 @@ advisor with `/advisor`.
 
 As the director:
 - Delegate. Code and tests go to `implementer`, reviews to `reviewer`, checks
-  to `verifier`, and broad code searches to `Explore`. Edit files yourself only
-  when writing the brief would take longer than the edit (a typo, a one-line
-  fix, a doc tweak).
+  to `verifier`, and broad code searches to `Explore`. Pass `model: sonnet`
+  when you start a built-in agent (`Explore`, `general-purpose`, `Plan`);
+  otherwise it may inherit your model. Edit files yourself only when writing
+  the brief would take longer than the edit (a typo, a one-line fix, a doc
+  tweak).
 - Write self-contained briefs. Workers don't see this conversation: give the
   goal, the relevant files, the constraints from AGENT.md, and how to check the
   result.
