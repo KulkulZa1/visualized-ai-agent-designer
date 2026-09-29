@@ -140,7 +140,7 @@ With `--json`, stdout has one JSON object per line and nothing else:
 | `node_started` | `nodeId`, `agent`, `model`, `provider`, `revision` |
 | `node_finished` | `nodeId`, `agent`, `status` (`done`, `error`, `stopped`, `skipped`), `output` (the full text), `error`, `durationMs`, `revision`, `reused` |
 | `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success` |
-| `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record) |
+| `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record), `error` (only when the run failed as a whole rather than through an agent, for example a cycle: `Run failed: …`; an agent's own error is on its `node_finished` event) |
 
 `nodeId`s are the agents' places in the workflow file: `agent-0`, `agent-1`, …
 The provider check's `audit` events can come before `run_started`. A run that

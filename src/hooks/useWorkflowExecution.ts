@@ -71,7 +71,9 @@ export function useWorkflowExecution() {
           hash: null,
         },
       }, appHost());
-      if (!outcome.started) reportError(outcome.error);
+      // The run never started (the provider check failed), or it failed as a whole
+      // (a cycle, blocked dependencies). A failed node's error is on the node.
+      if (outcome.error !== undefined) reportError(outcome.error);
     } finally {
       history.resume();
       runInFlight = false;

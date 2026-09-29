@@ -1117,7 +1117,7 @@ describe("useWorkflowExecution", () => {
       expect(executed).not.toHaveBeenCalled();
       expect(finished?.agents.Gate.status).toBe("error");
       expect(finished?.agents.Gate.error).toBe(
-        `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run the workflow again.`);
+        `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab.`);
       expect(useWorkflowStore.getState().nodes.find((n) => n.id === "Gate")?.data.status).toBe("error");
       expect(finished?.status).toBe("error");
       expect(useAuditStore.getState().entries).toContainEqual(expect.objectContaining({

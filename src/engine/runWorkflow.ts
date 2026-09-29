@@ -55,7 +55,7 @@ import {
 } from "@/services/execution/toolExecutor";
 import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
 import { runCommandTool } from "@/services/execution/commandTool";
-import { recordChange } from "@/services/execution/changeLog";
+import { findChange, recordChange } from "@/services/execution/changeLog";
 import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
 import { loadProjectInstructions, usesWorkspace } from "@/services/execution/projectInstructions";
 import {
@@ -141,10 +141,12 @@ export interface RunHost {
   saveRun?: (record: RunRecord) => Promise<void>;
 }
 
-/** A run that never started (the provider preflight failed), or the finished run. */
+/** A run that never started (the provider preflight failed), or the finished run.
+ *  `error` on a finished run: it failed as a whole ("Run failed: …", a cycle or
+ *  blocked dependencies). A node's own failure is on the node, not here. */
 export type RunOutcome =
   | { started: false; error: string }
-  | { started: true; run: WorkflowRun };
+  | { started: true; run: WorkflowRun; error?: string };
 
 // ── Edge helpers ──────────────────────────────────────────────────────────────
 
@@ -480,6 +482,33 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   };
   await save();
 
+  // ── Hook scripts, as the run starts ───────────────────────────────────────
+  // A Hook node without requireConsent runs its script unasked, so it must run the
+  // script that was set up. An agent's file tools leave a change log, but a shell
+  // command it ran (bash), a link or another spelling of the path change the file
+  // without one. So each such script is read now and again just before its hook
+  // runs, and any difference refuses the hook (hookScriptChanged).
+  // null: the script cannot be read. A failed read never fails the run.
+  const readScript = async (ws: string, path: string): Promise<string | null> => {
+    try {
+      return await readWorkspaceFile(ws, path);
+    } catch {
+      return null;
+    }
+  };
+  const hookScriptsAtStart = new Map<string, string | null>();
+  if (workspacePath) {
+    await Promise.all(nodes.map(async (n) => {
+      const path = n.data.role === AgentRole.Hook && !n.data.preHook?.requireConsent ? n.data.preHook?.path : undefined;
+      if (path) hookScriptsAtStart.set(n.id, await readScript(workspacePath, path));
+    }));
+  }
+  // A script that was not there (null) and is now, or was and no longer is, counts as changed.
+  const hookScriptChanged = async (nodeId: string, ws: string, path: string): Promise<boolean> => {
+    const now = await readScript(ws, path);
+    return (hookScriptsAtStart.get(nodeId) ?? null) !== now;
+  };
+
   // ── Per-node async processor (called by parallel scheduler) ──────────────
   async function processNode(nodeId: string): Promise<void> {
     if (isRunCancelled()) return;
@@ -525,8 +554,11 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       const failHook = (message: string) => {
         hookFailed = true;
         updateAgent(nodeId, { status: "error", error: message, finishedAt: Date.now() });
-        addEntry({ id: `${nodeId}-hook-blocked-${Date.now()}`, timestamp: new Date().toISOString(),
-          action: "hook_executed", agentId: nodeId, details: message, success: false });
+        const entry = { id: `${nodeId}-hook-blocked-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "hook_executed" as const, agentId: nodeId, details: message, success: false };
+        addEntry(entry);
+        // A refusal is part of the workspace's audit log, as a hook that ran is.
+        if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
       };
       if (data.preHook?.path) {
         if (!workspacePath) {
@@ -535,6 +567,21 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           failHook("Open a workspace to run hooks.");
         } else if (data.preHook.requireConsent) {
           failHook("Hook requires explicit manual consent. Open the Hooks tab and run it there.");
+        } else if (findChange(run.changes ?? [], data.preHook.path, workspacePath)) {
+          // Without consent a hook runs as the script that was set up. One an agent wrote
+          // earlier in this run (the change log, matched by path; a resumed run's log
+          // includes its earlier attempts) is not that script.
+          failHook(`Hook script ${data.preHook.path} was changed by an agent during this run; ` +
+            "review it, then run it from the Hooks tab.");
+        } else if (await hookScriptChanged(nodeId, workspacePath, data.preHook.path)) {
+          // What the change log cannot see: another spelling of the path, a link, a shell command.
+          failHook(`Hook script ${data.preHook.path} was changed during this run; ` +
+            "review it, then run it from the Hooks tab.");
+        } else if (isRunCancelled()) {
+          // Stopped while the script was being read: the hook has not started.
+          updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+          updateNodeData(nodeId, { status: "stopped" });
+          return;
         } else {
           try {
             // Rust enforces the hook's timeout; this race only stops waiting on Stop.
@@ -618,6 +665,17 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       action: "hook_executed", agentId: nodeId,
       details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
     });
+
+    // Streamed text reaches the node through a throttled flush. It ends with the node's
+    // model calls, whether they finish, fail or are stopped: a call that Stop or a timeout
+    // gave up on may keep streaming, and must not touch the node afterwards.
+    let liveTimer: ReturnType<typeof setTimeout> | undefined;
+    let liveEnded = false;
+    const endLiveText = () => {
+      liveEnded = true;
+      clearTimeout(liveTimer);
+      liveTimer = undefined;
+    };
 
     try {
       const promptContent = await resolvePromptContent(data.promptSource, workspacePath, readWorkspaceFile);
@@ -712,12 +770,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       // The node's own native turns stream into its output (throttled); helpers don't.
       let liveText = "";
       let streamed = false;
-      let liveTimer: ReturnType<typeof setTimeout> | undefined;
       const showLiveText = (piece: string) => {
+        if (liveEnded) return;
         liveText += piece;
         streamed = true;
         if (!liveTimer) {
-          liveTimer = setTimeout(() => { liveTimer = undefined; updateAgent(nodeId, { output: liveText }); }, 50);
+          liveTimer = setTimeout(() => {
+            liveTimer = undefined;
+            if (!liveEnded) updateAgent(nodeId, { output: liveText });
+          }, 50);
         }
       };
       const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
@@ -817,7 +878,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           }),
         } : undefined,
       });
-      clearTimeout(liveTimer);
+      endLiveText();
       if (loop.nativeRefused) {
         noNativeTools.add(nativeKey);
         addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -870,6 +931,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       host.snapshot?.({ runId, nodeId, status: "completed", output: finalText });
 
     } catch (e) {
+      endLiveText();
       if (isRunCancelled()) {
         // Stopped while this node was working: not a failure of the node.
         updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
@@ -940,12 +1002,20 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
   // ── Parallel execution (replaces sequential for-loop) ────────────────────
   const maxParallel = executionSettings.maxParallel || 4;
+  // What failed nodes threw: each is already on its node and in the audit log. What
+  // else stops the run (a cycle, blocked dependencies) has no other message.
+  const nodeFailures = new Set<unknown>();
+  const runTracked = (nodeId: string) => runNode(nodeId).catch((e: unknown) => {
+    nodeFailures.add(e);
+    throw e;
+  });
   let failed = false;
+  let runError: string | undefined;
   try {
     await runParallel(
       nodes,
       edges,
-      runNode,
+      runTracked,
       {
         maxParallel,
         isCancelled: isRunCancelled,
@@ -959,8 +1029,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         gatewayRoutes,
       },
     );
-  } catch {
+  } catch (e) {
     failed = true;
+    if (!nodeFailures.has(e)) {
+      runError = `Run failed: ${e instanceof Error ? e.message : String(e)}`;
+      const entry = { id: `run-error-${Date.now()}`, timestamp: new Date().toISOString(),
+        action: "workflow_loaded" as const, agentId: "system", details: runError, success: false };
+      addEntry(entry);
+      if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
+    }
   }
 
   // With continueOnError the scheduler completes despite failed agents; the run
@@ -971,5 +1048,5 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   run.finishedAt = Date.now();
   await save();
   host.events.onRunFinished(status);
-  return { started: true, run };
+  return runError === undefined ? { started: true, run } : { started: true, run, error: runError };
 }
