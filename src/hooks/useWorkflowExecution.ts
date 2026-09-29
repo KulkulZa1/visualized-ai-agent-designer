@@ -70,6 +70,7 @@ import {
 } from "@/services/execution/routing";
 import { resolvePromptContent } from "@/services/execution/promptSource";
 import { entryAgentIds } from "@/services/execution/entryNodes";
+import { findChange } from "@/services/execution/changeLog";
 
 // ── Edge helpers ──────────────────────────────────────────────────────────────
 
@@ -310,6 +311,9 @@ export function useWorkflowExecution() {
     const noStreaming   = new Set<string>();         // "provider:model" that could not stream
     // Feedback-edge target → the review it is being re-run for.
     const revisionRequests = new Map<string, { from: string; text: string; reviewed: string; round: number }>();
+    // Nodes the scheduler skipped (a gateway pruned their branch). They never ran, so a
+    // review cannot send them back for revision.
+    const skippedNodes = new Set<string>();
 
     const entryIds = entryAgentIds(nodes, edges);
     const isEntryNode = (id: string) => entryIds.has(id);
@@ -334,6 +338,9 @@ export function useWorkflowExecution() {
       const run = useExecutionStore.getState().currentRun;
       return !run || run.id !== runId || run.status === "cancelled";
     };
+    // True until a newer run replaces this one (a stopped run keeps its id). A helper,
+    // stream or file write can outlive its run: it must never write into a newer one.
+    const isCurrentRun = () => useExecutionStore.getState().currentRun?.id === runId;
     for (const n of nodes) updateNodeData(n.id, { status: "idle" });
 
     // ── Per-node async processor (called by parallel scheduler) ──────────────
@@ -391,6 +398,12 @@ export function useWorkflowExecution() {
             failHook("Open a workspace to run hooks.");
           } else if (data.preHook.requireConsent) {
             failHook("Hook requires explicit manual consent. Open the Hooks tab and run it there.");
+          } else if (findChange(
+            useExecutionStore.getState().currentRun?.changes ?? [], data.preHook.path, workspacePath)) {
+            // Without consent a hook runs as the script that was set up. One an agent wrote
+            // earlier in this run (its change log, matched by path) is not that script.
+            failHook(`Hook script ${data.preHook.path} was changed by an agent during this run; ` +
+              "review it, then run the workflow again.");
           } else {
             try {
               // Rust enforces the hook's timeout; this race only stops waiting on Stop.
@@ -472,6 +485,13 @@ export function useWorkflowExecution() {
         action: "hook_executed", agentId: nodeId,
         details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
       });
+
+      // Streamed text reaches the node through a throttled flush. It ends with the node's
+      // model calls, whether they finish, fail or are stopped: a call that Stop or a
+      // timeout gave up on may keep streaming, and must not touch the node afterwards.
+      let liveTimer: ReturnType<typeof setTimeout> | undefined;
+      let liveEnded = false;
+      const endLiveText = () => { liveEnded = true; clearTimeout(liveTimer); };
 
       try {
         const promptContent = await resolvePromptContent(data.promptSource, workspacePath, readWorkspaceFile);
@@ -564,14 +584,18 @@ export function useWorkflowExecution() {
         };
 
         // The node's own native turns stream into its output (throttled); helpers don't.
+        // Never into a newer run: a stopped run's call may still be streaming.
         let liveText = "";
         let streamed = false;
-        let liveTimer: ReturnType<typeof setTimeout> | undefined;
         const showLiveText = (piece: string) => {
+          if (liveEnded || !isCurrentRun()) return;
           liveText += piece;
           streamed = true;
           if (!liveTimer) {
-            liveTimer = setTimeout(() => { liveTimer = undefined; updateAgent(nodeId, { output: liveText }); }, 50);
+            liveTimer = setTimeout(() => {
+              liveTimer = undefined;
+              if (isCurrentRun()) updateAgent(nodeId, { output: liveText }); // replaced while it waited
+            }, 50);
           }
         };
         const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
@@ -592,7 +616,7 @@ export function useWorkflowExecution() {
         // Every file an agent writes goes into the run's change log (Changes dialog,
         // revert). A helper can finish after its run ended: never write into a newer run.
         const recordChangeBy = (agent: string) => (path: string, before: string | null, after: string) => {
-          if (useExecutionStore.getState().currentRun?.id !== runId) return;
+          if (!isCurrentRun()) return;
           useExecutionStore.getState().recordFileChange(path, before, after, agent);
         };
 
@@ -636,7 +660,7 @@ export function useWorkflowExecution() {
           // The activity panel shows the helpers from the node's run record. A helper
           // can finish after its run ended (Stop): never write it into a newer run.
           onUpdate: (record) => {
-            if (useExecutionStore.getState().currentRun?.id !== runId) return;
+            if (!isCurrentRun()) return;
             const i = helpers.findIndex((h) => h.id === record.id);
             if (i >= 0) helpers[i] = record;
             else helpers.push(record);
@@ -674,7 +698,7 @@ export function useWorkflowExecution() {
             }),
           } : undefined,
         });
-        clearTimeout(liveTimer);
+        endLiveText();
         if (loop.nativeRefused) {
           noNativeTools.add(nativeKey);
           addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -746,6 +770,7 @@ export function useWorkflowExecution() {
         ).catch(console.error);
 
       } catch (e) {
+        endLiveText();
         if (isRunCancelled()) {
           // Stopped while this node was working: not a failure of the node.
           updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
@@ -779,7 +804,8 @@ export function useWorkflowExecution() {
       for (let round = 1; ; round++) {
         if (isRunCancelled()) return;
         const review = agentOutputs.get(nodeId) ?? "";
-        const targets = [...new Set(firedFeedbackEdges(nodeId, review, edges).map((e) => e.target))];
+        const targets = [...new Set(firedFeedbackEdges(nodeId, review, edges).map((e) => e.target))]
+          .filter((t) => !skippedNodes.has(t));
         if (targets.length === 0) return;
         if (round > MAX_REVISION_ROUNDS) {
           addEntry({ id: `${nodeId}-revision-limit-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -799,6 +825,7 @@ export function useWorkflowExecution() {
         }
         for (const id of revisionPath(targets, nodeId, edges)) {
           if (isRunCancelled()) return;
+          if (skippedNodes.has(id)) continue; // on the path, but its branch was pruned
           updateAgent(id, { revision: round });
           await processNode(id);
         }
@@ -811,15 +838,23 @@ export function useWorkflowExecution() {
 
     // ── Parallel execution (replaces sequential for-loop) ────────────────────
     const maxParallel = executionSettings.maxParallel || 4;
+    // What failed nodes threw: each is already on its node and in the audit log. What
+    // else stops the run (a cycle, blocked dependencies) has no other message.
+    const nodeFailures = new Set<unknown>();
+    const runTracked = (nodeId: string) => runNode(nodeId).catch((e: unknown) => {
+      nodeFailures.add(e);
+      throw e;
+    });
     try {
       await runParallel(
         nodes,
         edges,
-        runNode,
+        runTracked,
         {
           maxParallel,
           isCancelled: isRunCancelled,
           onSkipped: (nodeId) => {
+            skippedNodes.add(nodeId);
             const n = nodes.find((x) => x.id === nodeId);
             updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
             updateNodeData(nodeId, { status: "idle" });
@@ -829,7 +864,15 @@ export function useWorkflowExecution() {
           gatewayRoutes,
         },
       );
-    } catch {
+    } catch (e) {
+      if (!nodeFailures.has(e)) {
+        const message = `Run failed: ${e instanceof Error ? e.message : String(e)}`;
+        reportError(message);
+        const entry = { id: `run-error-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "workflow_loaded" as const, agentId: "system", details: message, success: false };
+        addEntry(entry);
+        if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
+      }
       finishRun("error");
       return;
     } finally {

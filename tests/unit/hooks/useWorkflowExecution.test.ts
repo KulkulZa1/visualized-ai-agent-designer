@@ -9,10 +9,14 @@ import { useAuditStore } from "@/store/auditStore";
 import { useCommandConsentStore, type CommandRequest } from "@/store/commandConsentStore";
 import { MAX_REVISION_ROUNDS } from "@/services/execution/routing";
 import { AgentRole, ToolPermission } from "@/types/agent";
+import type { AuditEntry } from "@/types/audit";
 import type { AgentNode } from "@/types/workflow";
 
 const { createSnapshot } = vi.hoisted(() => ({ createSnapshot: vi.fn(async () => ({})) }));
 vi.mock("@/services/context-builder/snapshotService", () => ({ createSnapshot }));
+
+// What the run wrote to the persisted audit log (.harness/audit.log.jsonl).
+let auditWrites: Array<{ workspacePath: string; entry: AuditEntry }> = [];
 
 function makeNode(id: string): AgentNode {
   return {
@@ -49,6 +53,7 @@ beforeEach(() => {
   createSnapshot.mockClear();
   useWorkflowStore.setState({ nodes: [makeNode("A"), makeNode("B")], edges: [] });
   useWorkspaceStore.setState({ workspacePath: "/ws" });
+  useAuditStore.getState().clearEntries();
   useExecutionStore.setState({
     currentRun: null, isRunning: false, continueOnError: true,
     llmProvider: "ollama", ollamaBaseUrl: "http://localhost:11434", ollamaModel: "qwen2.5-coder:7b",
@@ -70,6 +75,10 @@ beforeEach(() => {
   }));
   // No workspace files (AGENTS.md included) unless a test registers its own reader.
   mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
+  auditWrites = [];
+  mockInvokeHandler("write_audit_entry", (args) => {
+    auditWrites.push(args as (typeof auditWrites)[number]);
+  });
 });
 
 describe("useWorkflowExecution", () => {
@@ -84,6 +93,77 @@ describe("useWorkflowExecution", () => {
     expect(finished?.agents.A.status).toBe("done");
     expect(finished?.agents.B.status).toBe("error");
     expect(finished?.status).toBe("error");
+  });
+
+  describe("a run that fails as a whole", () => {
+    it("tells the user and the audit log about a cycle instead of just ending in error", async () => {
+      useWorkflowStore.setState({
+        nodes: [makeNode("A"), makeNode("B")],
+        edges: [{ id: "a-b", source: "A", target: "B" }, { id: "b-a", source: "B", target: "A" }],
+      });
+      let providerCalls = 0;
+      mockInvokeHandler("call_ollama_api", () => { providerCalls++; return "ok"; });
+      const onError = vi.fn();
+
+      const finished = await run(onError);
+
+      expect(finished?.status).toBe("error");
+      expect(providerCalls).toBe(0);
+      expect(onError).toHaveBeenCalledTimes(1);
+      const message: string = onError.mock.calls[0][0];
+      expect(message).toMatch(/^Run failed: .*cycle.*\bA\b.*\bB\b/i);
+      const entry = useAuditStore.getState().entries.find((e) => e.details === message);
+      expect(entry).toMatchObject({ action: "workflow_loaded", agentId: "system", success: false });
+      expect(auditWrites).toEqual([{ workspacePath: "/ws", entry }]); // and .harness/audit.log.jsonl
+    });
+
+    it("names the nodes that could not run once their dependencies are blocked", async () => {
+      // Start runs; X and Y wait for each other.
+      useWorkflowStore.setState({
+        nodes: [makeNode("Start"), makeNode("X"), makeNode("Y")],
+        edges: [
+          { id: "s-x", source: "Start", target: "X" },
+          { id: "x-y", source: "X", target: "Y" }, { id: "y-x", source: "Y", target: "X" },
+        ],
+      });
+      const onError = vi.fn();
+
+      const finished = await run(onError);
+
+      expect(finished?.agents.Start.status).toBe("done");
+      expect(finished?.status).toBe("error");
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/^Run failed: .*\bX\b.*\bY\b/));
+      expect(auditWrites).toHaveLength(1);
+    });
+
+    it("reports the failure without a workspace too, with no audit file to write", async () => {
+      useWorkspaceStore.setState({ workspacePath: null });
+      useWorkflowStore.setState({
+        nodes: [makeNode("A"), makeNode("B")],
+        edges: [{ id: "a-b", source: "A", target: "B" }, { id: "b-a", source: "B", target: "A" }],
+      });
+      const onError = vi.fn();
+
+      await run(onError);
+
+      expect(onError).toHaveBeenCalledWith(expect.stringMatching(/^Run failed: /));
+      expect(useAuditStore.getState().entries.some((e) => e.success === false && /^Run failed: /.test(e.details ?? ""))).toBe(true);
+      expect(auditWrites).toEqual([]);
+    });
+
+    it("leaves a failed node's error on the node instead of reporting it a second time", async () => {
+      useExecutionStore.setState({ continueOnError: false });
+      useWorkflowStore.setState({ nodes: [makeNode("A")], edges: [] });
+      mockInvokeHandler("call_ollama_api", () => Promise.reject(new Error("model crashed")));
+      const onError = vi.fn();
+
+      const finished = await run(onError);
+
+      expect(finished?.status).toBe("error");
+      expect(finished?.agents.A.error).toMatch(/model crashed/);
+      expect(onError).not.toHaveBeenCalled();
+      expect(useAuditStore.getState().entries.some((e) => /^Run failed/.test(e.details ?? ""))).toBe(false);
+    });
   });
 
   it("runs a tool-using node with native tool calls, offering and naming only runnable tools", async () => {
@@ -385,6 +465,93 @@ describe("useWorkflowExecution", () => {
       expect(count).toEqual({ A: 1, B: 2, R: 2 });
     });
 
+    it("does not send a revision to a branch the gateway pruned", async () => {
+      const gate = makeNode("Gate");
+      gate.data.role = AgentRole.Gateway;
+      useWorkflowStore.setState({
+        nodes: [gate, makeNode("Code"), makeNode("Docs"), makeNode("R")],
+        edges: [
+          { id: "g-c", source: "Gate", target: "Code", data: { label: "code" } },
+          { id: "g-d", source: "Gate", target: "Docs", data: { label: "docs" } },
+          { id: "c-r", source: "Code", target: "R" }, { id: "d-r", source: "Docs", target: "R" },
+          feedback("R", "Code", "revise"), feedback("R", "Docs", "revise"),
+        ],
+      });
+      const count: Record<string, number> = { Gate: 0, Code: 0, Docs: 0, R: 0 };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        count[name]++;
+        if (name === "Gate") return '{"route":"code"}'; // prunes Docs
+        if (name === "R") return count.R === 1 ? "REVISE" : "PASS";
+        return "ok";
+      });
+
+      const finished = await run();
+
+      expect(count).toEqual({ Gate: 1, Code: 2, Docs: 0, R: 2 });
+      expect(finished?.agents.Docs.status).toBe("skipped");
+      expect(finished?.agents.Code.revision).toBe(1);
+      expect(finished?.status).toBe("done");
+      const revisions = useAuditStore.getState().entries.filter((e) => /asked for revision/.test(e.details ?? ""));
+      expect(revisions.map((e) => e.details)).toEqual(["↺ R asked for revision 1/2: re-running Code"]);
+    });
+
+    it("does not re-run a pruned node that lies on the revision path", async () => {
+      // Draft → Gate → (Fast | Slow) → Review, and Review sends Draft back.
+      const gate = makeNode("Gate");
+      gate.data.role = AgentRole.Gateway;
+      useWorkflowStore.setState({
+        nodes: [makeNode("Draft"), gate, makeNode("Fast"), makeNode("Slow"), makeNode("Review")],
+        edges: [
+          { id: "d-g", source: "Draft", target: "Gate" },
+          { id: "g-f", source: "Gate", target: "Fast", data: { label: "fast" } },
+          { id: "g-s", source: "Gate", target: "Slow", data: { label: "slow" } },
+          { id: "f-r", source: "Fast", target: "Review" }, { id: "s-r", source: "Slow", target: "Review" },
+          feedback("Review", "Draft", "revise"),
+        ],
+      });
+      const count: Record<string, number> = { Draft: 0, Gate: 0, Fast: 0, Slow: 0, Review: 0 };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        count[name]++;
+        if (name === "Gate") return '{"route":"fast"}'; // prunes Slow
+        if (name === "Review") return count.Review === 1 ? "REVISE" : "PASS";
+        return "ok";
+      });
+
+      const finished = await run();
+
+      expect(count).toEqual({ Draft: 2, Gate: 2, Fast: 2, Slow: 0, Review: 2 });
+      expect(finished?.agents.Slow.status).toBe("skipped");
+      expect(finished?.status).toBe("done");
+    });
+
+    it("does nothing when every node a review would send back was pruned", async () => {
+      const gate = makeNode("Gate");
+      gate.data.role = AgentRole.Gateway;
+      useWorkflowStore.setState({
+        nodes: [gate, makeNode("Code"), makeNode("Docs"), makeNode("R")],
+        edges: [
+          { id: "g-c", source: "Gate", target: "Code", data: { label: "code" } },
+          { id: "g-d", source: "Gate", target: "Docs", data: { label: "docs" } },
+          { id: "c-r", source: "Code", target: "R" }, { id: "d-r", source: "Docs", target: "R" },
+          feedback("R", "Docs", "revise"),
+        ],
+      });
+      const count: Record<string, number> = { Gate: 0, Code: 0, Docs: 0, R: 0 };
+      mockInvokeHandler("call_ollama_api", (args) => {
+        const name = who(args);
+        count[name]++;
+        return name === "Gate" ? '{"route":"code"}' : name === "R" ? "REVISE" : "ok";
+      });
+
+      const finished = await run();
+
+      expect(count).toEqual({ Gate: 1, Code: 1, Docs: 0, R: 1 });
+      expect(finished?.status).toBe("done");
+      expect(useAuditStore.getState().entries.some((e) => /revision/.test(e.details ?? ""))).toBe(false);
+    });
+
     it("ends the loop when the run is stopped during a revision round", async () => {
       useWorkflowStore.setState({
         nodes: [makeNode("W"), makeNode("R")],
@@ -499,6 +666,93 @@ describe("useWorkflowExecution", () => {
 
     expect(finished?.agents.A).toMatchObject({ status: "done", output: "done" });
     expect(streamed).toEqual([true, false, false]);
+  });
+
+  describe("streamed text that arrives after the node's model call ended", () => {
+    type Stream = { onmessage: (delta: { text: string }) => void };
+    // Waits past the 50 ms flush that follows a delta.
+    const pastFlush = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 120)); });
+
+    /** Node A streams a native turn that never ends. `during` acts while it streams; then the run is awaited. */
+    async function streamingUntil(during: (stream: Stream) => void | Promise<void>): Promise<Stream> {
+      const node = makeNode("A");
+      node.data.tools = [ToolPermission.ReadFile];
+      useWorkflowStore.setState({ nodes: [node], edges: [] });
+      let stream: Stream | undefined;
+      mockInvokeHandler("chat_turn", (args) => {
+        stream = (args as { onDelta: Stream }).onDelta;
+        return new Promise(() => {}); // the model is still talking
+      });
+      const { result } = renderHook(() => useWorkflowExecution());
+      await act(async () => {
+        const first = result.current.executeWorkflow(undefined, vi.fn());
+        while (!stream) await new Promise((resolve) => setTimeout(resolve, 10));
+        await during(stream);
+        await first;
+      });
+      return stream!;
+    }
+    const stopWhileStreaming = () => streamingUntil(() => useExecutionStore.getState().cancelRun());
+
+    it("does not change the next run's node: a late delta from the stopped run is ignored", async () => {
+      const stream = await stopWhileStreaming();
+      act(() => {
+        useExecutionStore.getState().startRun("next run");
+        useExecutionStore.getState().updateAgent("A", { output: "run two" });
+        stream.onmessage({ text: "stale" });
+      });
+      await pastFlush();
+
+      expect(useExecutionStore.getState().currentRun?.agents.A.output).toBe("run two");
+    });
+
+    it("ignores a delta once a newer run has replaced the run it belongs to", async () => {
+      await streamingUntil(async (stream) => {
+        useExecutionStore.getState().startRun("next run"); // the node is still waiting on its call
+        useExecutionStore.getState().updateAgent("A", { output: "run two" });
+        stream.onmessage({ text: "stale" });
+        await new Promise((resolve) => setTimeout(resolve, 120)); // past the flush
+      });
+
+      expect(useExecutionStore.getState().currentRun?.agents.A.output).toBe("run two");
+    });
+
+    it("drops a flush that was already waiting when a newer run replaced the run", async () => {
+      await streamingUntil(async (stream) => {
+        stream.onmessage({ text: "queued" }); // taken: this run is still the current one; the flush is due in 50 ms
+        useExecutionStore.getState().startRun("next run"); // the node is still waiting on its call
+        useExecutionStore.getState().updateAgent("A", { output: "run two" });
+        await new Promise((resolve) => setTimeout(resolve, 120)); // past the flush
+      });
+
+      expect(useExecutionStore.getState().currentRun?.agents.A.output).toBe("run two");
+    });
+
+    it("does not change the stopped node either", async () => {
+      const stream = await stopWhileStreaming();
+      expect(useExecutionStore.getState().currentRun?.agents.A.status).toBe("stopped");
+
+      act(() => stream.onmessage({ text: "late" }));
+      await pastFlush();
+
+      expect(useExecutionStore.getState().currentRun?.agents.A.output).toBeUndefined();
+    });
+
+    it("shows no streamed text on a node whose model call failed", async () => {
+      const node = makeNode("A");
+      node.data.tools = [ToolPermission.ReadFile];
+      useWorkflowStore.setState({ nodes: [node], edges: [] });
+      mockInvokeHandler("chat_turn", (args) => {
+        (args as { onDelta: Stream }).onDelta.onmessage({ text: "partial" }); // the flush is pending
+        throw new Error("model crashed");
+      });
+
+      const finished = await run();
+      await pastFlush();
+
+      expect(finished?.agents.A.status).toBe("error");
+      expect(useExecutionStore.getState().currentRun?.agents.A.output).toBeUndefined();
+    });
   });
 
   it("records the files an agent edits in the run's change log", async () => {
@@ -780,6 +1034,89 @@ describe("useWorkflowExecution", () => {
     expect(finished?.agents.Gate.status).toBe("error");
     expect(providerCalls).toBe(0);
     expect(finished?.status).toBe("error");
+  });
+
+  describe("a hook whose script an agent wrote earlier in the run", () => {
+    const SCRIPT = "scripts/gate.sh";
+
+    /** Writer writes `written` with fs.write; then Gate, a hook that runs without asking, runs `hookPath`. */
+    function writerThenHook(written: string, hookPath = SCRIPT) {
+      const writer = makeNode("Writer");
+      writer.data.tools = [ToolPermission.WriteFile];
+      writer.data.maxSteps = 2;
+      const gate = makeNode("Gate");
+      gate.data.role = AgentRole.Hook;
+      gate.data.preHook = { path: hookPath, requireConsent: false };
+      useWorkflowStore.setState({ nodes: [writer, gate], edges: [{ id: "w-g", source: "Writer", target: "Gate" }] });
+      mockInvokeHandler("write_workspace_file", () => undefined);
+      let calls = 0;
+      mockInvokeHandler("call_ollama_api", () => (++calls === 1
+        ? `<tool_call>${JSON.stringify({ name: "fs.write", args: { path: written, content: "echo hi\n" } })}</tool_call>`
+        : "done"));
+      const executed = vi.fn(() => ({ exitCode: 0, stdout: "ran", stderr: "", durationMs: 1 }));
+      mockInvokeHandler("execute_hook", executed);
+      return executed;
+    }
+
+    it("is not run: the node fails like a hook that needs consent, and the run stops", async () => {
+      const executed = writerThenHook(SCRIPT);
+
+      const finished = await run();
+
+      expect(finished?.changes?.map((c) => c.path)).toEqual([SCRIPT]); // the write was recorded
+      expect(executed).not.toHaveBeenCalled();
+      expect(finished?.agents.Gate.status).toBe("error");
+      expect(finished?.agents.Gate.error).toBe(
+        `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run the workflow again.`);
+      expect(useWorkflowStore.getState().nodes.find((n) => n.id === "Gate")?.data.status).toBe("error");
+      expect(finished?.status).toBe("error");
+      expect(useAuditStore.getState().entries).toContainEqual(expect.objectContaining({
+        action: "hook_executed", agentId: "Gate", success: false,
+        details: expect.stringContaining("was changed by an agent during this run"),
+      }));
+    });
+
+    it("still runs when the agent wrote some other file", async () => {
+      const executed = writerThenHook("notes/plan.md");
+
+      const finished = await run();
+
+      expect(executed).toHaveBeenCalledTimes(1);
+      expect(executed).toHaveBeenCalledWith(expect.objectContaining({ hookPath: SCRIPT, consentGranted: true }));
+      expect(finished?.agents.Gate.status).toBe("done");
+      expect(finished?.status).toBe("done");
+    });
+
+    it("runs when no agent wrote anything", async () => {
+      const gate = makeNode("Gate");
+      gate.data.role = AgentRole.Hook;
+      gate.data.preHook = { path: SCRIPT, requireConsent: false };
+      useWorkflowStore.setState({ nodes: [gate], edges: [] });
+      const executed = vi.fn(() => ({ exitCode: 0, stdout: "ran", stderr: "", durationMs: 1 }));
+      mockInvokeHandler("execute_hook", executed);
+
+      const finished = await run();
+
+      expect(executed).toHaveBeenCalledTimes(1);
+      expect(finished?.agents.Gate.status).toBe("done");
+    });
+
+    it.each([
+      ["an absolute path, for a hook set up with a relative one", "/ws", "/ws/scripts/gate.sh", "scripts/gate.sh"],
+      ["a relative path, for a hook set up with an absolute one", "/ws", "scripts/gate.sh", "/ws/scripts/gate.sh"],
+      ["Windows separators and other case", "C:\\Users\\Me\\Proj", "Scripts\\Gate.SH", "scripts/gate.sh"],
+      ["an absolute Windows path with / separators", "C:\\Users\\Me\\Proj", "c:/users/me/proj/scripts/gate.sh", "scripts\\gate.sh"],
+      ["dot segments", "/ws", "./scripts/../scripts//gate.sh", "scripts/gate.sh"],
+      ["a path that leaves the workspace and comes back", "/ws", "../ws/scripts/gate.sh", "scripts/gate.sh"],
+    ])("is not run when the agent wrote it as %s", async (_spelling, workspace, written, hookPath) => {
+      useWorkspaceStore.setState({ workspacePath: workspace });
+      const executed = writerThenHook(written, hookPath);
+
+      const finished = await run();
+
+      expect(executed).not.toHaveBeenCalled();
+      expect(finished?.agents.Gate.error).toContain("was changed by an agent during this run");
+    });
   });
 
   it("refuses to run hooks when no workspace is open instead of using the workflow's projectRoot", async () => {
