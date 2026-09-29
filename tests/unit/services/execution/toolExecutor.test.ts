@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   executeTool,
-  parseToolCall,
   readToolCall,
   stripToolCall,
   buildToolInstructions,
@@ -21,29 +20,17 @@ function mockInvoke(responses: Record<string, unknown>): InvokeFn {
   }) as unknown as InvokeFn;
 }
 
-// ── parseToolCall ─────────────────────────────────────────────────────────────
+// ── readToolCall ──────────────────────────────────────────────────────────────
 
 const FENCE = "`".repeat(3);
 
-describe("parseToolCall", () => {
-  it("parses a valid tool call", () => {
-    const text = `<tool_call>{"name":"read_file","args":{"path":"src/main.ts"}}</tool_call>`;
-    expect(parseToolCall(text)).toEqual({ name: "read_file", args: { path: "src/main.ts" } });
+describe("readToolCall", () => {
+  it("reads a valid call", () => {
+    expect(readToolCall(`<tool_call>{"name":"grep","args":{"path":"a","pattern":"b"}}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "grep", args: { path: "a", pattern: "b" } } });
   });
 
-  it("returns null when no tag present", () => {
-    expect(parseToolCall("just some text")).toBeNull();
-  });
-
-  it("returns null for invalid JSON", () => {
-    expect(parseToolCall("<tool_call>not-json</tool_call>")).toBeNull();
-  });
-
-  it("returns null when name is missing", () => {
-    expect(parseToolCall(`<tool_call>{"args":{}}</tool_call>`)).toBeNull();
-  });
-
-  it("parses JSON wrapped in a ```, ```json, ```jsonc or ```javascript fence inside the tags", () => {
+  it("reads JSON wrapped in a ```, ```json, ```jsonc or ```javascript fence inside the tags", () => {
     const call = { name: "read_file", args: { path: "src/main.ts" } };
     const json = JSON.stringify(call);
     const bodies = [
@@ -56,14 +43,35 @@ describe("parseToolCall", () => {
       `${FENCE}JavaScript\r\n${json}\r\n${FENCE}`,
     ];
     for (const body of bodies) {
-      expect(parseToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual(call);
+      expect(readToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual({ kind: "call", call });
+    }
+  });
+
+  it("reads JSON wrapped in a ```js, ```ts, ```typescript or ```json5 fence inside the tags", () => {
+    const call = { name: "read_file", args: { path: "src/main.ts" } };
+    const json = JSON.stringify(call);
+    const bodies = [
+      `${FENCE}js\n${json}\n${FENCE}`,
+      `${FENCE}ts\n${json}\n${FENCE}`,
+      `${FENCE}typescript\n${json}\n${FENCE}`,
+      `${FENCE}json5\n${json}\n${FENCE}`,
+      `\n  ${FENCE}JS\r\n${json}\r\n${FENCE}\n`,
+      `${FENCE}TypeScript\r\n${json}\r\n${FENCE}`,
+      `${FENCE}ts ${json}${FENCE}`,
+      `${FENCE}json5 ${json}${FENCE}`,
+    ];
+    for (const body of bodies) {
+      expect(readToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual({ kind: "call", call });
     }
   });
 
   it("keeps a code fence inside a string argument", () => {
     const call = { name: "fs.write", args: { path: "README.md", content: `${FENCE}js\nrun()\n${FENCE}` } };
-    expect(parseToolCall(`<tool_call>${JSON.stringify(call)}</tool_call>`)).toEqual(call);
-    expect(parseToolCall(`<tool_call>${FENCE}json\n${JSON.stringify(call)}\n${FENCE}</tool_call>`)).toEqual(call);
+    expect(readToolCall(`<tool_call>${JSON.stringify(call)}</tool_call>`)).toEqual({ kind: "call", call });
+    expect(readToolCall(`<tool_call>${FENCE}json\n${JSON.stringify(call)}\n${FENCE}</tool_call>`))
+      .toEqual({ kind: "call", call });
+    expect(readToolCall(`<tool_call>${FENCE}ts\n${JSON.stringify(call)}\n${FENCE}</tool_call>`))
+      .toEqual({ kind: "call", call });
   });
 
   it("does not stall on a very long run of whitespace inside the block, fenced or not", () => {
@@ -73,21 +81,16 @@ describe("parseToolCall", () => {
     const json = JSON.stringify(call);
     for (const [label, body] of [["unfenced", json], ["fenced", `${FENCE}json\n${json}\n${FENCE}`]]) {
       const started = Date.now();
-      expect(parseToolCall(`<tool_call>${body}</tool_call>`), label).toEqual(call);
+      expect(readToolCall(`<tool_call>${body}</tool_call>`), label).toEqual({ kind: "call", call });
       expect(Date.now() - started, label).toBeLessThan(1000);
     }
   });
 
   it("gives a call without args (or with null args) an empty args object", () => {
-    expect(parseToolCall(`<tool_call>{"name":"list_files"}</tool_call>`)).toEqual({ name: "list_files", args: {} });
-    expect(parseToolCall(`<tool_call>{"name":"list_files","args":null}</tool_call>`)).toEqual({ name: "list_files", args: {} });
-  });
-});
-
-describe("readToolCall", () => {
-  it("reads a valid call", () => {
-    expect(readToolCall(`<tool_call>{"name":"grep","args":{"path":"a","pattern":"b"}}</tool_call>`))
-      .toEqual({ kind: "call", call: { name: "grep", args: { path: "a", pattern: "b" } } });
+    expect(readToolCall(`<tool_call>{"name":"list_files"}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "list_files", args: {} } });
+    expect(readToolCall(`<tool_call>{"name":"list_files","args":null}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "list_files", args: {} } });
   });
 
   it("finds no call in prose, even when the reply mentions the tag", () => {
@@ -97,6 +100,7 @@ describe("readToolCall", () => {
       "<tool_call>not-json</tool_call>",
       "<tool_call>call read_file with path a.ts</tool_call>",
       `<tool_call>${FENCE}python\nprint(1)\n${FENCE}</tool_call>`,
+      `<tool_call>${FENCE}ts\nconst x = 1;\n${FENCE}</tool_call>`,
       "<tool_call>[1, 2]</tool_call>",
       "<tool_call></tool_call>",
       // The tag mentioned without a closing tag: what follows it is not a call either.
@@ -123,7 +127,7 @@ describe("readToolCall", () => {
       [`{"name":"read_file","args":["a.ts"]}`, /args/],
     ];
     for (const [json, reason] of bad) {
-      for (const body of [json, `${FENCE}json\n${json}\n${FENCE}`]) {
+      for (const body of [json, `${FENCE}json\n${json}\n${FENCE}`, `${FENCE}ts\n${json}\n${FENCE}`]) {
         const reading = readToolCall(`<tool_call>${body}</tool_call>`);
         expect(reading.kind, body).toBe("malformed");
         expect(reading.kind === "malformed" && reading.reason, body).toMatch(reason);
@@ -139,7 +143,14 @@ describe("readToolCall", () => {
       "{",
     ];
     for (const json of jsons) {
-      for (const body of [json, `\n  ${json}`, `${FENCE}json\n${json}`, `${FENCE}javascript\n${json}\n${FENCE}`]) {
+      for (const body of [
+        json,
+        `\n  ${json}`,
+        `${FENCE}json\n${json}`,
+        `${FENCE}javascript\n${json}\n${FENCE}`,
+        `${FENCE}ts\n${json}`,
+        `${FENCE}json5\n${json}\n${FENCE}`,
+      ]) {
         for (const text of [`<tool_call>${body}`, `Reading a.\n<tool_call>${body}`]) {
           const reading = readToolCall(text);
           expect(reading.kind, text).toBe("malformed");
@@ -221,6 +232,15 @@ describe("buildToolInstructions", () => {
     const instructions = buildToolInstructions(["bash"]);
     expect(instructions).toContain("• bash:");
     expect(instructions).toContain("approve");
+  });
+
+  it("tells the model to start a program in the workspace folder by path on Windows", () => {
+    // Commands run with NoDefaultCurrentDirectoryInExePath=1, so cmd.exe finds .\build.bat but not build.bat.
+    const [bash] = toolDefinitions(["bash"]);
+    for (const text of [buildToolInstructions(["bash"]), bash.description]) {
+      expect(text).toContain("On Windows");
+      expect(text).toContain(".\\build.bat");
+    }
   });
 
   it("separates read and write sections when both present", () => {

@@ -96,7 +96,8 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
     description:
       "Run one command line in the workspace folder (cmd.exe on Windows, sh elsewhere) and get its exit code " +
       "and output, e.g. to run the tests. The user must approve each command before it runs; a denied " +
-      "command is not run. It gets no input and stops at your time limit.",
+      "command is not run. It gets no input and stops at your time limit. On Windows a bare name such as " +
+      "build.bat is not looked up in the workspace folder: run it as .\\build.bat.",
     args: { command: "The command line, e.g. npm test" },
   },
 };
@@ -270,12 +271,12 @@ export type ToolCallReading =
   | { kind: "call"; call: ToolCall }
   | { kind: "malformed"; reason: string };
 
-/** Models often wrap the JSON inside the tags in a ``` fence, tagged json, jsonc or
- *  javascript or not. (No regex that scans for the closing fence: on a long run of
- *  spaces it backtracks for seconds.) */
+/** Models often wrap the JSON inside the tags in a ``` fence, tagged json, jsonc, json5,
+ *  javascript, js, typescript or ts, or not. (No regex that scans for the closing fence: on
+ *  a long run of spaces it backtracks for seconds.) */
 function unfence(body: string): string {
   let text = body.trim();
-  if (text.startsWith("```")) text = text.replace(/^```(?:jsonc?|javascript)?/i, "");
+  if (text.startsWith("```")) text = text.replace(/^```(?:json[c5]?|javascript|js|typescript|ts)?/i, "");
   if (text.endsWith("```")) text = text.slice(0, -3);
   return text.trim();
 }
@@ -312,13 +313,6 @@ export function readToolCall(text: string): ToolCallReading {
     return { kind: "malformed", reason: '"args" must be a JSON object' };
   }
   return { kind: "call", call: { name: parsed.name, args: (args ?? {}) as Record<string, unknown> } };
-}
-
-/** The call in a reply, or null when there is none. A malformed block is null
- *  too: the agent loop uses readToolCall to tell it apart. */
-export function parseToolCall(text: string): ToolCall | null {
-  const reading = readToolCall(text);
-  return reading.kind === "call" ? reading.call : null;
 }
 
 /** Strip the tool_call tag from text, returning just the surrounding content. A call

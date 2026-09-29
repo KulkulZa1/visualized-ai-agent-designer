@@ -32,6 +32,17 @@ describe("parseGatewayRoute", () => {
     ['route: "ui"', "ui"],
     ["Verdict: revise\nThe intro is weak.", "revise"],
     ["The intro is weak.\nVerdict: revise", "revise"],
+    // Markdown around the keyword or its value.
+    ["**Verdict:** REVISE - intro is weak.", "revise"],
+    ["**Verdict**: REVISE", "revise"],
+    ["_Route_: backend", "backend"],
+    ["Verdict: **REVISE**", "revise"],
+    ["Verdict: `REVISE`", "revise"],
+    ["**Verdict:** **REVISE**", "revise"],
+    // JSON that does not parse: cut off (Max tokens), or with a trailing comma.
+    ['{"verdict":"REVISE","issues":[{"file":"a.ts"', "revise"],
+    ['{"verdict": "REVISE",}', "revise"],
+    ['{"route": "Backend", "why": "api",}', "backend"],
   ])("accepts %j", (text, route) => {
     expect(parseGatewayRoute(text)).toBe(route);
   });
@@ -67,6 +78,33 @@ describe("parseGatewayRoute", () => {
 
   it("does not read a key of an object nested in another object", () => {
     expect(parseGatewayRoute('{"route":"a","meta":{"route":"b"}}')).toBe("a");
+  });
+
+  it("reads only the given keys when asked", () => {
+    expect(parseGatewayRoute('{"route":"a","verdict":"b"}', ["verdict"])).toBe("b");
+    expect(parseGatewayRoute('{"verdict":"a"} then {"route":"b"}', ["verdict"])).toBe("a");
+    expect(parseGatewayRoute("Route: a. Verdict: b", ["verdict"])).toBe("b");
+    expect(parseGatewayRoute('{"route":"a"} and {"action":"c"}', ["verdict"])).toBeNull();
+    expect(parseGatewayRoute("Route: a. Action: c", ["verdict"])).toBeNull();
+    expect(parseGatewayRoute("Route: a. Action: c", ["route", "action"])).toBe("a");
+    expect(parseGatewayRoute('{"verdict":"REVISE","issues":[{"file":"a.ts"', ["verdict"])).toBe("revise");
+    expect(parseGatewayRoute('{"route":"a","verdict":"b",}', ["verdict"])).toBe("b");
+    expect(parseGatewayRoute('{"route":"a",}', ["verdict"])).toBeNull();
+  });
+
+  it("reads a quoted pair of JSON that did not parse only when its value is a string", () => {
+    expect(parseGatewayRoute('{"verdict": 5,}')).toBeNull();
+    expect(parseGatewayRoute('{"verdict": "  ",}')).toBeNull();
+    expect(parseGatewayRoute('{"name": "x",}')).toBeNull();
+    expect(parseGatewayRoute('{"verdict": null, "route": "a",}')).toBe("a");
+  });
+
+  it("takes the keys it is given literally, not as a pattern", () => {
+    expect(parseGatewayRoute("a.b: x", ["a.b"])).toBe("x");
+    expect(parseGatewayRoute("aXb: x", ["a.b"])).toBeNull();
+    expect(parseGatewayRoute('{"a.b": "x",}', ["a.b"])).toBe("x");
+    expect(parseGatewayRoute('{"aXb": "x",}', ["a.b"])).toBeNull();
+    expect(parseGatewayRoute("f(x: y", ["f(x"])).toBe("y"); // a pattern with an open group would throw
   });
 
   it("returns null when no object, keyword or route names one", () => {
@@ -143,6 +181,146 @@ describe("firedFeedbackEdges", () => {
   it("lets an explicit leading verdict win over a later label too", () => {
     const two = [feedback("R", "A", "code-fix"), feedback("R", "B", "rust-fix")];
     expect(fired("APPROVED. Optional follow-up action: rust-fix", two)).toEqual([]);
+  });
+
+  it("revises on an explicit verdict that follows a leading closing word", () => {
+    // A JSON `verdict` or a "Verdict:" keyword settles it; only that, not an `action` or a `target`.
+    const replies = [
+      'PASS\n{"verdict":"REVISE","reasons":["x"]}',
+      'APPROVED. {"verdict":"REVISE"}',
+      "APPROVED\nVerdict: REVISE - the intro is weak.",
+      "**PASS** — Verdict: revise",
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual(["W"]);
+  });
+
+  it("does not take a first word for a verdict when another word, a question or an alternative follows it", () => {
+    const replies = [
+      "Pass 1 of the review is done. Verdict: REVISE - intro is weak.",
+      "Approved changes so far: 3 of 5.\nVerdict: REVISE",
+      "PASS/REVISE: REVISE - intro", // an echo of "Return PASS or REVISE"
+      "APPROVED/REVISE: REVISE - intro",
+      "Escalate? Not needed. REVISE: fix the intro.",
+      // No explicit verdict here: the digit, or the word, after the first word is what decides.
+      "Pass 1 of the review is done. REVISE: fix the intro.",
+      "Approved changes so far: 3 of 5. REVISE: fix the intro.",
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual(["W"]);
+  });
+
+  it("reads a verdict however markdown wraps it, and one in JSON that did not parse", () => {
+    const replies = [
+      "Pass 1 of the review is done. **Verdict:** REVISE - intro is weak.",
+      "Approved changes so far: 3 of 5.\n**Verdict**: REVISE",
+      "PASS\n**Verdict:** REVISE",
+      "Verdict: **REVISE**",
+      "Verdict: `REVISE`",
+      "**Verdict:** **REVISE**",
+      '{"verdict":"REVISE","issues":[{"file":"a.ts"', // cut off at Max tokens
+      '{"verdict": "REVISE",}', // a trailing comma
+      'PASS\n{"verdict":"REVISE","issues":[{"file":"a.ts"',
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual(["W"]);
+    // Wrapped the same way, a verdict that closes still closes.
+    for (const reply of ["**Verdict:** PASS", "PASS\n**Verdict:** **APPROVED**", '{"verdict": "PASS",}']) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+  });
+
+  it("lets an explicit verdict decide over a REVISE that only opens a sentence, a key or an option", () => {
+    const replies = [
+      '{\n  "verdict": "PASS",\n  "revise": []\n}',
+      "Notes:\n- Revise: none\n- Verdict: PASS",
+      "Notes:\n- Revise: none\n- **Verdict:** PASS",
+      "PASS/REVISE: PASS - all good",
+      "APPROVED/REVISE: APPROVED",
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual([]);
+    // Without a verdict of its own, the REVISE still counts.
+    expect(fired('{\n  "notes": "ok",\n  "revise": ["the intro"]\n}')).toEqual(["W"]);
+    expect(fired("Notes:\n- Revise: the intro\n- Tone: fine")).toEqual(["W"]);
+  });
+
+  it("reads the choice that follows an echo of the options as the first word", () => {
+    for (const reply of ["PASS/REVISE: PASS", "Pass/Fail: PASS - all green", "**PASS/REVISE:** **APPROVED**", "PASS/REVISE:\nPASS"]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+    // A choice that is not one of them, or none, leaves both options open: it revises.
+    for (const reply of ["PASS/REVISE: fix the intro.", "PASS/REVISE:", "PASS/REVISE", "**PASS/REVISE:** REVISE"]) {
+      expect(fired(reply), reply).toEqual(["W"]);
+    }
+  });
+
+  it("still closes on a leading closing verdict that stands alone", () => {
+    const replies = [
+      "PASS",
+      "Approved.",
+      "APPROVED!\nGreat work",
+      "Pass: all checks green",
+      "**PASS** — nothing to revise.",
+      'APPROVED. Details: {"action":"revise"}',
+      'PASS\n{"verdict":"PASS"}',
+      "APPROVED. Revise: none.",
+    ];
+    for (const reply of replies) expect(fired(reply), reply).toEqual([]);
+  });
+
+  it("closes when a first word that is no verdict has nothing after it that asks for changes", () => {
+    for (const reply of [
+      "Escalate? Not needed.",
+      "Approved changes so far: 3 of 5.",
+      "Pass 1 of the review is done.",
+      "PASS/FAIL: PASS - all green",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+  });
+
+  it("reads a REVISE that stands alone at the start of a later sentence, line or alternative", () => {
+    for (const reply of [
+      "Here is my review.\n\nREVISE - the intro is weak.",
+      "Review notes.\nRevise: the intro is weak.",
+      "Escalate? Not needed.\nREVISE\nThe intro is weak.",
+      "Looks fine. **Revise**: the intro.",
+    ]) {
+      expect(fired(reply), reply).toEqual(["W"]);
+    }
+    // Not one inside a sentence, one followed by a word or a question, or another word.
+    for (const reply of [
+      "I think it is fine. No need to revise: the draft is good.",
+      "Looks fine. Revise the headline if you like.",
+      "Looks fine. Should we revise? No.",
+      "The revised draft is fine. Revised: yes.",
+      "Looks fine. Revise-me: yes.",
+    ]) {
+      expect(fired(reply), reply).toEqual([]);
+    }
+  });
+
+  it("does not take quadratic time on a runaway reply", () => {
+    // Scanning on from every newline or full stop over the runs that follow takes seconds for these.
+    const started = performance.now();
+    for (const reply of [
+      "\n".repeat(50_000),
+      ". ".repeat(25_000),
+      `.${" ".repeat(50_000)}x`,
+      ". revise x".repeat(20_000),
+      "\nrevise".repeat(10_000) + " ".repeat(50_000) + "word",
+      `APPROVED${" ".repeat(50_000)}x`,
+      `APPROVED${"*_ ".repeat(20_000)}x`,
+      // The keyword and quoted-pair fallbacks, and the options label.
+      `verdict${"*".repeat(50_000)}x`,
+      `verdict:${"_".repeat(50_000)}!`,
+      `verdict: ${"`\"'".repeat(20_000)}!`,
+      `"verdict"${" ".repeat(50_000)}x`,
+      `"verdict":"${"x".repeat(50_000)}`,
+      '"verdict":"'.repeat(5_000),
+      "a/".repeat(25_000),
+      `${"a".repeat(1_000)}/`.repeat(50),
+    ]) {
+      fired(reply);
+    }
+    expect(performance.now() - started).toBeLessThan(500);
   });
 
   it("still fires on a leading REVISE, whatever a later keyword says", () => {

@@ -63,21 +63,29 @@ function jsonObjects(text: string): Record<string, unknown>[] {
   return found;
 }
 
+const ROUTE_KEYS = ["route", "target", "domain", "verdict", "action"];
+
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /**
  * Try to extract a routing key from a gateway's (or reviewer's) text output.
  * Looks for JSON `{"route":"X"}`, `{"target":"X"}`, `{"domain":"X"}`, `{"verdict":"X"}` or
  * `{"action":"X"}` anywhere in the text and uses the last object that carries one, then for
- * a `route: X` / `verdict: X` keyword.
+ * a `route: X` / `verdict: X` keyword (markdown around it is fine: `**Verdict:** **X**`), then
+ * for a quoted `"verdict": "X"` pair in JSON that did not parse (cut off, a trailing comma).
+ * `keys` narrows all three to those names.
  */
-export function parseGatewayRoute(text: string): string | null {
+export function parseGatewayRoute(text: string, keys: readonly string[] = ROUTE_KEYS): string | null {
   const objects = jsonObjects(text);
   for (let i = objects.length - 1; i >= 0; i--) {
-    const obj = objects[i];
-    const val = obj.route ?? obj.target ?? obj.domain ?? obj.verdict ?? obj.action;
+    const val = keys.map((key) => objects[i][key]).find((v) => v !== undefined && v !== null);
     if (typeof val === "string" && val.trim()) return val.trim().toLowerCase();
   }
-  const kvMatch = text.match(/(?:route|target|domain|verdict|action)\s*[":]\s*"?([a-zA-Z0-9_-]+)"?/i);
+  const names = keys.map(escapeRegExp).join("|");
+  const kvMatch = text.match(new RegExp(`(?:${names})[*_\`]*\\s*[":][\\s*_\`"']*([a-zA-Z0-9_-]+)`, "i"));
   if (kvMatch) return kvMatch[1].toLowerCase();
+  const quoted = text.match(new RegExp(`"(?:${names})"\\s*:\\s*"([^"\\n]+)"`, "i"));
+  if (quoted && quoted[1].trim()) return quoted[1].trim().toLowerCase();
   return null;
 }
 
@@ -85,15 +93,51 @@ export function parseGatewayRoute(text: string): string | null {
  *  answer with besides REVISE. */
 const CLOSING_VERDICTS = new Set(["approved", "pass", "escalate"]);
 
-/** Verdicts a node's output states: the parsed route and its leading word ("REVISE — …").
- *  A reply that opens with a closing verdict has stated it, so a keyword later on
- *  ("APPROVED. Optional follow-up action: revise the headline") does not add a revision.
+/** Whether the word that ends at `end` stands alone: the text or the line ends there, or a
+ *  separator follows ("APPROVED.", "**PASS** — …"), not another word ("Pass 1 of the review",
+ *  "Approved changes so far"), a question ("Escalate? …") or an alternative ("PASS/REVISE: …"). */
+function standsAlone(text: string, end: number): boolean {
+  // A letter, a digit, "?" or "/" after any closing marks and blanks on the same line.
+  const notAlone = /[*_`"')]*[^\S\r\n]*[\p{L}\p{N}?/]/uy;
+  notAlone.lastIndex = end;
+  return !notAlone.test(text);
+}
+
+/** The reply's first word, lower-cased, and whether it stands alone. An echo of the options
+ *  ("PASS/REVISE:") is not a verdict: the choice after it is the first word. */
+function leadingWord(text: string): { word: string; alone: boolean } | null {
+  const options = /^[\s*_#>`"'(-]*[A-Za-z][\w-]*(?:\/[A-Za-z][\w-]*)+[*_`"')]*[^\S\r\n]*:/.exec(text);
+  const from = options ? options[0].length : 0;
+  const lead = /^[\s*_#>`"'(-]*([A-Za-z][\w-]*)/.exec(text.slice(from));
+  return lead && { word: lead[1].toLowerCase(), alone: standsAlone(text, from + lead[0].length) };
+}
+
+/** Whether a "revise" that stands alone opens a sentence, a line or an alternative: the verdict can
+ *  follow a question or the list of options ("Escalate? Not needed. REVISE: fix the intro.",
+ *  "PASS/REVISE: REVISE - intro"). */
+function opensWithRevise(text: string): boolean {
+  for (const m of text.matchAll(/(?:^|[.!?/\n])[ \t*_#>`"'(-]*revise(?![\w-])/gim)) {
+    if (standsAlone(text, m.index + m[0].length)) return true;
+  }
+  return false;
+}
+
+/** Verdicts a node's output states: the parsed route, its leading word ("REVISE — …") and a
+ *  REVISE that opens a later sentence or line.
+ *  A reply that opens with a closing verdict that stands alone has stated it, so a keyword later
+ *  on ("APPROVED. Optional follow-up action: revise the headline") does not add a revision; only
+ *  an explicit verdict does, a JSON `verdict` or a "Verdict:" keyword. That verdict also decides
+ *  over a REVISE that merely opens a sentence ("- Revise: none\n- Verdict: PASS"). A first word
+ *  that does not stand alone ("Pass 1 of the review is done. Verdict: REVISE") states nothing.
  *  Any other leading word stays open to a later keyword: "REVISE — target: rust-fix" says which
  *  of several feedback edges to fire. */
 function statedVerdicts(text: string): string[] {
-  const leading = /^[\s*_#>`"'(-]*([A-Za-z][\w-]*)/.exec(text)?.[1]?.toLowerCase();
-  if (leading && CLOSING_VERDICTS.has(leading)) return [leading];
-  return [parseGatewayRoute(text), leading].filter((v): v is string => Boolean(v));
+  const leading = leadingWord(text);
+  const explicit = parseGatewayRoute(text, ["verdict"]);
+  const said: (string | null | undefined)[] = leading?.alone && CLOSING_VERDICTS.has(leading.word)
+    ? [leading.word, explicit]
+    : [parseGatewayRoute(text), leading?.word, !explicit && opensWithRevise(text) ? "revise" : null];
+  return said.filter((v): v is string => Boolean(v));
 }
 
 /** The feedback edges out of `sourceId` that its output fires: those whose label the
