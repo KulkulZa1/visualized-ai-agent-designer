@@ -124,6 +124,91 @@ describe("runAgentLoop — text protocol", () => {
     expect(callText.mock.calls[1][1]).toContain("<tool_result>R:read_file</tool_result>");
   });
 
+  it("runs a call whose JSON is wrapped in a code fence inside the tags", async () => {
+    const fence = "`".repeat(3);
+    const callText = vi.fn()
+      .mockResolvedValueOnce(`Reading.\n<tool_call>\n${fence}json\n{"name":"read_file","args":{"path":"a"}}\n${fence}\n</tool_call>`)
+      .mockResolvedValueOnce("final");
+    const opts = options({ preferText: true, callText });
+
+    const result = await runAgentLoop(opts);
+
+    expect(opts.runTool).toHaveBeenCalledTimes(1);
+    expect(opts.runTool).toHaveBeenCalledWith({ name: "read_file", args: { path: "a" } });
+    expect(result).toMatchObject({ text: "final", toolCalls: 1, mode: "text" });
+    expect(callText.mock.calls[1][1]).toContain("<tool_result>R:read_file</tool_result>");
+  });
+
+  it("answers a call with a trailing comma by an error step, and carries on instead of finishing", async () => {
+    const garbled = `<tool_call>{"name":"read_file","args":{"path":"a"},}</tool_call>`;
+    const callText = vi.fn()
+      .mockResolvedValueOnce(`Let me look.\n${garbled}`)
+      .mockResolvedValueOnce(`<tool_call>{"name":"read_file","args":{"path":"a"}}</tool_call>`)
+      .mockResolvedValueOnce("final");
+    const opts = options({ preferText: true, callText });
+
+    const result = await runAgentLoop(opts);
+
+    // The garbled reply is not the node's answer, and it ran no tool.
+    expect(result).toMatchObject({ text: "final", toolCalls: 1, mode: "text" });
+    expect(callText).toHaveBeenCalledTimes(3);
+    expect(opts.runTool).toHaveBeenCalledTimes(1);
+    const retry = callText.mock.calls[1][1] as string;
+    expect(retry).toContain("Let me look.");
+    expect(retry).toMatch(
+      /<tool_result>\[error\] Your <tool_call> could not be parsed: .+\. Send a valid tool call, or answer without tool-call tags\.<\/tool_result>/,
+    );
+    // The tool that finally runs is answered on top of the error step.
+    expect(callText.mock.calls[2][1]).toContain("could not be parsed");
+    expect(callText.mock.calls[2][1]).toContain("<tool_result>R:read_file</tool_result>");
+  });
+
+  it("answers a call that is valid JSON but has no tool name the same way", async () => {
+    const callText = vi.fn()
+      .mockResolvedValueOnce(`<tool_call>{"args":{"path":"a"}}</tool_call>`)
+      .mockResolvedValueOnce("final");
+    const opts = options({ preferText: true, callText });
+
+    const result = await runAgentLoop(opts);
+
+    expect(result.text).toBe("final");
+    expect(opts.runTool).not.toHaveBeenCalled();
+    expect(callText.mock.calls[1][1]).toContain('could not be parsed: it has no "name" string');
+  });
+
+  it("finishes normally when the reply only mentions the tag in prose", async () => {
+    const text = "I would use the <tool_call> tag for that, but this needs no tool.";
+    const callText = vi.fn().mockResolvedValueOnce(text);
+    const opts = options({ preferText: true, callText });
+
+    const result = await runAgentLoop(opts);
+
+    expect(result).toMatchObject({ text, toolCalls: 0, mode: "text" });
+    expect(callText).toHaveBeenCalledTimes(1);
+  });
+
+  it("finishes normally on a tagged block whose body is not JSON", async () => {
+    const text = "Done. <tool_call>read_file a.ts</tool_call> is how a call is written.";
+    const callText = vi.fn().mockResolvedValueOnce(text);
+
+    const result = await runAgentLoop(options({ preferText: true, callText }));
+
+    expect(result.text).toBe(text);
+    expect(callText).toHaveBeenCalledTimes(1);
+  });
+
+  it("counts every garbled call against maxSteps", async () => {
+    const callText = vi.fn(async () => `<tool_call>{"name":"read_file","args":{"path":"a"},}</tool_call>`);
+    const opts = options({ preferText: true, maxSteps: 3, callText });
+
+    const result = await runAgentLoop(opts);
+
+    expect(callText).toHaveBeenCalledTimes(3);
+    expect(result.text).toMatch(/^\[Reached max steps \(3\)/);
+    expect(result.toolCalls).toBe(0);
+    expect(opts.runTool).not.toHaveBeenCalled();
+  });
+
   it("makes one plain call when the node has no runnable tools", async () => {
     const opts = options({ tools: ["web_search"] });
     const result = await runAgentLoop(opts);
@@ -280,6 +365,24 @@ describe("runAgentLoop — compaction", () => {
 
     expect(result.text).toBe("done");
     expect(summarize).toHaveBeenCalled();
+    expect(callText.mock.calls.at(-1)![1]).toContain("PROGRESS SO FAR");
+  });
+
+  it("counts unparsable tool calls as steps when compacting the text protocol", async () => {
+    let step = 0;
+    const callText = vi.fn(async (_system: string, _message: string) => (++step < 4
+      ? `${"x".repeat(8000)}\n<tool_call>{"name":"read_file",}</tool_call>`
+      : "done"));
+    const onCompacted = vi.fn();
+
+    const result = await runAgentLoop(options({
+      preferText: true, callText,
+      compaction: { budget: 3000, summarize: vi.fn(async () => "note"), onCompacted },
+    }));
+
+    expect(result.text).toBe("done");
+    // Two steps had been added when it first compacted: one folded into the note, the newest kept.
+    expect(onCompacted.mock.calls[0][0]).toBe(1);
     expect(callText.mock.calls.at(-1)![1]).toContain("PROGRESS SO FAR");
   });
 });

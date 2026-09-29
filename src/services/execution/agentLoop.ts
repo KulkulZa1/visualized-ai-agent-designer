@@ -12,7 +12,7 @@
 
 import {
   buildToolInstructions,
-  parseToolCall,
+  readToolCall,
   runnableTools,
   stripToolCall,
   toolDefinitions,
@@ -228,24 +228,39 @@ async function runText(opts: AgentLoopOptions, nativeRefused: boolean): Promise<
   const system = [opts.system, buildToolInstructions(runnableTools(opts.tools))].filter(Boolean).join("\n\n");
   let message = opts.userMessage;
   let lastStep = "";
+  // Exchanges added to `message`: tool calls and calls that could not be parsed.
+  // (`step` below counts model calls, for maxSteps.)
+  let steps = 0;
   let toolCalls = 0;
   let final: string | null = null;
 
   for (let step = 0; step < opts.maxSteps; step++) {
     checkpoint(opts);
-    message = await compactTextIfNeeded(opts, system, message, lastStep, toolCalls);
+    message = await compactTextIfNeeded(opts, system, message, lastStep, steps);
     const reply = await guarded(opts, opts.callText(system, message));
-    const call = parseToolCall(reply);
-    if (!call) {
+    const reading = readToolCall(reply);
+    if (reading.kind === "none") {
       final = reply;
       break;
     }
     if (opts.isCancelled()) throw new Error("Run stopped");
-    toolCalls++;
-    const result = await runOffered(opts, call);
+    steps++;
+    let heading: string;
+    let result: string;
+    if (reading.kind === "call") {
+      toolCalls++;
+      heading = `called ${reading.call.name}`;
+      result = await runOffered(opts, reading.call);
+    } else {
+      // A garbled call is no answer: the node must not end with it. Tell the model
+      // (this step counts against maxSteps like any other) and let it try again.
+      heading = "tool call not run";
+      result = `[error] Your <tool_call> could not be parsed: ${reading.reason}. ` +
+        "Send a valid tool call, or answer without tool-call tags.";
+    }
     const before = stripToolCall(reply);
     lastStep =
-      `[Step ${toolCalls}: called ${call.name}]\n` +
+      `[Step ${steps}: ${heading}]\n` +
       (before ? `${before}\n` : "") +
       `<tool_result>${result}</tool_result>\n\n` +
       `Now continue your task based on the tool result above.`;
