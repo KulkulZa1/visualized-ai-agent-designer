@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { Edge } from "@xyflow/react";
 import {
-  definitionHash, fingerprint, reusableNodes, runRecordPath, savedNodeId, sha256Hex, type NodeRecord, type RunRecord,
+  definitionHash, fingerprint, reusableNodes, runRecordPath, savedHookScripts, savedNodeId, sha256Hex, type NodeRecord,
+  type RunRecord,
 } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole, type AgentNodeData } from "@/types/agent";
@@ -33,6 +34,39 @@ describe("sha256Hex", () => {
 
   it("differs for texts that differ by one character", async () => {
     expect(await sha256Hex("echo hi\n")).not.toBe(await sha256Hex("echo hi"));
+  });
+});
+
+describe("savedHookScripts", () => {
+  const withScripts = (hookScripts: unknown) => ({ hookScripts }) as unknown as RunRecord;
+  const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+  it("is undefined for no record and for a record from before the field, so that attempt takes the baselines itself", () => {
+    expect(savedHookScripts(undefined)).toBeUndefined();
+    expect(savedHookScripts({} as RunRecord)).toBeUndefined();
+  });
+
+  it("keeps what the record has, fingerprints and nulls, and an empty map is still 'there'", () => {
+    expect(savedHookScripts(withScripts({ "agent-0": SHA, "agent-1": null }))).toEqual({ "agent-0": SHA, "agent-1": null });
+    expect(savedHookScripts(withScripts({}))).toEqual({});
+  });
+
+  it("counts a field that is there but not a map as empty, not as absent: nothing new is trusted on its strength", () => {
+    for (const broken of [null, "abc", 7, true, [SHA]]) {
+      expect(savedHookScripts(withScripts(broken)), JSON.stringify(broken)).toEqual({});
+    }
+  });
+
+  it("drops the entries that are neither a fingerprint nor null, and keeps the rest", () => {
+    expect(savedHookScripts(withScripts({ "agent-0": SHA, "agent-1": 7, "agent-2": {}, "agent-3": null, "agent-4": undefined })))
+      .toEqual({ "agent-0": SHA, "agent-3": null });
+  });
+
+  it("returns a copy, so what a run adds is not written back into the record it resumed from", () => {
+    const record = withScripts({ "agent-0": SHA });
+    const saved = savedHookScripts(record);
+    saved!["agent-1"] = null;
+    expect(record.hookScripts).toEqual({ "agent-0": SHA });
   });
 });
 

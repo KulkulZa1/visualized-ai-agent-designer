@@ -56,10 +56,27 @@ export interface RunRecord {
   gatewayRoutes: Record<string, string>;
   changes: FileChange[];
   audit: AuditEntry[];
-  /** For each Hook node that runs without asking: the SHA-256 (hex) of its script as the run
-   *  first read it, or null if it could not be read. A resume compares the script with this,
-   *  not with what it finds when it starts. Absent in records from before it existed. */
+  /** For each Hook node with a script, whether or not it runs without asking: the SHA-256 (hex)
+   *  of the script as the run first read it, or null if it could not be read. A resume carries
+   *  these on and compares an unasked hook's script with them, not with what it finds when it
+   *  starts. Always written ({} when there is none); absent in a record from before it existed. */
   hookScripts?: Record<string, string | null>;
+}
+
+/** The baselines a resume starts from: the record's hookScripts, kept to entries of the right shape;
+ *  undefined for a record from before the field (that attempt takes the baselines itself). A field
+ *  that is there but malformed counts as empty, so that no hook that runs without asking is
+ *  trusted on the strength of it. */
+export function savedHookScripts(record: RunRecord | undefined): Record<string, string | null> | undefined {
+  const saved: unknown = record?.hookScripts;
+  if (saved === undefined) return undefined;
+  const kept: Record<string, string | null> = {};
+  if (saved !== null && typeof saved === "object" && !Array.isArray(saved)) {
+    for (const [key, value] of Object.entries(saved)) {
+      if (typeof value === "string" || value === null) kept[key] = value;
+    }
+  }
+  return kept;
 }
 
 /** A short fingerprint of a text, to notice a change (cyrb53 by bryc, public

