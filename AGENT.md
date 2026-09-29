@@ -101,7 +101,7 @@ request and push to master.
   - It skips the nodes the current routes prune.
   - When a gateway on the path switches route, a node it routed away from that had already run is dropped: marked skipped, and its output removed from later inputs, the run record and memory. So `harness run --json` can report a node `done` and later `skipped`; the last event, and `run_finished.agents`, count.
   - A node the new route makes live but that is off the revision path does not run; an audit entry says so.
-  - A failed node is dropped only with `continueOnError`, so a failed run keeps its reason.
+  - A failed node is dropped only with `continueOnError`, and a failed Hook never is (it fails the run even then), so a failed run keeps its reason.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).
 - Context snapshots are partial and not a complete durable provider request trace. Run records (`.harness/runs/`) keep each agent's status, output and the audit, not the provider requests.
