@@ -277,7 +277,7 @@ function AppInner() {
 
       {/* Modals */}
       {modal === "generate" && <GeneratePanel  onClose={() => setModal(null)}/>}
-      {modal === "palette"  && <CommandPalette onClose={() => setModal(null)} onOpenGenerate={() => setModal("generate")} onOpenPermissions={() => setModal("permissions")}/>}
+      {modal === "palette"  && <CommandPalette onClose={() => setModal(null)} onOpenGenerate={() => setModal("generate")} onOpenPermissions={() => setModal("permissions")} onRun={handleRun}/>}
       {modal === "examples" && <ExamplePicker  onClose={() => setModal(null)}/>}
       {modal === "permissions" && <PermissionMatrix onClose={() => setModal(null)}/>}
     </div>

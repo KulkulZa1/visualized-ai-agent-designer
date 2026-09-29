@@ -59,6 +59,21 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   )
 );
 
+/** Re-reads the open workspace's file tree: the Refresh button, and after each run. */
+export async function refreshWorkspaceFiles(): Promise<void> {
+  const { workspacePath } = useWorkspaceStore.getState();
+  if (!workspacePath) return;
+  try {
+    const tree = await listWorkspaceFiles(workspacePath);
+    // Another workspace may have been opened meanwhile.
+    if (useWorkspaceStore.getState().workspacePath === workspacePath) {
+      useWorkspaceStore.getState().setFileTree(tree);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
 /** Ask the user for a folder, make it the workspace and load its file tree.
  *  Shared by the sidebar folder button and the Ctrl+Shift+O shortcut. */
 export async function openWorkspaceFolder(): Promise<void> {

@@ -20,7 +20,8 @@ function Shortcuts() {
 function PaletteHost() {
   const [open, setOpen] = useState(true);
   return open
-    ? <CommandPalette onClose={() => setOpen(false)} onOpenGenerate={vi.fn()} onOpenPermissions={vi.fn()} />
+    ? <CommandPalette onClose={() => setOpen(false)} onOpenGenerate={vi.fn()} onOpenPermissions={vi.fn()}
+        onRun={vi.fn()} />
     : null;
 }
 
@@ -74,6 +75,22 @@ describe("CommandPalette actions", () => {
     act(() => { fireEvent.click(screen.getByText("Open CLAUDE.md")); });
 
     expect(useUIStore.getState().activeEditorPath).toBe("CLAUDE.md");
+  });
+
+  it("'Run workflow' opens the run dialog, like the Run button", () => {
+    const onRun = vi.fn();
+    render(<CommandPalette onClose={vi.fn()} onOpenGenerate={vi.fn()} onOpenPermissions={vi.fn()} onRun={onRun} />);
+
+    act(() => { fireEvent.click(screen.getByText("Run workflow")); });
+
+    expect(onRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("labels shortcuts with Ctrl outside macOS", () => {
+    openPalette();
+
+    expect(screen.getByText("Ctrl+S")).toBeTruthy();
+    expect(screen.queryByText(/⌘/)).toBeNull();
   });
 });
 

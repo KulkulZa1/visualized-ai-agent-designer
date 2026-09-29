@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
+import { useExecutionStore } from "@/store/executionStore";
 import { AgentRole } from "@/types/agent";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import type { Edge } from "@xyflow/react";
@@ -70,6 +71,43 @@ describe("workflowStore", () => {
     const { nodes, isDirty } = useWorkflowStore.getState();
     expect(nodes).toHaveLength(0);
     expect(isDirty).toBe(false);
+  });
+
+  describe("the last run's results", () => {
+    const otherWorkflow = () => ({
+      meta: { name: "Other", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+      agents: [makeDefaultAgentNode("x", AgentRole.Worker, { x: 0, y: 0 }).data],
+      connections: [],
+      executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+      nodePositions: {},
+    });
+    const runCoder = (finished: boolean) => {
+      useExecutionStore.setState({ currentRun: null, isRunning: false });
+      const run = useExecutionStore.getState();
+      run.startRun("Fix the sum bug", "run-1");
+      run.updateAgent("agent-0", { agentName: "Coder", status: "done", output: "fixed sum.mjs" });
+      if (finished) run.finishRun("done");
+    };
+
+    // Node ids are places in the file (agent-0, …), so another workflow's first
+    // node would otherwise show this run's output in the inspector.
+    it("are cleared when another workflow is loaded", () => {
+      runCoder(true);
+      useWorkflowStore.getState().loadWorkflow(otherWorkflow());
+      expect(useExecutionStore.getState().currentRun).toBeNull();
+    });
+
+    it("are cleared for a new workflow", () => {
+      runCoder(true);
+      useWorkflowStore.getState().reset();
+      expect(useExecutionStore.getState().currentRun).toBeNull();
+    });
+
+    it("are kept while the run is still going", () => {
+      runCoder(false);
+      useWorkflowStore.getState().loadWorkflow(otherWorkflow());
+      expect(useExecutionStore.getState().currentRun?.id).toBe("run-1");
+    });
   });
 
   it("loadWorkflow preserves connection label and kind in edge data", () => {
@@ -170,6 +208,52 @@ describe("workflowStore", () => {
       targetAgentId: "agent-1",
       label: "approved",
       edgeKind: "feedback",
+    });
+  });
+
+  describe("the unsaved flag and canvas changes", () => {
+    const loadTwoNodes = () => {
+      const store = useWorkflowStore.getState();
+      store.addNode(makeDefaultAgentNode("a", AgentRole.Worker, { x: 0, y: 0 }));
+      store.addNode(makeDefaultAgentNode("b", AgentRole.Critic, { x: 200, y: 0 }));
+      store.onConnect({ source: "a", target: "b", sourceHandle: null, targetHandle: null });
+      useWorkflowStore.getState().loadWorkflow(useWorkflowStore.getState().toWorkflowDef());
+    };
+
+    it("stays clean when React Flow measures or selects nodes and edges after a load", () => {
+      loadTwoNodes();
+      const { onNodesChange, onEdgesChange, edges } = useWorkflowStore.getState();
+
+      onNodesChange([{ type: "dimensions", id: "agent-0", dimensions: { width: 220, height: 90 } }]);
+      onNodesChange([{ type: "select", id: "agent-0", selected: true }]);
+      onEdgesChange([{ type: "select", id: edges[0].id, selected: true }]);
+
+      expect(useWorkflowStore.getState().isDirty).toBe(false);
+    });
+
+    it("marks the workflow unsaved when a node moves", () => {
+      loadTwoNodes();
+      useWorkflowStore.getState().onNodesChange([{ type: "position", id: "agent-0", position: { x: 40, y: 0 } }]);
+      expect(useWorkflowStore.getState().isDirty).toBe(true);
+    });
+
+    it("stays clean when a run updates the nodes' status and token counts", () => {
+      loadTwoNodes();
+
+      useWorkflowStore.getState().setNodeRunState("agent-0", "running");
+      useWorkflowStore.getState().setNodeRunState("agent-0", "done", { used: 120, budget: 16000 });
+
+      const { nodes, isDirty } = useWorkflowStore.getState();
+      expect(nodes[0].data.status).toBe("done");
+      expect(nodes[0].data.tokens.used).toBe(120);
+      expect(isDirty).toBe(false);
+    });
+
+    it("marks the workflow unsaved when an edge is removed", () => {
+      loadTwoNodes();
+      const edgeId = useWorkflowStore.getState().edges[0].id;
+      useWorkflowStore.getState().onEdgesChange([{ type: "remove", id: edgeId }]);
+      expect(useWorkflowStore.getState().isDirty).toBe(true);
     });
   });
 

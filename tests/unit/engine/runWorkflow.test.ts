@@ -133,6 +133,58 @@ describe("runWorkflow", () => {
     expect(commands).not.toContain("call_ollama_api");
   });
 
+  describe("the local Ollama probe", () => {
+    const OLLAMA_DOWN = "Ollama is selected, but the local Ollama server is not reachable at " +
+      "http://localhost:11434. Please start Ollama and try again.";
+    /** Local Ollama is down; every other provider is healthy and answers "done". */
+    const probeHandlers = (probed: string[]): Record<string, Handler> => ({
+      check_provider_health: (args) => {
+        probed.push(String(args.provider));
+        return args.provider === "ollama"
+          ? { ok: false, provider: "ollama", latency_ms: 0, message: OLLAMA_DOWN, model_available: false, pull_command: null }
+          : { ok: true, provider: args.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null };
+      },
+      call_openai_api: () => "done",
+    });
+    const nodeOn = (model: string) => {
+      const node = makeNode("A");
+      node.data.model = model;
+      return node;
+    };
+    const provider = (settings: Partial<RunInput["provider"]>): Partial<RunInput> => ({
+      provider: { ...runInput([]).provider, ...settings },
+    });
+
+    it("is skipped for a run on a Custom endpoint, which never falls back to it", async () => {
+      const probed: string[] = [];
+      const { host } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("openai")], [], provider({
+        llmProvider: "openai-compatible", customApiUrl: "https://llm.example/v1", customApiModel: "openai",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect(probed).toEqual(["openai-compatible"]);
+    });
+
+    it("warns, without blocking the run, that OpenAI's billing fallback is down", async () => {
+      const probed: string[] = [];
+      const { host, log } = fakeHost(probeHandlers(probed));
+
+      const outcome = await runWorkflow(runInput([nodeOn("gpt-4o-mini")], [], provider({
+        llmProvider: "openai", openaiApiKey: "sk-test",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      expect([...probed].sort()).toEqual(["ollama", "openai"]);
+      expect(log.audit.find((e) => e.details?.includes("ollama"))).toMatchObject({
+        details: "⚠ ollama — not available at http://localhost:11434, so a billing error from OpenAI " +
+          "cannot fall back to local Ollama",
+        success: true,
+      });
+    });
+  });
+
   /** Node A asks to run `npm test` with bash, then answers. */
   function commandRun(): { nodes: AgentNode[]; handlers: Record<string, Handler> } {
     let calls = 0;
@@ -159,6 +211,37 @@ describe("runWorkflow", () => {
       { runId: outcome.run.id, agentName: "A", command: "npm test", workspacePath: "/ws" });
     expect(commands).toContain("execute_command");
     expect(outcome.run.agents.A.status).toBe("done");
+  });
+
+  it("names a run's audit entries by what happened", async () => {
+    const { nodes, handlers } = commandRun();
+    const { host, log } = fakeHost(handlers, { askCommand: async () => "granted" });
+
+    await runWorkflow(runInput(nodes), host);
+
+    const entries = log.audit.filter((e) => e.agentId === "A");
+    expect(entries.map((e) => e.action)).toEqual(
+      ["agent_started", "tool_call", "command_executed", "provider_fallback", "agent_finished"]);
+    // The model refused native tool calls (noted once the loop ends): a warning, not a failure.
+    expect(entries[3]).toMatchObject({ success: true, warning: true });
+  });
+
+  it("records a billing fallback to local Ollama as a warning", async () => {
+    const { host, log } = fakeHost({
+      call_openai_api: () => { throw new Error("insufficient_quota: you exceeded your current quota"); },
+    });
+    const node = makeNode("A");
+    node.data.model = "gpt-4o-mini";
+
+    const outcome = await runWorkflow(runInput([node], [], {
+      provider: { ...runInput([]).provider, llmProvider: "openai", openaiApiKey: "sk-test" },
+    }), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(outcome.run.agents.A.status).toBe("done");
+    expect(log.audit.find((e) => e.action === "provider_fallback")).toMatchObject({
+      details: "Billing error — fell back to Ollama (qwen2.5-coder:7b)", success: true, warning: true,
+    });
   });
 
   it("does not run a shell command the host denies", async () => {
