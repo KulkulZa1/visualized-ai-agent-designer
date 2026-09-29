@@ -23,7 +23,7 @@ fn refuse_symlink(path: &Path) -> AppResult<()> {
     }
 }
 
-#[tauri::command]
+#[cfg_attr(feature = "app", tauri::command)]
 pub fn write_audit_entry(workspace_path: String, entry: AuditEntry) -> AppResult<()> {
     let audit_dir = resolve_safe_path(&workspace_path, AUDIT_DIR)?;
     fs::create_dir_all(&audit_dir)?;

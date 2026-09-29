@@ -39,3 +39,12 @@ describe("executionStore — file changes", () => {
     expect(useExecutionStore.getState().currentRun).toBeNull();
   });
 });
+
+describe("executionStore — runs", () => {
+  it("starts a run under the id the engine gave it", () => {
+    const id = useExecutionStore.getState().startRun("W", "run-42");
+
+    expect(id).toBe("run-42");
+    expect(useExecutionStore.getState().currentRun).toMatchObject({ id: "run-42", workflowName: "W", status: "running" });
+  });
+});
