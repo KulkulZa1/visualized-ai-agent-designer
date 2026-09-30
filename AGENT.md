@@ -37,7 +37,7 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-30 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1507 tests / 75 files, and 1
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1514 tests / 75 files, and 1
 skipped because it needs a non-root user (CI runs it; the suite was 1413 / 73 before
 the local-model changes, and 1151 / 72 before the offline bundle's tests);
 `cargo test` passed, 162 tests (the 2 Windows-only tests are not compiled on
@@ -74,8 +74,11 @@ servers that recorded every request, in a network namespace with only loopback:
 `num_ctx` (the default, the flag, the variable, 0, ollama.com and look-alike hosts,
 invalid values), the run record, a Custom endpoint run from the environment alone
 (`gpt-4o-mini` in no request), and the timeouts (a 30 s call timeout, a probe that
-never answered at 120 s, one that answered after 15 s, a 10 s connect). The warning
-was checked on that commit, before its rule and text changed. Not run: a real model
+never answered at 120 s, one that answered after 15 s, a 10 s connect). The warning's
+current rule and text were checked the same way on commit 2171368: the shipped
+`examples/spec-to-pr.harness.yaml` at the default window gave no context warning
+(the old rule warned on its Implementer, whose Max tokens is 16384), a prompt that
+did not fit still warned, and the rule's boundaries held. Not run: a real model
 server (Ollama, llama.cpp, vLLM, LM Studio), the streaming turn end to end, the hosted
 probes (OpenAI, Anthropic), real HTTPS to ollama.com, release builds, and nothing on
 Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in

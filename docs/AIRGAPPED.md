@@ -339,9 +339,11 @@ recorded every request, inside a network namespace with only loopback
 - A server that took the request and never answered failed the agent at
   `--request-timeout` (30 s: 30.4 to 30.5 s) and the preflight probe at 120.3 s. A
   probe that answered after 15 s passed (master failed it at 10.3 s).
-- The warning was checked on 76e60c7, before its rule and text changed: it appeared
-  on stderr and in `--json`, and not at the default window, at 0 or with the Custom
-  endpoint.
+- The warning, with its current rule and text (rechecked on commit 2171368): a prompt
+  that did not fit warned once per agent, on stderr and in `--json`. The shipped
+  `examples/spec-to-pr.harness.yaml` at the default window gave none (the old rule
+  warned on its Implementer, whose Max tokens is 16384), and there was none at 0 or
+  with the Custom endpoint.
 
 **Not run:** a real model server (Ollama, llama.cpp, vLLM or LM Studio); the streaming
 turn end to end (`harness run` never streams); the Tauri window and its `invoke`
