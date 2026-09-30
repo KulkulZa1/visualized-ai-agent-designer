@@ -222,8 +222,9 @@ export const useWorkflowStore = create<WorkflowStoreState & WorkflowStoreActions
         // A loaded workflow starts a fresh history: undoing past the load would put the
         // previous graph under this workflow's name and file path.
         useWorkflowStore.temporal.getState().clear();
-        // Node ids are places in the file, so the last run's results would show on this
-        // workflow's nodes. They stay in .harness/runs.
+        // Node ids are places in the file, so the last run's per-agent results would show on
+        // this workflow's nodes. They stay in .harness/runs; the run itself, with the files
+        // it changed (Changes, Revert), is kept.
         useExecutionStore.getState().clearRun();
       },
 

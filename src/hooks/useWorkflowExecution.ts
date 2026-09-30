@@ -72,8 +72,10 @@ export function useWorkflowExecution() {
         },
       }, appHost());
       // Agents may have created files: show them in the file tree, also after a run that
-      // failed as a whole.
-      if (outcome.started) await refreshWorkspaceFiles();
+      // failed as a whole. Not awaited: on a big tree the (synchronous) Rust listing takes
+      // long, and until this function returns a second Run is refused and edits are not
+      // recorded for undo. refreshWorkspaceFiles catches its own errors.
+      if (outcome.started) void refreshWorkspaceFiles();
       // The run never started (the provider check failed), or it failed as a whole
       // (a cycle, blocked dependencies). A failed node's error is on the node.
       if (outcome.error !== undefined) reportError(outcome.error);
@@ -91,7 +93,8 @@ export function useWorkflowExecution() {
     return {
       invoke,
       events: {
-        onRunStarted: (id, workflowName) => { runId = id; startRun(workflowName, id); },
+        // The folder the engine was given, so the run's changes name where its files were written.
+        onRunStarted: (id, workflowName) => { runId = id; startRun(workflowName, id, workspacePath ?? undefined); },
         onAgentUpdate: (nodeId, partial) => { if (isCurrent()) updateAgent(nodeId, partial); },
         onNodeStatus: (nodeId, status, tokens) => setNodeRunState(nodeId, status, tokens),
         onAudit: addEntry,

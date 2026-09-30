@@ -59,14 +59,19 @@ export const useWorkspaceStore = create<WorkspaceState & WorkspaceActions>()(
   )
 );
 
+// Refreshes start without being awaited (after each run), so they can overlap and a slow
+// listing can come back after a newer one. Each takes a number; only the latest applies its tree.
+let latestRefresh = 0;
+
 /** Re-reads the open workspace's file tree: the Refresh button, and after each run. */
 export async function refreshWorkspaceFiles(): Promise<void> {
   const { workspacePath } = useWorkspaceStore.getState();
   if (!workspacePath) return;
+  const refresh = ++latestRefresh;
   try {
     const tree = await listWorkspaceFiles(workspacePath);
-    // Another workspace may have been opened meanwhile.
-    if (useWorkspaceStore.getState().workspacePath === workspacePath) {
+    // Another workspace may have been opened meanwhile, or a newer refresh started.
+    if (refresh === latestRefresh && useWorkspaceStore.getState().workspacePath === workspacePath) {
       useWorkspaceStore.getState().setFileTree(tree);
     }
   } catch (e) {

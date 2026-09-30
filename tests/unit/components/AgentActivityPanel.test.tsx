@@ -98,6 +98,36 @@ describe("AgentActivityPanel", () => {
     expect(container.textContent).not.toContain("Run the workflow to see output here");
   });
 
+  // Node ids are places in the file: the next workflow's first node is agent-0 too.
+  it("shows nothing of the last run once another workflow is opened: no output, no run id, no status", () => {
+    useWorkflowStore.getState().addNode(makeDefaultAgentNode("agent-0", AgentRole.Worker, { x: 0, y: 0 }));
+    const now = Date.now();
+    useExecutionStore.getState().startRun("Fix the sum bug", "run-1");
+    useExecutionStore.getState().updateAgent("agent-0", {
+      agentName: "Coder", status: "done", output: "fixed sum.mjs", startedAt: now, finishedAt: now + 500,
+    });
+    useExecutionStore.getState().finishRun("done");
+    const { container } = render(<AgentActivityPanel nodeId="agent-0" onClose={() => {}} />);
+    expect(container.textContent).toContain("fixed sum.mjs");
+    expect(container.textContent).toContain("run-1");
+
+    act(() => {
+      useWorkflowStore.getState().loadWorkflow({
+        meta: { name: "Other", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+        agents: [makeDefaultAgentNode("x", AgentRole.Worker, { x: 0, y: 0 }).data],
+        connections: [],
+        executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+        nodePositions: {},
+      });
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Run the workflow to see output here");
+    expect(text).not.toContain("fixed sum.mjs");
+    expect(text).not.toContain("run-1");
+    expect(text).not.toContain("Final Output");
+  });
+
   it("shows no sub-agent section for a node without helpers", () => {
     useWorkflowStore.getState().addNode(makeDefaultAgentNode("n1", AgentRole.Worker, { x: 0, y: 0 }));
     useExecutionStore.setState({

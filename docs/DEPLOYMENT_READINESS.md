@@ -1,6 +1,6 @@
 ﻿# Deployment Readiness
 
-Updated: 2026-09-29
+Updated: 2026-09-30
 
 This is the source of truth for what is verified, partial, mocked, or blocked.
 
@@ -17,7 +17,7 @@ installer smoke testing, signing, and clearer production-grade error recovery.
 ## Evidence From This Pass
 
 Rows marked 2026-09-24 were re-run in the 2026-09-24 defect-fix pass. Rows
-marked Linux come from a 2026-09-29 pass on Linux and do not replace the
+marked Linux come from a 2026-09-30 pass on Linux and do not replace the
 Windows rows. Other rows come from earlier passes and were not re-run.
 
 | Area | Command or action | Result |
@@ -36,12 +36,15 @@ Windows rows. Other rows come from earlier passes and were not re-run.
 | Resume an app-saved run | `harness run --resume` on a record the app saved | Passed (2026-09-26): both agents reused, exit 0 |
 | harness run output on Windows | Redirected from cmd.exe; captured by Windows PowerShell 5.1 | cmd.exe: UTF-8. Windows PowerShell 5.1 in a default console decodes it with the console code page (`??`), and its `>` writes UTF-16: see `docs/HEADLESS.md` (Troubleshooting) |
 | Frontend build | `npm run build` | Passed (2026-09-24); Vite warned about empty `vendor-react` chunk and large `index`/`monacoLocal` chunks |
-| TypeScript (Linux) | `npx tsc --noEmit` | Passed (2026-09-29, Linux) |
-| Frontend tests (Linux) | `npx vitest run` | Passed, 1082 tests / 70 files (2026-09-29, Linux, with master's #10 merged) |
-| Rust tests (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml` | Passed, 116 tests (2026-09-29, Linux; the 2 Windows-only tests are not compiled there) |
-| Rust tests without Tauri (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core` | Passed, 116 + 2 (2026-09-29, Linux) |
-| Frontend build (Linux) | `npx vite build` | Passed (2026-09-29, Linux); no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains |
-| harness run, hook script check (Linux) | A scratch workflow of two Hook nodes through the real `harness-core` (debug build), no model: the first hook's script rewrites the second's script, as an approved shell command could | Passed (2026-09-29, Linux; run by hand, not a test). The second hook was refused ("was changed during this run"), exit 1, and the refusal is in `.harness/audit.log.jsonl`. `hookScripts` in the record holds each script's SHA-256, not its text. `--resume` refused it again (exit 1). A new run took the changed script as its baseline and ran it (exit 0). With `node --no-experimental-global-webcrypto` the run did not start (exit 3) |
+| TypeScript (Linux) | `npx tsc --noEmit` | Passed (2026-09-30, Linux) |
+| Frontend tests (Linux) | `npx vitest run` | Passed, 1151 tests / 72 files (2026-09-30, Linux) |
+| Rust tests (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml` | Passed, 143 tests (2026-09-30, Linux; the 2 Windows-only tests are not compiled there) |
+| Rust tests without Tauri (Linux) | `cargo test --manifest-path src-tauri/Cargo.toml --no-default-features --features core` | Passed, 143 + 2 (2026-09-30, Linux) |
+| Frontend build (Linux) | `npx vite build` | Passed (2026-09-30, Linux); no empty `vendor-react` chunk; the large `index`/`monacoLocal` warning remains |
+| harness run, real core, no key (Linux) | The commands of CI's `harness run` step: `npm run build:cli`, then `harness run` on `examples/purchasing-decision.harness.yaml` with an empty `OPENAI_API_KEY`, against the real `harness-core` | Passed (2026-09-30, Linux): exit 3 and a `not_started` event |
+| harness run, hook script check (Linux) | The real `harness run` bundle and a real debug `harness-core`, hook-only workflows, no model: 78 of 78 checks | Passed (2026-09-30, Linux; run by hand, not a test). An untouched hook ran. A script rewritten by an earlier hook was refused ("was changed during this run"), exit 1, and the refusal is in `.harness/audit.log.jsonl`; `--resume` refused it again, and a new run took the changed script as its baseline. A script that isn't valid UTF-8, changed by one byte, was refused. A link re-pointed to a name that isn't valid UTF-8, with another script at the name's U+FFFD form, was refused and the other script did not run. An `env`-only edit was refused on resume. `../outside.sh` was refused with "could not be checked (Path traversal detected: ../outside.sh)", and a missing script got "was not found". A record saved by the earlier text-hash bundle, resumed, was refused as changed. With Web Crypto disabled (`node --no-experimental-global-webcrypto`) the run finished. A `harness-core` without `hook_fingerprint` failed closed. `hookScripts` holds fingerprints, not text. Not run: the cmd.exe path refusal on Windows, `.bat`, `.ps1` and `.py` hooks, macOS, the Tauri window and its IPC, a live model |
+| App run in the UI, the fixes for #10's review (Linux) | Chromium on the app's production build, every Tauri `invoke` answered by the real `harness-core` through an injected bridge, and a scripted OpenAI-compatible server as the model | Passed (2026-09-30, Linux; run by hand, not a test). **Changes (2)** stayed after another workflow was loaded. Revert with another folder open was refused, and both folders were untouched. A search matching 1,200 files showed "First 500 of 1,200 matches" with 500 rows. With a 4 s file listing, a second Run started 346 ms after the first finished, while the listing was still running. Not covered: the Tauri window and its IPC, a live model |
+| Ollama fallback warning (Linux) | A fake local Ollama server that answers but lacks the model, as the billing-error fallback | Passed (2026-09-30, Linux): the warning says the model isn't pulled and shows the `ollama pull` command |
 | CI | `.github/workflows/ci.yml` | Defined, not run in this pass. On ubuntu-latest (Node 22) for every pull request and push to master, with `permissions: contents: read`: `npx tsc --noEmit`, `npx vitest run`, `npx vite build`, `cargo test` for the app and with `--no-default-features --features core` (each built, then run, as steps with time limits), and `harness run` against the real `harness-core` with no key, which must stop at the preflight (exit 3, a `not_started` event) |
 | Tauri dev launch | `npm run tauri -- dev` | Passed; built dev profile, launched `target\\debug\\agent-workflow-builder.exe`, spawned WebView2 |
 | Tauri package | `npm run tauri -- build` | Passed; produced MSI and NSIS installers; packaging downloaded Microsoft/Wix tooling |
@@ -111,8 +114,8 @@ Installer outputs:
 | CLI file reads | `harness project status` reads `package.json`, the audit log and the snapshot index only if each is a regular file whose real path is inside the workspace (else it counts as missing), and does not follow links when it looks for workflow files |
 | MCP test filter | Unsafe shell characters and filters starting with `-` rejected before spawning test command; `npx` runs with `--no-install` |
 | Agent shell execution | Per-command approval: the dialog shows the agent, the exact command and the folder; Deny has the focus and Esc denies. The Rust `execute_command` refuses without `consentGranted` (set by the caller after approval, not a user-verified token) and runs the line in the workspace folder (cmd.exe on Windows, sh elsewhere) without provider API keys or input, until the node's remaining time runs out. "Allow for this run" grants that exact command text until the run ends, with a warning that it runs again even if the agent changes what it runs. Stop kills a running command (`cancel_command`: `taskkill /T /F`, a process group on Unix). Sub-agents never get `bash`; Stop denies pending approvals. Approvals (once / for this run / under a grant), denials and results go to `.harness/audit.log.jsonl`. In `harness run` there is no dialog: only commands the user passed exactly with `--allow-command` run, and the audit says "allowed by --allow-command" or "denied (not in --allow-command)"; `harness-core` ignores Ctrl+C so Stop can finish and save the run. Not sandboxed. `execute_inline_command` stays removed |
-| Agent file writes | `fs.write`/`fs.append`/`edit_file` calls from model output do write files, confined to the open workspace by `resolve_safe_path()` (which resolves the deepest existing ancestor, so a symlink/junction cannot redirect writes outside). They refuse git internals (any `.git` path segment), `.harness/hooks/`, `.harness/runs/` (a resumed run trusts its saved record, which holds the hook-script hashes) and `.harness/audit.log.jsonl`. The check is on the path as written: links and Windows aliases (8.3 names, NTFS streams) are not covered, and an approved `bash` command can write there anyway. Each run's changes can be reverted from the Changes dialog; a file the run created is deleted with `delete_workspace_file` (workspace-confined, files only), and a file changed since the agent's last write is only overwritten after confirmation |
-| Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook. A Hook node fails, and the run stops, instead of running when it is marked `requireConsent`; or, if it has no `requireConsent`, when its script or env changed during the run. Two checks: an agent's file tools changed the script (the change log, in any attempt of the run), or the SHA-256 of the script and of the node's `env`, taken for every Hook node when the run first starts, differs from one taken just before the hook runs (this catches other spellings of the path, links, approved shell commands and a changed `env`). The hashes are saved in the run record (`hookScripts`); a resume never takes new ones (except for a record saved before the field), so a hook without a baseline is refused until a new run, and a new run takes the scripts as they are. Refusals are audited. The hash needs Web Crypto: `harness run` needs Node 20 or later, else a run with such a hook does not start (exit 3). Not covered: scripts that aren't valid UTF-8 (change log only), files a script sources or imports, the gap between the check and the hook's start, and an approved `bash` command that writes anywhere in the workspace, run records included; see `docs/SECURITY.md`. Agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
+| Agent file writes | `fs.write`/`fs.append`/`edit_file` calls from model output do write files, confined to the open workspace by `resolve_safe_path()` (which resolves the deepest existing ancestor, so a symlink/junction cannot redirect writes outside). They refuse git internals (any `.git` path segment), `.harness/hooks/`, `.harness/runs/` (a resumed run trusts its saved record, which holds the hook-script fingerprints) and `.harness/audit.log.jsonl`. The check is on the path as written: links and Windows aliases (8.3 names, NTFS streams) are not covered, and an approved `bash` command can write there anyway. Each run's changes can be reverted from the Changes dialog; a file the run created is deleted with `delete_workspace_file` (workspace-confined, files only), and a file changed since the agent's last write is only overwritten after confirmation |
+| Hook execution | Rust command requires an explicit `consentGranted` flag (set by the caller). During runs only Hook-role nodes run their pre-hook. A Hook node fails, and the run stops, instead of running when it is marked `requireConsent`; or, if it has no `requireConsent`, when its script or env changed during the run. Two checks: an agent's file tools changed the script (the change log, in any attempt of the run), or the fingerprint of the script and of the node's `env`, taken for every Hook node when the run first starts, differs from one taken just before the hook runs. The Rust command `hook_fingerprint` (in the app and in `harness-core`) takes the fingerprint: a SHA-256 of the script's bytes, in any encoding, and of the `env`, read at the path the interpreter is given (this catches other spellings of the path, links, approved shell commands and a changed `env`). `execute_hook` then reads the script again and re-checks it as its last step before it starts the interpreter. The fingerprints are saved in the run record (`hookScripts`); a resume never takes new ones (except for a record saved before the field), so a hook without a baseline is refused until a new run, and a new run takes the scripts as they are. A hook whose script cannot be checked (a path outside the workspace, a folder or a FIFO, a `harness-core` older than the CLI bundle) is not run unasked, and neither is one whose script is missing. On Windows, a hook that runs without asking and starts through cmd.exe is refused if its full resolved path (the workspace folder and the folders above it included) contains one of `& \| < > ^ % ! ( ) @ , ; =` (reasoned, not run on Windows). Refusals are audited. A record saved before this check holds hashes of the script's text, which never match: resuming it refuses its unasked hooks as changed. Not covered: files a script sources or imports, the moment between `execute_hook`'s last read and the interpreter's own opening of the file (narrowed, not closed), and an approved `bash` command that writes anywhere in the workspace, run records included; see `docs/SECURITY.md`. Agent-node hooks run only from the Hooks tab, which asks before running `requireConsent` hooks. Hook processes do not inherit provider API keys; workflow hook runs are appended to `.harness/audit.log.jsonl` |
 | DevTools | Not enabled in release builds (tauri `devtools` feature removed); debug builds still open them |
 | Tauri shell permissions | `shell:allow-execute` and `shell:allow-kill` removed from default capabilities |
 | Cloud calls | No hidden cloud calls added; run preflight contacts only the hosted providers the run will use, and probes local Ollama only when the run uses it or as the billing fallback of OpenAI and Anthropic; the billing-error fallback only goes to a local Ollama server |
@@ -135,14 +138,26 @@ a browser with a real run (details in `docs/DEVELOPMENT_LOG.md`):
 - The top bar fits a 1,024 px window: Save and Run stay visible.
 - A workflow is "unsaved" only after an edit: opening it, selecting and
   running no longer count.
-- Opening another workflow clears the last run's results from the panels.
+- Opening another workflow clears the last run's per-agent results from the
+  panels ("Agent results were cleared when another workflow was opened."). The
+  run stays: its status, its time and **Changes (N)** with the diff and Revert.
+  Revert works only with the folder the run worked in open. With another folder
+  open it is refused, nothing is read, written or deleted, and the diff stays
+  viewable.
 - Audit entries are named by what happened, and the tool, consent and warn
   chips match them.
 - Local Ollama is probed only when the run uses it or can fall back to it.
 - Shortcut hints say Ctrl on Windows.
 - The code editors use a dark theme.
-- The file search box works, and a Refresh button replaced the dead gear.
+- The file search box works (it waits 150 ms after typing stops, and a big
+  workspace lists the first 500 matching files, with "First 500 of N matches"),
+  and a Refresh button replaced the dead gear.
 - The page title is "Harness Studio".
+
+The 2026-09-30 review fixes to the workflow-switch and file-search items above
+(Changes staying, the Revert folder check and the 500-match cap) were checked in a
+browser against the real `harness-core`, with a scripted OpenAI-compatible server
+as the model, not a live one (see the Evidence table).
 
 Screenshot evidence: `docs/assets/empty-state.png` shows the empty
 onboarding state after hiding the blank minimap when no nodes exist. Playwright's
@@ -176,5 +191,11 @@ npm run harness -- workflow validate examples\purchasing-decision.harness.yaml
 
 Then install the generated NSIS installer on a clean Windows profile and verify
 the app launches without repo, Node, Rust, or Tauri developer tooling.
+
+Also on Windows: run a workflow whose Hook nodes run `.bat`, `.ps1` and `.py`
+scripts (the hook script check was only run on Linux), and check the cmd.exe path
+refusal. A `.bat` hook that runs without asking, in a workspace whose full path has
+one of `& | < > ^ % ! ( ) @ , ; =` (for example a folder named `proj(1)`), must be
+refused, and one under a folder with only a space in its name must run.
 
 

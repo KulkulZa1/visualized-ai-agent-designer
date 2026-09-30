@@ -21,7 +21,7 @@ use commands::{
         delete_workspace_file, list_workspace_files, open_workspace_dialog, read_workspace_file,
         write_workspace_file,
     },
-    process_commands::{cancel_command, execute_command, execute_hook},
+    process_commands::{cancel_command, execute_command, execute_hook, hook_fingerprint},
     workflow_commands::{load_workflow, save_workflow},
 };
 
@@ -64,6 +64,7 @@ pub fn run() {
             save_workflow,
             load_workflow,
             write_audit_entry,
+            hook_fingerprint,
             execute_hook,
             execute_command,
             cancel_command,

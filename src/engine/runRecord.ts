@@ -56,13 +56,20 @@ export interface RunRecord {
   gatewayRoutes: Record<string, string>;
   changes: FileChange[];
   audit: AuditEntry[];
-  /** For each Hook node with a script, whether or not it runs without asking: the hookFingerprint
-   *  (SHA-256, hex) of the script as the run first read it and of the node's env, or null if the
-   *  script could not be read. A resume carries these on and compares an unasked hook's with them,
-   *  not with what it finds when it starts. Always written ({} when there is none); absent in a
-   *  record from before it existed. */
+  /** For each Hook node with a script, whether or not it runs without asking: the fingerprint
+   *  harness-core's hook_fingerprint gave (SHA-256, hex) of the script's bytes, as the run first found
+   *  them, and of the node's env; null if there was no such script; UNVERIFIABLE_HOOK if harness-core
+   *  could not give one. A resume carries these on and compares an unasked hook's with them, not with
+   *  what it finds when it starts. Always written ({} when there is none); absent in a record from
+   *  before it existed. */
   hookScripts?: Record<string, string | null>;
 }
+
+/** A hookScripts entry for a hook whose fingerprint could not be taken when the run started:
+ *  harness-core could not read the script, or is older than the app and has no hook_fingerprint.
+ *  A fingerprint is 64 hex digits, so nothing ever equals this: the hook is not run unasked, in
+ *  that run or in any resume of it. */
+export const UNVERIFIABLE_HOOK = "unverifiable";
 
 /** The baselines a resume starts from: the record's hookScripts, kept to entries of the right shape;
  *  undefined for a record from before the field (that attempt takes the baselines itself). A field
@@ -95,25 +102,6 @@ export function fingerprint(text: string): string {
   h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
   h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0");
-}
-
-/** The SHA-256 of a text, as hex. Web Crypto: the app's WebView and Node 20 and later have it.
- *  Throws where it is missing; nothing weaker stands in for it. */
-export async function sha256Hex(text: string): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) throw new Error("Web Crypto is not available");
-  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(text));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-/** What a hook runs as, fingerprinted: the SHA-256 (hex) of its script's text and of the env it is
- *  given (preHook.env, which the backend applies as it is, so a BASH_ENV, PATH or PYTHONPATH in it
- *  changes what the script runs). The env goes in as JSON with its names sorted, so the order it
- *  was written in does not matter; an empty one is part of it too, so adding a variable always
- *  changes the result. Throws where Web Crypto is missing, as sha256Hex does. */
-export function hookFingerprint(script: string, env: Record<string, string> | undefined): Promise<string> {
-  const vars = env ?? {};
-  return sha256Hex(JSON.stringify([script, Object.keys(vars).sort().map((name) => [name, vars[name]])]));
 }
 
 /** What shapes a node's work, as a fingerprint. `prompt` is the prompt's text:

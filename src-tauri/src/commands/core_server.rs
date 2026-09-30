@@ -26,7 +26,7 @@ use super::chat_turn::{run_turn, ChatMessage, ToolSpec};
 use super::fs_commands::{
     delete_workspace_file, list_workspace_files, read_workspace_file, write_workspace_file,
 };
-use super::process_commands::{cancel_command, execute_command, execute_hook};
+use super::process_commands::{cancel_command, execute_command, execute_hook, hook_fingerprint};
 use crate::models::audit::AuditEntry;
 
 // ── Arguments, as the app sends them ──────────────────────────────────────────
@@ -110,6 +110,14 @@ struct AuditArgs {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct HookFingerprintArgs {
+    workspace_path: String,
+    hook_path: String,
+    env: Option<HashMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct HookArgs {
     workspace_path: String,
     hook_path: String,
@@ -117,6 +125,9 @@ struct HookArgs {
     env: Option<HashMap<String, String>>,
     consent_granted: bool,
     timeout_secs: Option<u64>,
+    // Callers from before hook_fingerprint do not send it.
+    #[serde(default)]
+    expected_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +161,7 @@ enum Call {
     Delete(FileArgs),
     List(WorkspaceArgs),
     Audit(AuditArgs),
+    HookFingerprint(HookFingerprintArgs),
     Hook(HookArgs),
     Command(CommandArgs),
     Cancel(CancelArgs),
@@ -175,6 +187,7 @@ fn parse(cmd: &str, args: Value) -> Result<Call, String> {
         "delete_workspace_file" => Call::Delete(args_of(cmd, args)?),
         "list_workspace_files" => Call::List(args_of(cmd, args)?),
         "write_audit_entry" => Call::Audit(args_of(cmd, args)?),
+        "hook_fingerprint" => Call::HookFingerprint(args_of(cmd, args)?),
         "execute_hook" => Call::Hook(args_of(cmd, args)?),
         "execute_command" => Call::Command(args_of(cmd, args)?),
         "cancel_command" => Call::Cancel(args_of(cmd, args)?),
@@ -230,9 +243,15 @@ pub async fn dispatch(cmd: String, args: Value) -> Result<Value, String> {
         Call::Delete(a) => blocking(move || delete_workspace_file(a.workspace_path, a.relative_path)).await,
         Call::List(a) => blocking(move || list_workspace_files(a.workspace_path)).await,
         Call::Audit(a) => blocking(move || write_audit_entry(a.workspace_path, a.entry)).await,
+        Call::HookFingerprint(a) => {
+            blocking(move || hook_fingerprint(a.workspace_path, a.hook_path, a.env)).await
+        }
         Call::Hook(a) => {
             blocking(move || {
-                execute_hook(a.workspace_path, a.hook_path, a.agent_id, a.env, a.consent_granted, a.timeout_secs)
+                execute_hook(
+                    a.workspace_path, a.hook_path, a.agent_id, a.env, a.consent_granted, a.timeout_secs,
+                    a.expected_fingerprint,
+                )
             })
             .await
         }
@@ -375,8 +394,14 @@ mod tests {
             ("write_audit_entry", json!({"workspacePath": "/ws", "entry": {"id": "A-cmd-1",
                 "timestamp": "2026-09-25T10:00:00.000Z", "action": "command_executed", "agentId": "A",
                 "details": "A ran: npm test", "success": true}})),
+            ("hook_fingerprint", json!({"workspacePath": "/ws", "hookPath": ".harness/hooks/gate.sh",
+                "env": {"BASH_ENV": "/tmp/x"}})),
+            ("hook_fingerprint", json!({"workspacePath": "/ws", "hookPath": ".harness/hooks/gate.sh"})),
             ("execute_hook", json!({"workspacePath": "/ws", "hookPath": ".harness/hooks/gate.sh",
                 "agentId": "Gate", "env": {}, "consentGranted": true, "timeoutSecs": 120})),
+            ("execute_hook", json!({"workspacePath": "/ws", "hookPath": ".harness/hooks/gate.sh",
+                "agentId": "Gate", "env": {}, "consentGranted": true, "timeoutSecs": 120,
+                "expectedFingerprint": "c664d4fa5a1f7d70399717222711718d0d5cce35df2dc5f3eb3b0c04aecf7122"})),
             ("execute_command", json!({"workspacePath": "/ws", "command": "npm test", "consentGranted": true,
                 "commandId": "run-1-cmd-1", "timeoutSecs": 300})),
             ("cancel_command", json!({"commandId": "run-1-cmd-1"})),
@@ -392,6 +417,102 @@ mod tests {
     fn names_a_missing_argument() {
         let err = parse("read_workspace_file", json!({"workspacePath": "/ws"})).unwrap_err();
         assert!(err.contains("relativePath"), "{err}");
+    }
+
+    #[test]
+    fn hook_fingerprint_takes_a_workspace_a_path_and_an_optional_env() {
+        let parsed = |args: Value| match parse("hook_fingerprint", args) {
+            Ok(Call::HookFingerprint(a)) => (a.workspace_path, a.hook_path, a.env),
+            other => panic!("not a hook_fingerprint call: {other:?}"),
+        };
+        let base = json!({"workspacePath": "/ws", "hookPath": "gate.sh"});
+        assert_eq!(parsed(base.clone()), ("/ws".to_string(), "gate.sh".to_string(), None));
+        let mut with_null = base.clone();
+        with_null["env"] = Value::Null;
+        assert_eq!(parsed(with_null).2, None);
+        let mut with_env = base.clone();
+        with_env["env"] = json!({"BASH_ENV": "/tmp/x"});
+        assert_eq!(parsed(with_env).2, Some(HashMap::from([("BASH_ENV".to_string(), "/tmp/x".to_string())])));
+
+        let err = parse("hook_fingerprint", json!({"workspacePath": "/ws"})).unwrap_err();
+        assert!(err.contains("hookPath"), "{err}");
+    }
+
+    #[test]
+    fn a_hook_call_carries_the_fingerprint_it_expects() {
+        let expected = |fingerprint: Option<Value>| {
+            let mut args = json!({"workspacePath": "/ws", "hookPath": "gate.sh", "agentId": "Gate", "consentGranted": true});
+            if let Some(value) = fingerprint {
+                args["expectedFingerprint"] = value;
+            }
+            match parse("execute_hook", args) {
+                Ok(Call::Hook(a)) => a.expected_fingerprint,
+                other => panic!("not an execute_hook call: {other:?}"),
+            }
+        };
+        // Callers from before hook_fingerprint send none, and are still served.
+        assert_eq!(expected(None), None);
+        assert_eq!(expected(Some(Value::Null)), None);
+        assert_eq!(expected(Some(json!("c664d4fa"))), Some("c664d4fa".to_string()));
+    }
+
+    #[tokio::test]
+    async fn fingerprints_a_hook_script_and_finds_none_for_a_missing_one() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = ws.path().to_string_lossy().to_string();
+        std::fs::write(ws.path().join("gate.sh"), b"echo \xff\n").unwrap(); // not UTF-8
+        let args = |file: &str| json!({"workspacePath": path, "hookPath": file, "env": {"BASH_ENV": "/tmp/x"}});
+
+        let fingerprint = dispatch("hook_fingerprint".into(), args("gate.sh")).await.unwrap();
+        let hex = fingerprint.as_str().expect("a fingerprint is a string");
+        assert!(hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{hex}");
+        assert_eq!(dispatch("hook_fingerprint".into(), args("missing.sh")).await, Ok(Value::Null));
+        let outside = dispatch("hook_fingerprint".into(), args("../outside.sh")).await;
+        assert!(outside.as_ref().is_err_and(|e| e.starts_with("Path traversal detected")), "{outside:?}");
+    }
+
+    #[tokio::test]
+    async fn runs_a_hook_only_while_it_has_the_fingerprint_that_was_checked() {
+        let ws = tempfile::tempdir().unwrap();
+        let path = ws.path().to_string_lossy().to_string();
+        let (file, prints, writes_marker) = if cfg!(target_os = "windows") {
+            ("gate.bat", "@echo hook-ran", "@echo ran> marker.txt")
+        } else {
+            ("gate.sh", "echo hook-ran", "echo ran > marker.txt")
+        };
+        std::fs::write(ws.path().join(file), prints).unwrap();
+        let hook = |expected: Option<&Value>| {
+            let mut args = json!({"workspacePath": path, "hookPath": file, "agentId": "Gate", "env": {},
+                "consentGranted": true, "timeoutSecs": 30});
+            if let Some(fingerprint) = expected {
+                args["expectedFingerprint"] = fingerprint.clone();
+            }
+            args
+        };
+        let checked = dispatch("hook_fingerprint".into(), json!({"workspacePath": path, "hookPath": file, "env": {}}))
+            .await
+            .unwrap();
+
+        // The script is the one that was checked: it runs.
+        let ran = dispatch("execute_hook".into(), hook(Some(&checked))).await.unwrap();
+        assert_eq!(ran["exitCode"], 0, "{ran}");
+        assert!(ran["stdout"].as_str().unwrap().contains("hook-ran"), "{ran}");
+
+        // It changes after the check: the hook is refused, with the message the app gets, and
+        // does not run (it would have left the marker).
+        std::fs::write(ws.path().join(file), writes_marker).unwrap();
+        assert_eq!(
+            dispatch("execute_hook".into(), hook(Some(&checked))).await,
+            Err(format!(
+                "Hook execution error: Hook script {file} or its environment changed after it was checked; it was not run."
+            ))
+        );
+        assert!(!ws.path().join("marker.txt").exists(), "the changed script ran");
+
+        // A caller that sends no fingerprint gets what it always got: the script runs.
+        let unchecked = dispatch("execute_hook".into(), hook(None)).await.unwrap();
+        assert_eq!(unchecked["exitCode"], 0, "{unchecked}");
+        assert!(ws.path().join("marker.txt").exists());
     }
 
     #[tokio::test]

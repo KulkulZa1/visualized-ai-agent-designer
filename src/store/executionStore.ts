@@ -24,11 +24,16 @@ interface ExecutionState {
 }
 
 interface ExecutionActions {
-  /** Starts a run; the engine passes its run id. */
-  startRun: (workflowName: string, id?: string) => string;
+  /** Starts a run; the engine passes its run id. `workspacePath` is the folder the run works in
+   *  (the one the engine was given): the run's changes are relative to it, and Revert checks it. */
+  startRun: (workflowName: string, id?: string, workspacePath?: string) => string;
   updateAgent: (agentId: string, partial: Partial<AgentRun>) => void;
   finishRun: (status: "done" | "error" | "cancelled") => void;
-  /** Forgets a finished run's results; a run that is still going is kept. */
+  /** Clears a finished run's per-agent results and keeps the run: its workflow name, status,
+   *  timing, workspace folder and changed files (Changes, Revert). Another workflow's nodes
+   *  reuse the ids (agent-0, ...), so the results would show on them; the files the agents
+   *  wrote stay on disk, so their change log stays too. Late agent updates of a cleared run
+   *  are dropped. A run that is still going is kept as it is. */
   clearRun: () => void;
   recordFileChange: (path: string, before: string | null, after: string, agent: string) => void;
   forgetFileChange: (path: string) => void;
@@ -63,13 +68,14 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   ollamaModel: loadKey("harness_ollama_model") || DEFAULT_OLLAMA_MODEL,
   continueOnError: true,
 
-  startRun: (workflowName, id = `run-${Date.now()}`) => {
+  startRun: (workflowName, id = `run-${Date.now()}`, workspacePath) => {
     const run: WorkflowRun = {
       id,
       workflowName,
       startedAt: Date.now(),
       status: "running",
       agents: {},
+      ...(workspacePath === undefined ? {} : { workspacePath }),
     };
     set({ currentRun: run, isRunning: true });
     return id;
@@ -77,7 +83,9 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
 
   updateAgent: (agentId, partial) =>
     set((state) => {
-      if (!state.currentRun) return {};
+      // A cleared run stays cleared: an agent that was stopped and finishes late must not
+      // bring its result back onto another workflow's nodes.
+      if (!state.currentRun || state.currentRun.agentsCleared) return {};
       const prev = state.currentRun.agents[agentId] ?? {
         agentId,
         agentName: agentId,
@@ -102,7 +110,11 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
       isRunning: false,
     })),
 
-  clearRun: () => set((state) => (state.isRunning ? {} : { currentRun: null })),
+  clearRun: () => set((state) => {
+    const run = state.currentRun;
+    if (state.isRunning || !run || run.agentsCleared) return {};
+    return { currentRun: { ...run, agents: {}, agentsCleared: true } };
+  }),
 
   recordFileChange: (path, before, after, agent) =>
     set((state) => state.currentRun

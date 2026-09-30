@@ -1,16 +1,22 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useWorkflowStore } from "@/store/workflowStore";
 import { useWorkspaceStore, openWorkspaceFolder, refreshWorkspaceFiles } from "@/store/workspaceStore";
-import { filterFileTree } from "@/utils/fileTreeFilter";
+import { searchFileTree } from "@/utils/fileTreeFilter";
 import { useUIStore } from "@/store/uiStore";
 import { ROLE_META, STATUS_COLORS } from "@/utils/nodeColors";
 import type { FileTreeEntry } from "@/types/filesystem";
 import { useWorkflow } from "@/hooks/useWorkflow";
+import { useDebouncedValue } from "@/hooks/useDebouncedValue";
 import { ArtifactSidebar } from "./ArtifactSidebar";
 
+/** The file search waits for a pause in typing before it filters the tree. */
+const FILE_SEARCH_DELAY_MS = 150;
+/** A search shows at most this many files: thousands of rows take seconds to render. */
+const MAX_SEARCH_FILES = 500;
+
 // ── File tree entry ────────────────────────────────────────────────────────
-/** `forceOpen`: a search is on, so every folder shown holds a match and stays open. */
+/** `forceOpen`: a search is on, so every folder shown holds a shown match and stays open. */
 function FileEntry({ entry, depth = 0, forceOpen = false }: {
   entry: FileTreeEntry; depth?: number; forceOpen?: boolean;
 }) {
@@ -86,8 +92,14 @@ export function Sidebar() {
   const selectNode     = useUIStore((s) => s.selectNode);
   const [nodeSearch, setNodeSearch] = useState("");
   const [fileSearch, setFileSearch] = useState("");
-  const searchingFiles = fileSearch.trim() !== "";
-  const shownTree = filterFileTree(fileTree, fileSearch);
+  // The tree follows the query once typing pauses, and is filtered once per query and tree,
+  // not on every render.
+  const fileQuery = useDebouncedValue(fileSearch, FILE_SEARCH_DELAY_MS);
+  const searchingFiles = fileQuery.trim() !== "";
+  const { tree: shownTree, total: matchingFiles } = useMemo(
+    () => searchFileTree(fileTree, fileQuery, MAX_SEARCH_FILES),
+    [fileTree, fileQuery],
+  );
 
   const filteredNodes = nodeSearch.trim()
     ? nodes.filter((n) => n.data.name.toLowerCase().includes(nodeSearch.toLowerCase()))
@@ -137,6 +149,11 @@ export function Sidebar() {
         <span style={{ fontSize: 9, fontWeight: 600, color: "var(--hint)",
           textTransform: "uppercase", letterSpacing: "0.06em" }}>Workspace files</span>
       </div>
+      {!isLoading && searchingFiles && matchingFiles > MAX_SEARCH_FILES && (
+        <div role="status" style={{ padding: "2px 12px 4px", fontSize: 10, color: "var(--hint)" }}>
+          First {MAX_SEARCH_FILES.toLocaleString()} of {matchingFiles.toLocaleString()} matches
+        </div>
+      )}
 
       {/* File tree */}
       <div style={{ flex: 1, overflow: "auto", padding: "4px 0" }}>

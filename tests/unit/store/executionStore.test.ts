@@ -47,4 +47,120 @@ describe("executionStore — runs", () => {
     expect(id).toBe("run-42");
     expect(useExecutionStore.getState().currentRun).toMatchObject({ id: "run-42", workflowName: "W", status: "running" });
   });
+
+  // The run's changes are paths relative to this folder: Revert only writes there.
+  it("records the workspace folder the run works in, and none when it was not given one", () => {
+    useExecutionStore.getState().startRun("W", "run-1", "/ws-x");
+    expect(useExecutionStore.getState().currentRun?.workspacePath).toBe("/ws-x");
+
+    useExecutionStore.getState().startRun("W", "run-2");
+    expect(useExecutionStore.getState().currentRun).not.toHaveProperty("workspacePath");
+  });
+
+  it("keeps the workspace folder when the run finishes or is stopped", () => {
+    useExecutionStore.getState().startRun("W", "run-1", "/ws-x");
+    useExecutionStore.getState().finishRun("done");
+    expect(useExecutionStore.getState().currentRun?.workspacePath).toBe("/ws-x");
+
+    useExecutionStore.getState().startRun("W", "run-2", "/ws-x");
+    useExecutionStore.getState().cancelRun();
+    expect(useExecutionStore.getState().currentRun?.workspacePath).toBe("/ws-x");
+  });
+});
+
+describe("executionStore — clearRun", () => {
+  const startCoderRun = () => {
+    const store = useExecutionStore.getState();
+    store.startRun("Fix the sum bug", "run-1", "/ws-x");
+    store.updateAgent("agent-0", { agentName: "Coder", status: "done", output: "fixed sum.mjs" });
+    store.recordFileChange("src/sum.mjs", "a", "b", "Coder");
+  };
+  const currentRun = () => useExecutionStore.getState().currentRun;
+
+  it("drops the per-agent results of a finished run and keeps the run: its workflow, status, timing, workspace folder and changes", () => {
+    startCoderRun();
+    useExecutionStore.getState().finishRun("done");
+    const finished = currentRun()!;
+
+    useExecutionStore.getState().clearRun();
+
+    expect(currentRun()?.agents).toEqual({});
+    expect(currentRun()).toMatchObject({
+      id: "run-1", workflowName: "Fix the sum bug", status: "done", workspacePath: "/ws-x",
+      startedAt: finished.startedAt, finishedAt: finished.finishedAt,
+    });
+    expect(currentRun()?.changes).toEqual([
+      { path: "src/sum.mjs", before: "a", after: "b", agents: ["Coder"], edits: 1 },
+    ]);
+    expect(useExecutionStore.getState().isRunning).toBe(false);
+  });
+
+  it("keeps a stopped run's status and changes too", () => {
+    startCoderRun();
+    useExecutionStore.getState().cancelRun();
+
+    useExecutionStore.getState().clearRun();
+
+    expect(currentRun()).toMatchObject({ id: "run-1", status: "cancelled" });
+    expect(currentRun()?.agents).toEqual({});
+    expect(currentRun()?.changes).toHaveLength(1);
+  });
+
+  it("leaves a run that is still going as it is", () => {
+    startCoderRun();
+    const before = currentRun();
+
+    useExecutionStore.getState().clearRun();
+
+    expect(currentRun()).toBe(before);
+    expect(currentRun()?.agents["agent-0"]?.output).toBe("fixed sum.mjs");
+  });
+
+  it("does nothing without a run, and again on a run that is already cleared", () => {
+    useExecutionStore.getState().clearRun();
+    expect(currentRun()).toBeNull();
+
+    startCoderRun();
+    useExecutionStore.getState().finishRun("done");
+    useExecutionStore.getState().clearRun();
+    const cleared = currentRun();
+    useExecutionStore.getState().clearRun();
+
+    expect(currentRun()).toBe(cleared);
+  });
+
+  // Stop ends the run at once, but an agent still working finishes late and reports "stopped".
+  it("does not let a late update of the cleared run bring its results back", () => {
+    startCoderRun();
+    useExecutionStore.getState().cancelRun();
+    useExecutionStore.getState().clearRun();
+
+    useExecutionStore.getState().updateAgent("agent-0", { status: "stopped", output: "stale" });
+    useExecutionStore.getState().updateAgent("agent-1", { status: "stopped" });
+
+    expect(currentRun()?.agents).toEqual({});
+  });
+
+  it("still records a file that a stopped agent writes after the run was cleared: it is on disk and must stay revertible", () => {
+    startCoderRun();
+    useExecutionStore.getState().cancelRun();
+    useExecutionStore.getState().clearRun();
+
+    useExecutionStore.getState().recordFileChange("src/late.mjs", null, "x", "Coder");
+
+    expect(currentRun()?.changes?.map((c) => c.path)).toEqual(["src/sum.mjs", "src/late.mjs"]);
+  });
+
+  it("gives the next run a clean start: its agents update again", () => {
+    startCoderRun();
+    useExecutionStore.getState().finishRun("done");
+    useExecutionStore.getState().clearRun();
+
+    useExecutionStore.getState().startRun("Next", "run-2");
+    useExecutionStore.getState().updateAgent("agent-0", { status: "running" });
+
+    expect(currentRun()).toMatchObject({ id: "run-2", workflowName: "Next" });
+    expect(currentRun()?.agentsCleared).toBeUndefined();
+    expect(currentRun()?.agents["agent-0"]?.status).toBe("running");
+  });
 });

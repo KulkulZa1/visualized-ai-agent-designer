@@ -154,7 +154,9 @@ export function RunPanel({ onClose }: RunPanelProps) {
       <div style={{ flex: 1, overflowY: "auto", padding: "8px 0" }}>
         {agents.length === 0 && (
           <div style={{ padding: "20px 14px", color: "var(--hint)", textAlign: "center" }}>
-            No agents have run yet.
+            {currentRun?.agentsCleared
+              ? "Agent results were cleared when another workflow was opened."
+              : "No agents have run yet."}
           </div>
         )}
         {agents.map((agent) => (

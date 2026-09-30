@@ -55,4 +55,10 @@ export interface WorkflowRun {
   agents: Record<string, AgentRun>;
   /** Files changed by this run's agents (Changes dialog, revert). */
   changes?: FileChange[];
+  /** The workspace folder the run worked in (the one the engine was given). `changes` are paths
+   *  relative to it, so they can only be reverted there. Unset when no workspace was open. */
+  workspacePath?: string;
+  /** True once `agents` was cleared because another workflow was opened (`clearRun`).
+   *  The run itself and its `changes` are kept; its late agent updates are dropped. */
+  agentsCleared?: boolean;
 }

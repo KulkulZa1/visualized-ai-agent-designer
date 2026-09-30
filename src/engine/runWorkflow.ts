@@ -23,7 +23,7 @@ import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import {
-  definitionHash, hookFingerprint, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, type RunRecord,
+  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, UNVERIFIABLE_HOOK, type RunRecord,
 } from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
@@ -230,11 +230,15 @@ async function runHealthChecks(
   for (const h of results) {
     // A fallback that is down is a warning: the run does not need it.
     const fallbackDown = !h.ok && h.provider === ollamaProvider && ollamaFallbackFor.length > 0;
+    // A server that answers but lacks the model says "… not found" and how to pull it.
+    const why = h.pull_command && h.message.includes("not found")
+      ? `model ${ollamaModel} is not pulled at ${ollamaUrl} (run: ${h.pull_command})`
+      : `not available at ${ollamaUrl}`;
     addEntry({
       id: `health-${h.provider}-${Date.now()}`, timestamp: new Date().toISOString(),
       action: "provider_check", agentId: "system",
       details: fallbackDown
-        ? `⚠ ${h.provider} — not available at ${ollamaUrl}, so a billing error from ` +
+        ? `⚠ ${h.provider} — ${why}, so a billing error from ` +
           `${ollamaFallbackFor.join(" or ")} cannot fall back to local Ollama`
         : `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`,
       success: h.ok || fallbackDown, warning: fallbackDown,
@@ -301,18 +305,6 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // A Hook node's script path, or undefined for any other node (or with no workspace open).
   const hookScriptPath = (n: (typeof nodes)[number]): string | undefined =>
     workspacePath && n.data.role === AgentRole.Hook ? n.data.preHook?.path || undefined : undefined;
-  // The same for a hook that runs without asking (no requireConsent).
-  const unattendedHookPath = (n: (typeof nodes)[number]): string | undefined =>
-    n.data.preHook?.requireConsent ? undefined : hookScriptPath(n);
-  // Those hooks are checked against a SHA-256 of their script (below). Where Web Crypto is
-  // missing that cannot be done, and the check is not weakened to fit: the run does not start.
-  if (nodes.some((n) => unattendedHookPath(n)) && !globalThis.crypto?.subtle) {
-    return {
-      started: false,
-      error: "Web Crypto is not available here (harness run needs Node 20 or later), " +
-        "and hooks that run without asking need it to check their scripts.",
-    };
-  }
 
   const requiredProviders = new Set<RuntimeProvider>();
   for (const node of nodes) {
@@ -469,8 +461,11 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // a BASH_ENV or PATH in it changes what the script runs, and an agent can edit the workflow
   // file). An agent's file tools leave a change log, but a shell command it ran (bash), a link
   // or another spelling of the path change the file without one. So every hook node's script
-  // and env are fingerprinted (SHA-256, hookFingerprint; the text is not kept) when the run
-  // first starts, and an unasked hook's again just before it runs: any difference refuses it.
+  // and env are fingerprinted when the run first starts, and an unasked hook's again just
+  // before it runs: any difference refuses it. The fingerprint is harness-core's
+  // (hook_fingerprint: a SHA-256 of the script's bytes and of the env, so a script that is not
+  // UTF-8 counts too; the text is not kept), and execute_hook is given the one that was checked
+  // and verifies it again itself right before it starts the script.
   // The record's hookScripts keeps the fingerprints and a resume carries them on as they
   // are, so a change made during an earlier attempt never becomes a later attempt's
   // baseline. Consent-required hooks have one too: editing the workflow file to drop the
@@ -480,37 +475,65 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // since) is refused, as is one whose script or env is not the one that was fingerprinted;
   // the way on is the Hooks tab or a new run. The record itself is trusted: the agents' file
   // tools cannot write it (isProtectedPath), but a shell command can.
-  // null: the script cannot be read (its env does not matter then). A failed read never fails the run.
-  const hookDigest = async (ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
-    let text: string;
+  // A baseline is a fingerprint; null (there was no such script); or UNVERIFIABLE_HOOK, when
+  // harness-core could not say (the script cannot be read, or it is older than the app and does
+  // not have hook_fingerprint), which nothing matches. A failed fingerprint never fails the run.
+  // The record keeps only that marker. The text of the error behind it is kept in this attempt
+  // alone (whyUnverifiable), for the refusal: a resume that carries the marker on has none.
+  /** The text of harness-core's error when it could not fingerprint a hook, by node key: the last
+   *  call's, so a call that then answers clears it. */
+  const whyUnverifiable = new Map<string, string>();
+  /** What harness-core says the fingerprint of a hook's script and env is: a string; null when
+   *  there is no such script; UNVERIFIABLE_HOOK when it cannot say (it failed, or did not answer
+   *  with a fingerprint or null). */
+  const fingerprintHook = async (key: string, ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
+    whyUnverifiable.delete(key);
     try {
-      text = await readWorkspaceFile(ws, path);
-    } catch {
-      return null;
+      const fingerprint = await invoke<unknown>("hook_fingerprint", { workspacePath: ws, hookPath: path, env });
+      return fingerprint === null || (typeof fingerprint === "string" && fingerprint !== "") ? fingerprint : UNVERIFIABLE_HOOK;
+    } catch (e) {
+      whyUnverifiable.set(key, String(e));
+      return UNVERIFIABLE_HOOK;
     }
-    return hookFingerprint(text, env);
   };
-  // By node key. Without Web Crypto (the check above lets a run start only when no hook runs
-  // unasked) there is nothing to take.
+  // By node key.
   const savedScripts = savedHookScripts(input.resume);
   const hookScripts: Record<string, string | null> = { ...savedScripts };
-  if (savedScripts === undefined && workspacePath && globalThis.crypto?.subtle) {
+  if (savedScripts === undefined && workspacePath) {
     await Promise.all(nodes.map(async (n, i) => {
       const path = hookScriptPath(n);
-      if (path) hookScripts[savedNodeId(i)] = await hookDigest(workspacePath, path, n.data.preHook?.env);
+      const key = savedNodeId(i);
+      if (path) hookScripts[key] = await fingerprintHook(key, workspacePath, path, n.data.preHook?.env);
     }));
   }
-  /** Why a hook that runs without asking must not run now, or undefined when it may. */
-  const hookScriptRefusal = async (nodeId: string, ws: string, hook: HookConfig): Promise<string | undefined> => {
+  /** What a hook that runs without asking may do now: it is refused, with the reason (the node
+   *  fails with it), or it runs, and execute_hook is given this fingerprint to verify. */
+  type HookCheck = { refusal: string } | { fingerprint: string };
+  const checkUnattendedHook = async (nodeId: string, ws: string, hook: HookConfig): Promise<HookCheck> => {
     const key = savedNodeId(nodes.findIndex((n) => n.id === nodeId));
     if (!Object.prototype.hasOwnProperty.call(hookScripts, key)) {
-      return `Hook script ${hook.path} has no baseline from this run's first attempt, so it is not run unasked; ` +
-        "run it from the Hooks tab or start a new run.";
+      return { refusal: `Hook script ${hook.path} has no baseline from this run's first attempt, so it is not run unasked; ` +
+        "run it from the Hooks tab or start a new run." };
     }
-    // A script that was not there (null) and is now, or was and no longer is, counts as changed, and so does its env.
-    if (hookScripts[key] === await hookDigest(ws, hook.path, hook.env)) return undefined;
-    return `Hook script ${hook.path} or its environment was changed during this run; ` +
-      "review it, then run it from the Hooks tab or start a new run.";
+    // Says why in harness-core's own words when it gave any (a path outside the workspace, a folder,
+    // a permission error); a baseline saved by an earlier attempt has none.
+    const unverifiable = () => ({ refusal: `Hook script ${hook.path} could not be checked (` +
+      (whyUnverifiable.get(key) || "the script could not be read, or harness-core is older than the app") +
+      "), so it is not run unasked; run it from the Hooks tab or start a new run." });
+    const baseline = hookScripts[key];
+    if (baseline === UNVERIFIABLE_HOOK) return unverifiable();
+    const now = await fingerprintHook(key, ws, hook.path, hook.env);
+    if (now === UNVERIFIABLE_HOOK) return unverifiable();
+    if (baseline === null && now === null) {
+      // Not there as the run started, and still not: there is nothing to run, so nothing is started.
+      return { refusal: `Hook script ${hook.path} was not found in the workspace, so it was not run.` };
+    }
+    // A script that appeared (baseline null) or went (now null) counts as changed, and so does its env.
+    if (baseline === null || now !== baseline) {
+      return { refusal: `Hook script ${hook.path} or its environment was changed during this run; ` +
+        "review it, then run it from the Hooks tab or start a new run." };
+    }
+    return { fingerprint: baseline };
   };
 
   const buildRecord = (): RunRecord => ({
@@ -614,33 +637,35 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
       };
       if (data.preHook?.path) {
-        // Why this hook is not run, or undefined when it may run.
-        let refusal: string | undefined;
+        // Why this hook is not run, or the fingerprint it may run under: nothing runs without one.
+        let check: HookCheck;
         if (!workspacePath) {
           // Hooks run only inside the open workspace: a loaded or pasted workflow
           // must not choose the folder code executes in (meta.projectRoot).
-          refusal = "Open a workspace to run hooks.";
+          check = { refusal: "Open a workspace to run hooks." };
         } else if (data.preHook.requireConsent) {
-          refusal = "Hook requires explicit manual consent. Open the Hooks tab and run it there.";
+          check = { refusal: "Hook requires explicit manual consent. Open the Hooks tab and run it there." };
         } else if (findChange(run.changes ?? [], data.preHook.path, workspacePath)) {
           // Without consent a hook runs as the script that was set up. One an agent wrote
           // earlier in this run (the change log, matched by path; a resumed run's log
           // includes its earlier attempts) is not that script.
-          refusal = `Hook script ${data.preHook.path} was changed by an agent during this run; ` +
-            "review it, then run it from the Hooks tab or start a new run.";
+          check = {
+            refusal: `Hook script ${data.preHook.path} was changed by an agent during this run; ` +
+              "review it, then run it from the Hooks tab or start a new run.",
+          };
         } else {
           // What the change log cannot see: another spelling of the path, a link, a shell command.
-          refusal = await hookScriptRefusal(nodeId, workspacePath, data.preHook);
+          check = await checkUnattendedHook(nodeId, workspacePath, data.preHook);
           if (isRunCancelled()) {
-            // Stopped while the script was being read: the hook has not started, whatever the script says.
+            // Stopped while the script was being checked: the hook has not started, whatever the script says.
             updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
             updateNodeData(nodeId, { status: "stopped" });
             return;
           }
         }
-        if (refusal) {
-          failHook(refusal);
-        } else if (workspacePath) { // always so here: with none open, refusal says so above
+        if ("refusal" in check) {
+          failHook(check.refusal);
+        } else if (workspacePath) { // always so here: with none open, the check refuses above
           try {
             // Rust enforces the hook's timeout; this race only stops waiting on Stop.
             const hookTimeout = Math.min(data.timeoutSeconds || 30, 3600);
@@ -649,6 +674,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
                 workspacePath, hookPath: data.preHook.path, agentId: nodeId,
                 env: data.preHook.env ?? {}, consentGranted: true,
                 timeoutSecs: data.timeoutSeconds || undefined,
+                // harness-core starts the hook only if its script and env still have this fingerprint.
+                expectedFingerprint: check.fingerprint,
               }),
               Date.now() + (hookTimeout + 5) * 1000,
               `Hook ${data.preHook.path} did not finish in ${hookTimeout}s`,
@@ -679,8 +706,9 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
               updateNodeData(nodeId, { status: "stopped" });
               return;
             }
-            hookFailed = true;
-            updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
+            // A hook that did not start (harness-core refused it: the script changed after the check)
+            // or did not finish: audited like a refusal here, and the node fails with what it said.
+            failHook(String(e));
           }
         }
       } else {
