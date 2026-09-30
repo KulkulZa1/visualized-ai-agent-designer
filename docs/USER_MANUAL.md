@@ -81,28 +81,33 @@ set up in **Settings** (gear icon). Save with **Save all & close**.
 
 | Field | Section | What it does |
 |---|---|---|
-| **Ollama context window (tokens)** | Ollama — Local or Cloud | The window the app asks Ollama for (`num_ctx`). Default 16384. `0` sends none, so the server's own default stands. Not sent to ollama.com. |
+| **Ollama context window (tokens)** | Ollama — Local or Cloud | The window the app asks Ollama for (`num_ctx`). Default 16384. It overrides the server's default (`OLLAMA_CONTEXT_LENGTH`) and a model's own `num_ctx` (Modelfile); `0` sends none, so those stand. Not sent to ollama.com. |
 | **Model name** | Custom Endpoint (OpenAI-compatible) | The model your server serves. There is no default. Blank sends each agent's own model. |
 | **Model call timeout (seconds)** | Execution Behavior | How long one model call may take in total: 30 to 86400, default 600. |
 
-- **Context window.** Ollama cuts a prompt that does not fit its window, without a
-  word. The app's value overrides the server's own `OLLAMA_CONTEXT_LENGTH`: if the
-  server sets one, use `0` or the same value. A larger window needs more memory on the
-  Ollama server: lower it if the model no longer fits. Ollama reloads a model when a
-  request asks for a different window, so other tools on the same server with another
-  window cause reloads. A number that is not valid turns red and **Save all & close**
-  stays off.
+- **Context window.** Ollama may cut off a prompt that does not fit its window,
+  without saying so. The app's value overrides the server's own
+  `OLLAMA_CONTEXT_LENGTH` and a model's own `num_ctx` (its Modelfile): if either sets
+  one, use `0` or the same value. Otherwise a model built with a larger window, say
+  32768, is lowered to the app's window (16384 by default). A larger window needs more
+  memory on the Ollama server: lower it if the model no longer fits. Ollama reloads a
+  model when a request asks for a different window, so other tools on the same server
+  with another window cause reloads. A number that is not valid turns red and
+  **Save all & close** stays off.
 - **Context window warning.** When a node's estimated prompt (about 4 characters per
-  token) plus its `maxTokens` does not fit the window, the audit strip shows a
-  warning (the `warn` chip), once per node. The run goes on. The estimate is a
-  minimum: it leaves out the tool definitions and the steps after the first.
+  token) plus its `maxTokens`, counted as at most half the window, is more than the
+  window, the audit strip shows a warning (the `warn` chip), once per node. It reads
+  "⚠ `<name>`: its prompt is about N tokens and it may reply with up to M tokens, but
+  Ollama's context window is W tokens, so Ollama may cut off the start of the prompt.
+  Raise the context window …". A generous `maxTokens` alone does not warn: at the
+  default window, 16384 counts as 8192. The run goes on. The estimate is a minimum: it
+  leaves out the tool definitions and the steps after the first.
 - **Test connection** (Custom Endpoint) with a blank Model name sends nothing and
   says: "No model name is set, so there is nothing to test. Enter the model name your
   server serves, or click ↻ Models to list the models it has." **↻ Models** lists
-  what the server has, under **Available models**: click a name to copy it, and
-  paste it into **Model name**. A
-  `gpt-4o-mini` that Settings saved earlier, when it was the default, stays until you
-  clear the field.
+  what the server has, under **Available models**: click a name to copy it, and paste
+  it into **Model name**. A `gpt-4o-mini` that Settings saved earlier, when it was the
+  default, stays until you clear the field.
 - **Run dialog.** **Provider Override** has a **Custom** chip beside OpenAI,
   Anthropic, Ollama and Ollama Cloud. It runs that one run on the Custom endpoint
   from Settings. **Use Settings** keeps the provider set in Settings.

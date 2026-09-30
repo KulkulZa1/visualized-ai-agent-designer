@@ -27,7 +27,7 @@ Harness Studio works air-gapped without code changes to the runtime. The key fac
   key is optional — when blank, no `Authorization` header is sent.
 - **Ollama on this machine or the network** works too. Every request to it asks for
   a context window (`num_ctx`, 16384 tokens by default), because Ollama's own
-  default is small and it cuts a longer prompt without a word. See §5.
+  default is small and it may cut off a longer prompt without saying so. See §5.
 
 There are two ways to use Harness Studio on an air-gapped workstation. Each needs
 the internet once, on a connected machine:
@@ -141,14 +141,15 @@ hosted one. Four things matter: Ollama's context window, the model's name, how
 
 ### Ollama's context window
 
-Ollama cuts a prompt that does not fit its context window, and says nothing. Its own
-default window is small, a few thousand tokens, and an agent's prompt with its tool
-results is longer. So every request to Ollama (`/api/chat`: the text-protocol call, a
-native tool-calling turn and the app's streaming turn) carries `options.num_ctx`.
+Ollama may cut off a prompt that does not fit its context window, without saying so.
+Its own default window is small, a few thousand tokens, and an agent's prompt with its
+tool results is longer. So every request to Ollama (`/api/chat`: the text-protocol
+call, a native tool-calling turn and the app's streaming turn) carries
+`options.num_ctx`.
 
 - **Default:** 16384 tokens. There is one value for the whole run.
-- **`0`** sends none, so the server's own default stands (for example its
-  `OLLAMA_CONTEXT_LENGTH`).
+- **`0`** sends none, so the server's own default (for example its
+  `OLLAMA_CONTEXT_LENGTH`) and the model's own `num_ctx` (its Modelfile) stand.
 - **Never sent to Ollama's hosted service** (ollama.com and its subdomains), which
   sizes its own context. A server on this machine or the LAN always gets it, whatever
   its URL looks like.
@@ -158,14 +159,25 @@ native tool-calling turn and the app's streaming turn) carries `options.num_ctx`
 - **In `harness run`:** `--num-ctx <n>` or `HARNESS_OLLAMA_NUM_CTX`. The flag wins,
   and a blank variable counts as unset. A value that is not a whole number from 0 to
   4294967295 is exit 2, and the message names the flag or the variable.
-- **In the run record:** `provider.ollamaNumCtx` in `.harness/runs/<id>/run.json`. A
-  resume does not compare it.
+- **In the run record:** `provider.ollamaNumCtx` in `.harness/runs/<id>/run.json`. It
+  is the setting, not what went over the wire: it is written for every run, also a
+  run on another provider (an OpenAI-compatible run given `--num-ctx 64` records 64)
+  and a run on ollama.com (which gets none). A resumed run records the value it was
+  resumed with. A resume does not compare it.
+
+After updating, rebuild `harness-core` (`npm run build:core`). That includes the
+prebuilt one in an offline bundle made before this change. A `harness-core` built
+before this change ignores the context window and the model call timeout without
+saying so, while the run record still shows them.
 
 What the server's admin should know:
 
-- **The request's window overrides the server's own.** If the server is set up with
-  its own context length (`OLLAMA_CONTEXT_LENGTH`), set the app's window to 0, or to
-  the same value.
+- **The request's window overrides the server's own, and the model's own.** If the
+  server is set up with its own context length (`OLLAMA_CONTEXT_LENGTH`), or a model
+  was built with a larger window (`PARAMETER num_ctx` in its Modelfile), the request's
+  window replaces it: a model built with 32768 is lowered to 16384 (the default)
+  unless the app's window is 0 or 32768. Set the app's window to 0, or to the same
+  value, if the server or the model should decide.
 - **A larger window needs more memory** on the Ollama server (the KV cache). If the
   model no longer fits, lower the window.
 - **Ollama reloads a model** when a request asks for a different window than the one
@@ -189,19 +201,23 @@ node cli/harness.mjs run examples/purchasing-decision.harness.yaml --task "Pick 
   --provider ollama --base-url http://192.168.1.20:11434 --model qwen2.5-coder:7b --num-ctx 32768
 ```
 
-**The warning.** When a node's estimated prompt plus its `maxTokens` is more than the
-window, the run warns, once for that node. The prompt is estimated at about 4
-characters per token, over the system message and the user message. `maxTokens` is
-the agent's own (2048 if it is 0). For example:
+**The warning.** When a node's prompt leaves no room for its reply in the window, the
+run warns, once for that node. The prompt (P) is estimated at about 4 characters per
+token, over the system message and the user message. The reply counts as the agent's
+`maxTokens` (M; 2048 if it is 0), but at most half the window (W, rounded down). So it
+warns when P + min(M, W / 2) > W. A generous `maxTokens` alone does not warn: at the
+default window an agent with `maxTokens` 16384 counts its reply as 8192, so it warns
+when its prompt is more than 8192 tokens. For example, P 9,000, M 16,384 and W 16,384
+warn:
 
 ```
-warning: ⚠ Coder: about 18,048 tokens (a prompt of ~16,000 plus up to 2,048 for the reply) do not fit Ollama's context window of 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+warning: Coder: its prompt is about 9,000 tokens and it may reply with up to 16,384 tokens, but Ollama's context window is 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
 ```
 
 - It is an audit warning (action `context_window`) and never fails the run. The app
-  shows it in the audit strip (the `warn` chip).
-- `harness run` prints it on stderr as `warning: …`. With `--json` it is an `audit`
-  event with `warning: true`.
+  shows it in the audit strip (the `warn` chip), with a leading ⚠.
+- `harness run` prints it on stderr as `warning: …`, without the ⚠. With `--json` it
+  is an `audit` event with `warning: true`, and its text keeps the ⚠.
 - The estimate is a minimum. It covers the first prompt only, and leaves out the tool
   definitions and the steps after it.
 - There is no warning when the window is 0, for ollama.com, or for another provider.
@@ -276,30 +292,63 @@ probes.
 A call that runs out of it fails with: "The model did not answer within the request
 timeout. On slow hardware, raise the model call timeout (Settings in the app,
 --request-timeout in harness run)." It is the message for calls to Ollama and to
-OpenAI-style endpoints (OpenAI and the Custom endpoint), and for streamed replies. A
-refused connection keeps its own message (Ollama: "… is not reachable at `<url>`";
-the Custom endpoint: "Network error: …").
+OpenAI-style endpoints (OpenAI and the Custom endpoint), and for streamed replies, and
+it appears when the server has not started answering within the timeout. A server that
+starts a non-streamed reply and then stalls gives "Failed to parse Ollama response:
+error decoding response body" instead (or "Failed to parse OpenAI response: …"); real
+servers normally send nothing until the reply is complete. A non-streamed Anthropic
+call keeps "Anthropic network error: …". A refused connection keeps its own message
+(Ollama: "… is not reachable at `<url>`"; the Custom endpoint: "Network error: …").
 
 **The agent's own Timeout is a second limit, and it comes first by default.** It
 bounds the agent's whole run: all its model calls and tools (time spent waiting for
 you to approve a command does not count). The agent stops waiting when it runs out,
 and fails with "`<name>` timed out after `<N>`s", even if a model call is still
-going. The call itself cannot be cancelled, and its late answer is thrown away. So a
-call cannot outlast its agent. With the defaults (600 s for a call, 300 s for an
-agent made in the app) the agent's limit ends a slow call before the call's own
-does. On slow hardware, raise both: the model call timeout above your slowest single
-reply, and each agent's Timeout above what the whole agent needs. The workflow-level
-`timeoutSeconds` is saved but not applied.
+going. The call itself cannot be cancelled: a local server keeps working on it until
+it answers or the model call timeout ends it, so later calls to the same server may
+queue behind it, and its late answer is thrown away. So a call cannot outlast its
+agent. With the defaults (600 s for a call, 300 s for an agent made in the app) the
+agent's limit ends a slow call before the call's own does. On slow hardware, raise
+both: the model call timeout above your slowest single reply, and each agent's
+Timeout above what the whole agent needs. The workflow-level `timeoutSeconds` is
+saved but not applied.
 
 ### What was checked
 
-2026-09-30, on Linux: unit tests against scripted fake servers. The Rust tests use a
-mock Ollama server and a mock OpenAI-compatible server (the request bodies, the probe
-limits, the timeout message); the `harness run` tests use a fake `harness-core`;
-component tests cover Settings and the Run dialog. **Not run:** a real model server
-(Ollama, llama.cpp, vLLM or LM Studio), Windows, macOS, and the Tauri window. The
-notes about Ollama's own behavior above (its small default window,
-`OLLAMA_CONTEXT_LENGTH`, memory use, reloads) were not tested here.
+2026-09-30, on Linux, in two ways.
+
+**Unit tests** against scripted fake servers: a mock Ollama server and a mock
+OpenAI-compatible server in the Rust tests (the request bodies, the probe limits, the
+timeout message), a fake `harness-core` in the `harness run` tests, and component
+tests of Settings and the Run dialog.
+
+**End to end**, by hand (not part of the test suite or CI): the real `harness run`
+bundle and a real debug `harness-core`, both built from commit 76e60c7 in a separate
+checkout, against fake Ollama and OpenAI-compatible servers written in Node that
+recorded every request, inside a network namespace with only loopback
+(`unshare -rn`):
+
+- Ollama got `num_ctx` 16384 by default, and the `--num-ctx` and
+  `HARNESS_OLLAMA_NUM_CTX` values when set (the flag won; `0` left it out).
+  `ollama.com` and `api.ollama.com` (mapped to loopback by a private hosts file) got
+  none; look-alike hosts (`notollama.com`, `ollama.com.example.net`) did. Invalid
+  values gave exit 2, with no request sent.
+- The run record held the window as given. A Custom endpoint run from the
+  environment alone exited 0 with the model and key it was given, and `gpt-4o-mini`
+  was sent nowhere (master sent it in the probe).
+- A server that took the request and never answered failed the agent at
+  `--request-timeout` (30 s: 30.4 to 30.5 s) and the preflight probe at 120.3 s. A
+  probe that answered after 15 s passed (master failed it at 10.3 s).
+- The warning was checked on 76e60c7, before its rule and text changed: it appeared
+  on stderr and in `--json`, and not at the default window, at 0 or with the Custom
+  endpoint.
+
+**Not run:** a real model server (Ollama, llama.cpp, vLLM or LM Studio); the streaming
+turn end to end (`harness run` never streams); the Tauri window and its `invoke`
+arguments; Windows; macOS; the hosted probes (OpenAI, Anthropic); real HTTPS to
+ollama.com; release builds. The notes about Ollama's own behavior above (its small
+default window, `OLLAMA_CONTEXT_LENGTH`, a model's own `num_ctx`, memory use, reloads)
+were not tested.
 
 ---
 
@@ -574,11 +623,11 @@ distro; a machine with no Rust toolchain.
 | Symptom | Cause / fix |
 |---|---|
 | Installer asks for internet / "downloading WebView2" | Built without `-Offline`. Rebuild with `-Offline`, or pre-install the WebView2 Evergreen runtime on the target. |
-| **Test connection** fails with "Cannot reach …" | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. It can also be a server that is still loading the model: the test gives up after 120 s in total, and connecting fails after 10 s. |
+| **Test connection**, or a run's preflight, fails with "Cannot reach …" (Custom) or "… is not reachable at `<url>`" (Ollama) | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. Connecting to a host that does not answer fails after 10 s. A probe that runs out of its 120 s fails with the same wording, as if the server were down (Custom: "Cannot reach `<url>`: error sending request"; Ollama: "… is not reachable at `<url>`", with an `ollama pull` hint). So if it fails after about two minutes, the server took the connection but did not answer: it may still be loading a model, or be stuck. |
 | **Test connection** says "No model name is set …" | The **Model name** field is blank, so nothing was sent. Enter the name your server serves, or click **↻ Models** and copy one (§5). |
 | "Authentication failed — check your API key" | Server requires a key but the field is blank or wrong. |
 | The run does not start, with "Custom endpoint URL is not configured." | Provider mode is **Custom** but no Base URL is saved. Enter it in Settings → Custom. In `harness run`, pass `--base-url` or set `HARNESS_CUSTOM_BASE_URL` (exit 3 when only `LLM_PROVIDER=openai-compatible` is set). |
 | Run says no model / HTTP 404 on `/chat/completions` | Model name doesn't match what the server serves, or the Base URL is missing a required suffix like `/v1`. |
 | An agent fails with "The model did not answer within the request timeout …" | One model call ran past the model call timeout (600 s by default). Raise it in Settings → Execution Behavior, or with `--request-timeout`, and raise the agent's **Timeout (s)** too (§5). |
 | An agent fails with "`<name>` timed out after `<N>`s" | The agent's own Timeout (300 s for an agent made in the app) ran out. It bounds all the agent's model calls and tools: raise **Timeout (s)** in its Role tab, or `timeoutSeconds` in the workflow file (§5). |
-| A warning says a prompt does not fit "Ollama's context window", or an Ollama agent acts as if it had not seen the start of its prompt | Raise the context window (Settings → Ollama context window; `--num-ctx`), or shorten what the agent is given. A larger window needs more memory on the Ollama server (§5). |
+| A warning says "its prompt is about … tokens … but Ollama's context window is … tokens", or an Ollama agent seems to have missed the start of its prompt | Raise the context window (Settings → Ollama context window; `--num-ctx`), shorten what the agent is given, or lower its `maxTokens`. A larger window needs more memory on the Ollama server (§5). |

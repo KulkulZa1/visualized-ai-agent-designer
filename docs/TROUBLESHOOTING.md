@@ -61,7 +61,8 @@ switch to Ollama local.
 Full message: "The model did not answer within the request timeout. On slow hardware,
 raise the model call timeout (Settings in the app, --request-timeout in harness
 run)." One model call to Ollama or an OpenAI-compatible server ran past the model
-call timeout (600 s by default). It used to read like an unreachable server.
+call timeout (600 s by default): the server had not started answering. It used to
+read like an unreachable server.
 
 - Raise it: Settings → Execution Behavior → **Model call timeout (seconds)** (30 to
   86400), then **Save all & close**. In `harness run`: `--request-timeout <secs>` or
@@ -70,7 +71,13 @@ call timeout (600 s by default). It used to read like an unreachable server.
   workflow file). It bounds the agent's whole run, all its model calls and tools, and
   the agent gives up at it, with "`<name>` timed out after `<N>`s", even if a call is
   still going. A new agent has 300 s, which is shorter than the default 600 s call
-  timeout.
+  timeout. The agent's giving up does not cancel the call: a local server keeps
+  working on it until it answers or the model call timeout ends it, so later calls to
+  the same server may queue behind it.
+- A server that starts a non-streamed reply and then stalls gives "Failed to parse
+  Ollama response: error decoding response body" instead (or "Failed to parse OpenAI
+  response: …"). Real servers normally send nothing until the reply is complete. A
+  non-streamed Anthropic call keeps "Anthropic network error: …".
 - A refused connection keeps its own message (Ollama: "… is not reachable at
   `<url>`"; the Custom endpoint: "Network error: …"). Connecting fails after 10 s,
   whatever the timeout.
@@ -79,27 +86,41 @@ call timeout (600 s by default). It used to read like an unreachable server.
   its model), 10 s for OpenAI and Anthropic. The model call timeout does not change
   them.
 
-### Ollama cuts off a prompt, or the run warns about its context window
+### Test connection or a run fails after about two minutes
 
-Ollama cuts a prompt that does not fit its context window, without a word, so an
-agent can act as if it had not seen the start of its prompt. The app asks for 16384
-tokens by default, and the run warns when a node's estimated prompt (about 4
-characters per token) plus its `maxTokens` does not fit:
+A probe that runs out of its 120 s fails with the wording of a server that is down:
+Ollama "… is not reachable at `<url>`" (with an `ollama pull` hint), the Custom
+endpoint "Cannot reach `<url>`: error sending request". If **Test connection** or a
+run fails after about two minutes with one of these, the server took the connection
+but did not answer: it may still be loading a model, or be stuck. Wait, and try again.
+Connecting to a host that does not answer fails after 10 s instead.
+
+### Ollama may cut off a prompt, or the run warns about its context window
+
+Ollama may cut off a prompt that does not fit its context window, without saying so,
+and an agent may then act as if it had not seen the start of its prompt. The app asks
+for 16384 tokens by default, and the run warns when a node's estimated prompt (about 4
+characters per token) plus its `maxTokens`, counted as at most half the window, does
+not fit:
 
 ```
-⚠ Coder: about 18,048 tokens (a prompt of ~16,000 plus up to 2,048 for the reply) do not fit Ollama's context window of 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+⚠ Coder: its prompt is about 9,000 tokens and it may reply with up to 16,384 tokens, but Ollama's context window is 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
 ```
 
-It is in the audit strip (the `warn` chip), and `harness run` prints it on stderr as
-`warning: …`. It never stops the run.
+It is in the audit strip (the `warn` chip) as shown, and `harness run` prints it on
+stderr as `warning: …`, without the ⚠. It never stops the run. A generous `maxTokens`
+alone does not warn: at the default window an agent with `maxTokens` 16384 counts its
+reply as 8192, so it warns when its prompt is more than 8192 tokens.
 
 - Raise Settings → Ollama — Local or Cloud → **Ollama context window (tokens)**, or
   `harness run --num-ctx <n>`. A larger window needs more memory (KV cache) on the
   Ollama server: lower it if the model no longer fits.
 - Or shorten what the agent is given, or lower its `maxTokens`.
-- The app's window overrides the server's `OLLAMA_CONTEXT_LENGTH`. If the server sets
-  its own, set the window to `0` (sends none, so the server's stands) or to the same
-  value. With `0` there is no warning.
+- The app's window overrides the server's `OLLAMA_CONTEXT_LENGTH` and a model's own
+  `num_ctx` (its Modelfile). If the server or the model sets one, set the window to
+  `0` (sends none, so theirs stands) or to the same value. Otherwise a model built
+  with a larger window, say 32768, is lowered to the app's window (16384 by default).
+  With `0` there is no warning.
 - Ollama reloads a model when a request asks for a different window. Another tool on
   the same server with another window makes it reload.
 - The window is not sent to ollama.com, and there is no warning for it.

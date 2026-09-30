@@ -44,8 +44,8 @@ npm run harness -- run <workflow.harness.yaml> --task "What to do" [options]
 | `--provider <name>` | `auto`, `openai`, `anthropic`, `ollama`, `ollama-cloud` or `openai-compatible`. Default: `auto`, which picks each agent's provider from its model, as the app does. |
 | `--base-url <url>` | The Ollama endpoint, or the OpenAI-compatible endpoint (required for `openai-compatible`, unless `HARNESS_CUSTOM_BASE_URL` gives it) |
 | `--model <name>` | The Ollama or OpenAI-compatible model. OpenAI and Anthropic keep each agent's own model. For an OpenAI-compatible endpoint it can come from `HARNESS_CUSTOM_MODEL`; with none, each agent's own model is sent. |
-| `--num-ctx <n>` | Ollama's context window in tokens, sent as `num_ctx`: a whole number from 0 to 4294967295. Default: 16384. `0` sends none, so the server's own default stands. Never sent to ollama.com. Can come from `HARNESS_OLLAMA_NUM_CTX`. |
-| `--request-timeout <secs>` | How long one model call may take in total: a whole number of seconds from 30 to 86400. Default: 600. Can come from `HARNESS_REQUEST_TIMEOUT_SECS`. |
+| `--num-ctx <n>` | Ollama's context window in tokens, sent as `num_ctx`: a whole number from 0 to 4294967295. Default: 16384. It overrides the server's default (`OLLAMA_CONTEXT_LENGTH`) and a model's own `num_ctx` (Modelfile); `0` sends none, so those stand. Never sent to ollama.com. Can come from `HARNESS_OLLAMA_NUM_CTX`. |
+| `--request-timeout <secs>` | How long one model call may take in total: a whole number of seconds from 30 to 86400. Default: 600. An agent's own `timeoutSeconds` still bounds its whole run. Can come from `HARNESS_REQUEST_TIMEOUT_SECS`. |
 | `--max-parallel <n>` | Agents running at once. Default: the workflow's setting. |
 | `--continue-on-error` | Keep running the other agents after one fails. By default the run stops at the first failure. |
 | `--allow-command "<cmd>"` | Let agents run this exact command. Repeat it for more commands. |
@@ -260,19 +260,23 @@ Resume: harness run fix.harness.yaml --resume run-1790348292064
 When every agent finishes, the summary ends with the final output of the last
 agents. Warnings and errors go to stderr.
 
-One warning comes from the run itself: an agent's prompt may not fit Ollama's context
-window. It is printed on stderr when the agent starts:
+One warning comes from the run itself: an agent's prompt may leave no room for its
+reply in Ollama's context window. It is printed on stderr when the agent starts,
+without the ⚠ that the app's audit strip shows:
 
 ```
-warning: ⚠ Coder: about 18,048 tokens (a prompt of ~16,000 plus up to 2,048 for the reply) do not fit Ollama's context window of 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+warning: Coder: its prompt is about 9,000 tokens and it may reply with up to 16,384 tokens, but Ollama's context window is 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
 ```
 
-It fires when the agent's estimated prompt (about 4 characters per token, over the
-system and user messages) plus its `maxTokens` (2048 if it is 0) is more than the
-window. It is said once per agent, and it does not change the run or its exit code.
-The estimate is a minimum: it covers the first prompt only, and leaves out the tool
-definitions and the steps after it. There is no warning with `--num-ctx 0`, for
-ollama.com, or for another provider.
+It fires when the agent's estimated prompt P (about 4 characters per token, over the
+system and user messages) plus its `maxTokens` M (2048 if it is 0), counted as at
+most half the window W, is more than the window: P + min(M, W / 2) > W. A generous
+`maxTokens` alone does not warn: at the default window an agent with `maxTokens`
+16384 counts its reply as 8192, so it warns when its prompt is more than 8192 tokens.
+The message gives P, M and W. It is said once per agent, and it does not change the
+run or its exit code. The estimate is a minimum: it covers the first prompt only, and
+leaves out the tool definitions and the steps after it. There is no warning with
+`--num-ctx 0`, for ollama.com, or for another provider.
 
 With `--json`, stdout has one JSON object per line and nothing else:
 
@@ -289,8 +293,8 @@ The provider check's `audit` events can come before `run_started`. A run that
 never started ends with `{"type":"run_finished","status":"not_started","error":…}`.
 
 The context window warning above is an `audit` event with `warning: true`,
-`success: true`, the agent's `nodeId` and the warning's text in `details`. Nothing
-goes to stderr for it.
+`success: true`, the agent's `nodeId` and the warning's text in `details` (it starts
+with the ⚠). Nothing goes to stderr for it.
 
 `node_finished` can repeat for a node. It runs again in each revision round
 (`revision` says which), and a node that finished as `done` gets a later
@@ -325,8 +329,11 @@ The record holds:
 - the workflow's name, file path and SHA-256;
 - the task, the provider settings (never a key, and not the model call timeout), the
   status, the times and the number of attempts. The settings include Ollama's
-  context window for the run as `provider.ollamaNumCtx` (0: none is sent), whichever
-  provider the run uses. A record saved before this field has none;
+  context window as `provider.ollamaNumCtx`. It is the setting, not what went over
+  the wire: it is written for every run, also a run on another provider (an
+  OpenAI-compatible run given `--num-ctx 64` records 64) and a run on ollama.com
+  (which gets none), and 0 means none was asked for. A resumed run records the value
+  it was resumed with. A record saved before this field has none;
 - each agent's status, output, error, times, model, token estimate, revision,
   helpers and definition hash;
 - the text each agent passed on, the memory, the gateway routes, the files the
@@ -397,7 +404,9 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
 ## Limits
 
 - Replies do not stream in the terminal: each agent's output arrives when it is
-  done.
+  done. `harness run` never streams: its requests to Ollama carry `stream: false`,
+  and OpenAI-compatible endpoints are not asked to stream. The app's streaming turn
+  (`stream: true`) carries `num_ctx` too, but only the Rust unit tests cover that.
 - Commands are not sandboxed. Only the exact commands you allow run.
 - The hook script check has gaps: files a script sources or imports, and a change
   in the moment between `execute_hook`'s last read and the interpreter's own
@@ -430,17 +439,31 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
   `--request-timeout` (default 600 s). Raise it with `--request-timeout <secs>` (30 to
   86400) or `HARNESS_REQUEST_TIMEOUT_SECS`. Raise the agents' `timeoutSeconds` too: an
   agent gives up at its own timeout even if a call is still going, and an agent's
-  300 s is shorter than the default call timeout (600 s). A refused connection keeps
-  its own message (Ollama: `… is not reachable at <url>`; an OpenAI-compatible
-  endpoint: `Network error: …`), and connecting fails after 10 s.
-- **`warning: ⚠ <agent>: about N tokens … do not fit Ollama's context window …`**: the
-  agent's estimated prompt plus its `maxTokens` is more than the window (`--num-ctx`,
-  default 16384), so Ollama may cut off the start of the prompt. The run goes on.
-  Raise `--num-ctx` (a larger window needs more memory on the Ollama server), shorten
-  what the agent is given, or lower its `maxTokens`. With `--num-ctx 0` the server's
-  own window applies, and there is no warning. A window you set here overrides the
-  server's `OLLAMA_CONTEXT_LENGTH`: if the server sets its own, pass `--num-ctx 0` or
-  the same value.
+  300 s is shorter than the default call timeout (600 s). An agent that gives up does
+  not cancel its call: a local server keeps working on it until it answers or
+  `--request-timeout` ends it, so later calls to the same server may queue behind it.
+  The message appears when the server has not started answering within the timeout. A
+  server that starts a non-streamed reply and then stalls gives `Failed to parse
+  Ollama response: error decoding response body` (or `Failed to parse OpenAI
+  response: …`) instead; real servers normally send nothing until the reply is
+  complete. A non-streamed Anthropic call keeps `Anthropic network error: …`. A
+  refused connection keeps its own message (Ollama: `… is not reachable at <url>`; an
+  OpenAI-compatible endpoint: `Network error: …`), and connecting fails after 10 s.
+- **`warning: <agent>: its prompt is about N tokens and it may reply with up to M
+  tokens, but Ollama's context window is W tokens …`**: the agent's estimated prompt
+  plus its `maxTokens`, counted as at most half the window, is more than the window
+  (`--num-ctx`, default 16384), so Ollama may cut off the start of the prompt. The run
+  goes on. Raise `--num-ctx` (a larger window needs more memory on the Ollama server),
+  shorten what the agent is given, or lower its `maxTokens`. With `--num-ctx 0` the
+  server's own window applies, and there is no warning. A window you set here
+  overrides the server's `OLLAMA_CONTEXT_LENGTH` and a model's own `num_ctx` (its
+  Modelfile): if either sets one, pass `--num-ctx 0` or the same value. Otherwise a
+  model built with a larger window, say 32768, is lowered to the window you pass
+  (16384 by default).
+- **The context window or the call timeout seems to have no effect**: a
+  `harness-core` built before this change ignores both without saying so, while the
+  run record still shows them. After updating, rebuild it with `npm run build:core`
+  (the same advice as for `hook_fingerprint`), or pass a new one with `--core`.
 - **`harness run: … must be a whole number …` (exit 2)**: `--num-ctx`,
   `--request-timeout` or one of their variables has a value that is not valid (see
   Options from the environment).
