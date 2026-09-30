@@ -1,8 +1,10 @@
 use crate::commands::fs_commands::resolve_safe_path;
 use crate::error::{AppError, AppResult};
 use serde::Serialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -43,6 +45,74 @@ fn interpreter_path(path: &Path) -> String {
     }
 }
 
+/// The first line of what a hook fingerprint hashes; it names the encoding (see
+/// `fingerprint_hook`). Changing the encoding needs a new version here, so that fingerprints of
+/// two versions are never equal.
+const FINGERPRINT_PREFIX: &str = "harness-hook-fingerprint-v1";
+
+/// Lowercase hex.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// What a hook is, as a fingerprint: its script's bytes and the `env` it is started with
+/// (`preHook.env`, applied as it is, so a `BASH_ENV`, `PATH` or `PYTHONPATH` in it changes what
+/// the script runs). The engine takes one per Hook node when a run starts (`hook_fingerprint`),
+/// and `execute_hook` compares a hook that runs without asking with a fresh one, right before it
+/// starts the script. This is the only function that computes it.
+///
+/// The encoding, version 1. The fingerprint is the SHA-256, as 64 lowercase hex characters, of
+/// the UTF-8 text of these three lines, joined by newlines (0x0A), with no newline at the end:
+///
+/// ```text
+/// harness-hook-fingerprint-v1
+/// <hex SHA-256 of the script's bytes>
+/// <env as JSON>
+/// ```
+///
+/// - The script is hashed as bytes, as the file is: it need not be UTF-8, or text.
+/// - The env is the JSON array of its `[name, value]` pairs, sorted by name (the UTF-8 bytes of
+///   the name, which is code point order). The JSON is compact: no whitespace, non-ASCII
+///   characters as they are, and only `"`, `\` and the characters below U+0020 escaped (`\"`,
+///   `\\`, `\b`, `\f`, `\n`, `\r`, `\t`, otherwise `\u00xx` with lowercase hex). No env and an
+///   empty one are both `[]`; `[["A","1"],["B","2"]]` is A=1 and B=2.
+///
+/// The script's hash is always 64 characters and the env is one JSON text, so different scripts
+/// or envs never give the same input to the outer hash: no pair can be cut another way (`A` =
+/// `B=C` against `A=B` = `C`).
+fn fingerprint_hook(script: &[u8], env: Option<&HashMap<String, String>>) -> String {
+    let mut vars: Vec<(&String, &String)> = env.into_iter().flatten().collect();
+    vars.sort_by(|a, b| a.0.cmp(b.0));
+    let env_json = Value::Array(
+        vars.into_iter()
+            .map(|(name, value)| Value::from(vec![name.as_str(), value.as_str()]))
+            .collect(),
+    );
+    let script_hash = hex(&Sha256::digest(script));
+    let input = format!("{FINGERPRINT_PREFIX}\n{script_hash}\n{env_json}");
+    hex(&Sha256::digest(input.as_bytes()))
+}
+
+/// The fingerprint (`fingerprint_hook`) of the hook script at `hook_path` with the `env` the
+/// hook is started with; None if there is no such file. Any other failure to read it is an
+/// error whose message is the operating system's, with no file content.
+///
+/// The file is read at the path `resolve_safe_path` returns, links followed: a link that was
+/// re-pointed is hashed as its target, the file `execute_hook` runs.
+#[cfg_attr(feature = "app", tauri::command)]
+pub fn hook_fingerprint(
+    workspace_path: String,
+    hook_path: String,
+    env: Option<HashMap<String, String>>,
+) -> AppResult<Option<String>> {
+    let safe = resolve_safe_path(&workspace_path, &hook_path)?;
+    match std::fs::read(&safe) {
+        Ok(script) => Ok(Some(fingerprint_hook(&script, env.as_ref()))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // `async`: run on Tauri's thread pool. A plain sync command runs on the main
 // thread and would freeze the whole window for the hook's full timeout.
 #[cfg_attr(feature = "app", tauri::command(async))]
@@ -54,6 +124,10 @@ pub fn execute_hook(
     consent_granted: bool,
     // The node's timeoutSeconds; defaults to HOOK_TIMEOUT_SECS, bounded to 1 s–1 h.
     timeout_secs: Option<u64>,
+    // What hook_fingerprint gave for this script and `env` when the caller checked them. When
+    // given, the hook starts only if the script and `env` still have it; None starts it
+    // without that check (the Hooks tab's manual runs).
+    expected_fingerprint: Option<String>,
 ) -> AppResult<HookResult> {
     if !consent_granted {
         return Err(AppError::HookExecution(
@@ -85,8 +159,23 @@ pub fn execute_hook(
         ("AGENT_ID".to_string(), agent_id),
         ("WORKSPACE".to_string(), workspace_path.clone()),
     ]);
-    if let Some(custom_env) = env {
-        env_vars.extend(custom_env);
+    if let Some(custom_env) = &env {
+        env_vars.extend(custom_env.clone());
+    }
+
+    // The last step before the start: read the script again, at the path the interpreter is
+    // given (links followed), and fingerprint it with the `env` about to be applied. A script
+    // that changed, is gone or cannot be read, or an `env` other than the one that was checked,
+    // is not run. What this cannot close is the moment between this read and the interpreter's
+    // own opening of the file.
+    if let Some(expected) = &expected_fingerprint {
+        let unchanged = std::fs::read(&safe)
+            .is_ok_and(|script| fingerprint_hook(&script, env.as_ref()) == *expected);
+        if !unchanged {
+            return Err(AppError::HookExecution(format!(
+                "Hook script {hook_path} or its environment changed after it was checked; it was not run."
+            )));
+        }
     }
 
     run_command_with_timeout(
@@ -484,6 +573,7 @@ mod tests {
             None,
             false,
             None,
+            None,
         );
 
         assert!(
@@ -505,6 +595,7 @@ mod tests {
             "agent-1".to_string(),
             None,
             true,
+            None,
             None,
         )
         .unwrap();
@@ -528,10 +619,412 @@ mod tests {
             None,
             true,
             Some(1),
+            None,
         );
 
         assert!(matches!(result, Err(AppError::HookExecution(message)) if message.contains("timeout")));
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    // ── The hook fingerprint ─────────────────────────────────────────────────
+
+    /// The hook file's name: the platform's shell runs it.
+    const HOOK: &str = if cfg!(target_os = "windows") { "hook.bat" } else { "hook.sh" };
+
+    fn env_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(name, value)| (name.to_string(), value.to_string())).collect()
+    }
+
+    /// What `hook_fingerprint` gives for a script that exists.
+    fn fingerprint_of(dir: &Path, file: &str, env: Option<&HashMap<String, String>>) -> String {
+        hook_fingerprint(dir.to_string_lossy().to_string(), file.to_string(), env.cloned())
+            .unwrap()
+            .expect("the script exists")
+    }
+
+    /// `execute_hook` as the engine calls it for a hook that runs without asking: with consent, the
+    /// node's env, and the fingerprint it took when it checked the script (None: no check).
+    fn run_checked(
+        dir: &Path,
+        file: &str,
+        env: Option<&HashMap<String, String>>,
+        expected: Option<&str>,
+    ) -> AppResult<HookResult> {
+        execute_hook(
+            dir.to_string_lossy().to_string(),
+            file.to_string(),
+            "agent-1".to_string(),
+            env.cloned(),
+            true,
+            None,
+            expected.map(str::to_string),
+        )
+    }
+
+    /// A script for `HOOK` that prints `hook-ran` and the value of PHASE4_MODE.
+    fn prints_hook_ran() -> &'static str {
+        platform("@echo hook-ran %PHASE4_MODE%", "echo hook-ran $PHASE4_MODE")
+    }
+
+    /// A script for `HOOK` that writes marker.txt in the workspace: a hook that ran leaves it.
+    fn writes_the_marker() -> &'static str {
+        platform("@echo ran> marker.txt", "echo ran > marker.txt")
+    }
+
+    fn assert_refused_as_changed(result: &AppResult<HookResult>, file: &str) {
+        assert!(
+            matches!(result, Err(AppError::HookExecution(message))
+                if message.contains(file)
+                    && message.contains("changed after it was checked")
+                    && message.contains("it was not run")),
+            "{result:?}"
+        );
+    }
+
+    /// Bytes that are not UTF-8: 0xFF, and 0xC3 0x28 (a lead byte without its continuation).
+    const NOT_UTF8: &[u8] = b"\xff\xfe#!/bin/sh\necho \xc3\x28\n";
+
+    /// An env whose values need each kind of JSON escaping the encoding has, and a name that is
+    /// not ASCII (it sorts last: U+00E9 comes after `Z`). In the fingerprint's input it is
+    /// `[["A","line\nbreak \r\b\f \u0001 \u001b <DEL>"],["Z","tab\there \"quoted\" back\\slash"],["é","café <U+2028> <U+1F600>"]]`:
+    /// DEL (0x7F), U+2028 and the emoji as they are; the other escapes as written here.
+    fn escaping_env() -> HashMap<String, String> {
+        env_of(&[
+            ("Z", "tab\there \"quoted\" back\\slash"),
+            ("\u{e9}", "caf\u{e9} \u{2028} \u{1F600}"),
+            ("A", "line\nbreak \r\u{8}\u{c} \u{1} \u{1b} \u{7f}"),
+        ])
+    }
+
+    /// The fingerprint of NOT_UTF8 with `escaping_env()`: vector (d) of the pinned encoding.
+    const NOT_UTF8_FINGERPRINT: &str = "c1839de3f5d130be3e306b6fe107d8d7e6cfa3849c6e0137ca4bd9d62d253fe1";
+
+    /// The fingerprint of `echo hi` + LF with the env B=2, A=1: vector (a) of the pinned encoding.
+    const ECHO_HI_FINGERPRINT: &str = "c664d4fa5a1f7d70399717222711718d0d5cce35df2dc5f3eb3b0c04aecf7122";
+
+    #[test]
+    fn the_hook_fingerprint_encoding_is_pinned() {
+        // Values computed outside this code, so that a change to the prefix, the script hash, the
+        // JSON or the order shows. In Python 3:
+        //
+        //   import hashlib, json
+        //   def fingerprint(script, env):
+        //       pairs = [[name, env[name]] for name in sorted(env or {})]
+        //       body = json.dumps(pairs, separators=(",", ":"), ensure_ascii=False)
+        //       text = "harness-hook-fingerprint-v1\n" + hashlib.sha256(script).hexdigest() + "\n" + body
+        //       return hashlib.sha256(text.encode("utf-8")).hexdigest()
+        //
+        //   (a) fingerprint(b"echo hi\n", {"B": "2", "A": "1"})   -> ECHO_HI_FINGERPRINT
+        //   (b) fingerprint(b"echo hi\n", None), and with {}      -> no_env below
+        //   (c) fingerprint(b"", None)                            -> the last value below
+        //   (d) fingerprint(b"\xff\xfe#!/bin/sh\necho \xc3\x28\n",
+        //           {"Z": "tab\there \"quoted\" back\\slash", "\u00e9": "caf\u00e9 \u2028 \U0001F600",
+        //            "A": "line\nbreak \r\x08\x0c \x01 \x1b \x7f"})      -> NOT_UTF8_FINGERPRINT
+        //
+        // (a) again with sha256sum alone. The first command gives the script hash, which goes
+        // into the input of the second:
+        //   $ printf 'echo hi\n' | sha256sum
+        //   ab08508fdf5ca4da5c4995987bc41c56c048aaa5eeb046417ae4049b7d40286e  -
+        //   $ printf 'harness-hook-fingerprint-v1\nab08508fdf5ca4da5c4995987bc41c56c048aaa5eeb046417ae4049b7d40286e\n[["A","1"],["B","2"]]' | sha256sum
+        //   c664d4fa5a1f7d70399717222711718d0d5cce35df2dc5f3eb3b0c04aecf7122  -
+        let echo_hi: &[u8] = b"echo hi\n";
+        let unsorted = env_of(&[("B", "2"), ("A", "1")]);
+        assert_eq!(fingerprint_hook(echo_hi, Some(&unsorted)), ECHO_HI_FINGERPRINT);
+        let no_env = "2a638062e79ca4ece22f381ec451ed077e00e6522931e27b6853afdfcae3b92c";
+        assert_eq!(fingerprint_hook(echo_hi, None), no_env);
+        assert_eq!(fingerprint_hook(echo_hi, Some(&HashMap::new())), no_env);
+        assert_eq!(
+            fingerprint_hook(b"", None),
+            "916fc571515d8f38c8a9f715cf797ff32bd361cefed15ba5a35cf58376a5dbcf"
+        );
+        assert_eq!(fingerprint_hook(NOT_UTF8, Some(&escaping_env())), NOT_UTF8_FINGERPRINT);
+
+        // hook_fingerprint hashes the file on disk the same way.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.sh"), echo_hi).unwrap();
+        assert_eq!(fingerprint_of(dir.path(), "a.sh", Some(&unsorted)), ECHO_HI_FINGERPRINT);
+        assert_eq!(fingerprint_of(dir.path(), "a.sh", None), no_env);
+    }
+
+    #[test]
+    fn a_script_that_is_not_utf8_is_fingerprinted_from_its_bytes() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("odd.sh"), NOT_UTF8).unwrap();
+
+        // A read as text fails, so a check made on the text never covered such a script.
+        assert!(fs::read_to_string(dir.path().join("odd.sh")).is_err());
+        assert_eq!(fingerprint_of(dir.path(), "odd.sh", Some(&escaping_env())), NOT_UTF8_FINGERPRINT);
+    }
+
+    #[test]
+    fn the_fingerprint_of_a_script_that_does_not_exist_is_none() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+        fs::create_dir(dir.path().join("hooks")).unwrap();
+
+        for missing in ["gone.sh", "hooks/gone.sh", "no-such-folder/gone.sh"] {
+            let result = hook_fingerprint(root.clone(), missing.to_string(), None);
+            assert!(matches!(result, Ok(None)), "{missing}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn hook_fingerprint_stays_in_the_workspace_and_reports_other_read_errors() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_string_lossy().to_string();
+
+        let outside = hook_fingerprint(root.clone(), "../outside.sh".to_string(), None);
+        assert!(matches!(outside, Err(AppError::PathTraversal(_))), "{outside:?}");
+        // A workspace that is not there is not a script that is not there.
+        let no_workspace = dir.path().join("gone").to_string_lossy().to_string();
+        let result = hook_fingerprint(no_workspace, "hook.sh".to_string(), None);
+        assert!(matches!(result, Err(AppError::Io(_))), "{result:?}");
+        // A folder where the script should be cannot be read: an error, not "no such script".
+        fs::create_dir(dir.path().join("hooks")).unwrap();
+        let folder = hook_fingerprint(root, "hooks".to_string(), None);
+        assert!(matches!(folder, Err(AppError::Io(_))), "{folder:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_fingerprint_reports_an_unreadable_script_without_its_content() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let script = dir.path().join("locked.sh");
+        fs::write(&script, "echo top-secret-content\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o000)).unwrap();
+        let enforced = fs::read(&script).is_err();
+        let result = hook_fingerprint(dir.path().to_string_lossy().to_string(), "locked.sh".to_string(), None);
+        // Restore first, so the TempDir can clean up even if an assertion fails.
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644)).unwrap();
+        if !enforced {
+            // root (CAP_DAC_OVERRIDE) reads the file anyway: nothing to test.
+            eprintln!("skipped: file permissions do not apply to this user");
+            return;
+        }
+
+        let message = result.unwrap_err().to_string();
+        assert!(message.starts_with("IO error:"), "{message}");
+        assert!(!message.contains("top-secret-content"), "{message}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hook_fingerprint_refuses_a_link_that_leads_outside_the_workspace() {
+        let ws = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("evil.sh"), "echo evil\n").unwrap();
+        std::os::unix::fs::symlink(outside.path().join("evil.sh"), ws.path().join("hook.sh")).unwrap();
+
+        let result = hook_fingerprint(ws.path().to_string_lossy().to_string(), "hook.sh".to_string(), None);
+
+        assert!(matches!(result, Err(AppError::PathTraversal(_))), "{result:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_fingerprinted_as_its_target() {
+        // resolve_safe_path follows links, and the resolved path is what execute_hook runs.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.sh"), "echo a\n").unwrap();
+        fs::write(dir.path().join("b.sh"), "echo b\n").unwrap();
+        let link = dir.path().join("link.sh");
+        std::os::unix::fs::symlink("a.sh", &link).unwrap();
+        let through_link = fingerprint_of(dir.path(), "link.sh", None);
+        assert_eq!(through_link, fingerprint_of(dir.path(), "a.sh", None));
+
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("b.sh", &link).unwrap();
+
+        assert_ne!(fingerprint_of(dir.path(), "link.sh", None), through_link);
+        assert_eq!(fingerprint_of(dir.path(), "link.sh", None), fingerprint_of(dir.path(), "b.sh", None));
+    }
+
+    #[test]
+    fn the_env_order_does_not_change_the_fingerprint() {
+        // Each HashMap iterates in an order of its own, so two maps with the same content are
+        // enough to tell a sorted encoding from one that follows the map: with 32 variables
+        // the chance that both orders agree by accident is negligible.
+        let vars = |order: Vec<u32>| -> HashMap<String, String> {
+            order.into_iter().map(|i| (format!("VAR_{i:02}"), format!("value {i}"))).collect()
+        };
+        let forward = vars((0..32).collect());
+        let backward = vars((0..32).rev().collect());
+
+        assert_eq!(forward, backward);
+        assert_eq!(fingerprint_hook(b"x", Some(&forward)), fingerprint_hook(b"x", Some(&backward)));
+    }
+
+    #[test]
+    fn a_changed_env_or_script_changes_the_fingerprint() {
+        let script: &[u8] = b"echo hi\n";
+        let base = fingerprint_hook(script, Some(&env_of(&[("A", "1")])));
+        let differs = |script: &[u8], env: Option<HashMap<String, String>>| {
+            assert_ne!(fingerprint_hook(script, env.as_ref()), base, "{script:?} with {env:?}");
+        };
+
+        // One byte of the script: changed, appended, removed, or the line ending.
+        differs(b"echo ho\n", Some(env_of(&[("A", "1")])));
+        differs(b"echo hi\n\0", Some(env_of(&[("A", "1")])));
+        differs(b"echo hi", Some(env_of(&[("A", "1")])));
+        differs(b"echo hi\r\n", Some(env_of(&[("A", "1")])));
+        differs(b"", Some(env_of(&[("A", "1")])));
+        // The env: no variables, another value or name, one more (an empty value counts).
+        differs(script, None);
+        differs(script, Some(env_of(&[])));
+        differs(script, Some(env_of(&[("A", "2")])));
+        differs(script, Some(env_of(&[("A", "")])));
+        differs(script, Some(env_of(&[("B", "1")])));
+        differs(script, Some(env_of(&[("A", "1"), ("B", "")])));
+        differs(script, Some(env_of(&[("A", "1"), ("BASH_ENV", "/tmp/x")])));
+        // The same characters cut into names and values another way.
+        let cut = |pairs: &[(&str, &str)]| fingerprint_hook(script, Some(&env_of(pairs)));
+        assert_ne!(cut(&[("A", "B=C")]), cut(&[("A=B", "C")]));
+        assert_ne!(cut(&[("A", "B"), ("C", "D")]), cut(&[("A", "B\",\"C"), ("D", "")]));
+        // No env and an empty one are the same.
+        assert_eq!(fingerprint_hook(script, None), fingerprint_hook(script, Some(&HashMap::new())));
+    }
+
+    #[test]
+    fn execute_hook_runs_a_hook_whose_fingerprint_matches() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), prints_hook_ran()).unwrap();
+        let env = env_of(&[("PHASE4_MODE", "enabled")]);
+        let fingerprint = fingerprint_of(dir.path(), HOOK, Some(&env));
+
+        let output = run_checked(dir.path(), HOOK, Some(&env), Some(&fingerprint)).unwrap();
+
+        assert_eq!(output.exit_code, 0, "stderr: {}", output.stderr);
+        // The env that was fingerprinted is the one the hook gets.
+        assert!(output.stdout.contains("hook-ran enabled"), "stdout: {:?}", output.stdout);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_hook_accepts_the_pinned_fingerprint_of_the_pinned_script() {
+        // The guard computes the encoding pinned above, not merely one that agrees with
+        // hook_fingerprint.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("hook.sh"), "echo hi\n").unwrap();
+        let env = env_of(&[("B", "2"), ("A", "1")]);
+
+        let output = run_checked(dir.path(), "hook.sh", Some(&env), Some(ECHO_HI_FINGERPRINT)).unwrap();
+
+        assert_eq!(output.stdout.trim(), "hi");
+    }
+
+    #[test]
+    fn execute_hook_refuses_a_script_that_changed_after_it_was_checked() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), prints_hook_ran()).unwrap();
+        let fingerprint = fingerprint_of(dir.path(), HOOK, None);
+        // The change: the script now leaves a marker file when it runs.
+        fs::write(dir.path().join(HOOK), writes_the_marker()).unwrap();
+
+        let result = run_checked(dir.path(), HOOK, None, Some(&fingerprint));
+
+        assert_refused_as_changed(&result, HOOK);
+        assert!(!dir.path().join("marker.txt").exists(), "the changed script ran");
+        // Without a fingerprint the same script runs and leaves it: the marker shows a real run.
+        run_checked(dir.path(), HOOK, None, None).unwrap();
+        assert!(dir.path().join("marker.txt").exists());
+    }
+
+    #[test]
+    fn execute_hook_refuses_an_env_other_than_the_one_that_was_checked() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), writes_the_marker()).unwrap();
+        let checked = env_of(&[("PHASE4_MODE", "enabled")]);
+        let fingerprint = fingerprint_of(dir.path(), HOOK, Some(&checked));
+
+        for changed in [
+            None,
+            Some(env_of(&[])),
+            Some(env_of(&[("PHASE4_MODE", "other")])),
+            Some(env_of(&[("PHASE4_MODE", "enabled"), ("BASH_ENV", "/tmp/x")])),
+        ] {
+            let result = run_checked(dir.path(), HOOK, changed.as_ref(), Some(&fingerprint));
+            assert_refused_as_changed(&result, HOOK);
+        }
+        assert!(!dir.path().join("marker.txt").exists(), "a hook with another env ran");
+        run_checked(dir.path(), HOOK, Some(&checked), Some(&fingerprint)).unwrap();
+        assert!(dir.path().join("marker.txt").exists());
+    }
+
+    #[test]
+    fn execute_hook_refuses_a_script_that_is_gone_or_cannot_be_read() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), writes_the_marker()).unwrap();
+        let fingerprint = fingerprint_of(dir.path(), HOOK, None);
+
+        fs::remove_file(dir.path().join(HOOK)).unwrap();
+        assert_refused_as_changed(&run_checked(dir.path(), HOOK, None, Some(&fingerprint)), HOOK);
+        // A folder where the script was cannot be read.
+        fs::create_dir(dir.path().join(HOOK)).unwrap();
+        assert_refused_as_changed(&run_checked(dir.path(), HOOK, None, Some(&fingerprint)), HOOK);
+        // A script that never was: there is nothing a fingerprint could match.
+        assert_refused_as_changed(&run_checked(dir.path(), "never-was.sh", None, Some(&fingerprint)), "never-was.sh");
+        // A fingerprint that is none at all matches nothing, whatever the script.
+        fs::remove_dir(dir.path().join(HOOK)).unwrap();
+        fs::write(dir.path().join(HOOK), writes_the_marker()).unwrap();
+        for bad in ["", "not-a-fingerprint"] {
+            assert_refused_as_changed(&run_checked(dir.path(), HOOK, None, Some(bad)), HOOK);
+        }
+        assert!(!dir.path().join("marker.txt").exists(), "a refused hook ran");
+    }
+
+    #[test]
+    fn execute_hook_checks_consent_before_the_fingerprint() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), writes_the_marker()).unwrap();
+
+        let result = execute_hook(
+            dir.path().to_string_lossy().to_string(),
+            HOOK.to_string(),
+            "agent-1".to_string(),
+            None,
+            false,
+            None,
+            Some("not-a-fingerprint".to_string()),
+        );
+
+        assert!(matches!(result, Err(AppError::HookExecution(message)) if message.contains("consent")));
+        assert!(!dir.path().join("marker.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_hook_checks_the_target_of_a_link_that_was_re_pointed() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("good.sh"), "echo hook-ran\n").unwrap();
+        fs::write(dir.path().join("evil.sh"), writes_the_marker()).unwrap();
+        let link = dir.path().join("hook.sh");
+        std::os::unix::fs::symlink("good.sh", &link).unwrap();
+        let fingerprint = fingerprint_of(dir.path(), "hook.sh", None);
+        assert!(run_checked(dir.path(), "hook.sh", None, Some(&fingerprint)).unwrap().stdout.contains("hook-ran"));
+
+        // The hook path is the same; the link now leads to another script.
+        fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink("evil.sh", &link).unwrap();
+
+        assert_refused_as_changed(&run_checked(dir.path(), "hook.sh", None, Some(&fingerprint)), "hook.sh");
+        assert!(!dir.path().join("marker.txt").exists(), "the script the link was re-pointed to ran");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_hook_guards_a_script_that_is_not_utf8() {
+        let dir = tempdir().unwrap();
+        // An invalid byte in a comment: bash runs it; a read as text cannot open it.
+        fs::write(dir.path().join(HOOK), b"echo hook-ran\n# \xff\n").unwrap();
+        assert!(fs::read_to_string(dir.path().join(HOOK)).is_err());
+        let fingerprint = fingerprint_of(dir.path(), HOOK, None);
+        assert!(run_checked(dir.path(), HOOK, None, Some(&fingerprint)).unwrap().stdout.contains("hook-ran"));
+
+        // Another invalid byte. Read lossily, both files are the same text.
+        fs::write(dir.path().join(HOOK), b"echo hook-ran\n# \xfe\n").unwrap();
+
+        assert_refused_as_changed(&run_checked(dir.path(), HOOK, None, Some(&fingerprint)), HOOK);
     }
 
     #[test]
@@ -941,6 +1434,7 @@ mod tests {
             None,
             true,
             Some(2),
+            None,
         );
 
         assert!(matches!(result, Err(AppError::HookExecution(message)) if message.contains("timeout")));

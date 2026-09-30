@@ -54,6 +54,8 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 thiserror = "1"
 reqwest = { version = "0.12", features = ["json"] }
+# The SHA-256 of a hook script's bytes (the hook fingerprint, process_commands.rs).
+sha2 = "0.10"
 
 # kill(2) for stopping an agent command's process group.
 [target.'cfg(unix)'.dependencies]
