@@ -28,11 +28,11 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  BUNDLE_PARTS, DEFAULT_BUNDLE_DIR, FORMAT_VERSION, LOCKED_FILES, UserError,
-  batches, cargoConfigAction, cargoConfigText, countLockedCrates, formatBytes, formatTable,
-  glibcWarning, hashMismatches, isInsideDir, longPathWarning, mismatchMessage, npmInvocation, npmTarballs,
-  parseCreateArgs, parseManifest, parseSetupArgs, parseVerifyArgs, parseVersion, sha256File,
-  toolchainWarnings,
+  BUNDLE_SENTINEL, BUNDLE_SENTINEL_TEXT, DEFAULT_BUNDLE_DIR, FORMAT_VERSION, LOCKED, REPLACED_PARTS, UserError,
+  batches, cargoConfigAction, cargoConfigText, countLockedCrates, describeList, formatBytes, formatTable,
+  glibcWarning, hashLockedFiles, hashMismatches, isBundleFolder, isInsideDir, lockedPackages, longPathWarning,
+  mismatchMessage, missingFromNpmCache, npmInvocation, parseCreateArgs, parseManifest, parseSetupArgs,
+  parseVerifyArgs, parseVersion, sha256File, toolchainWarnings,
 } from "./offline-bundle-lib.mjs";
 
 // The repo root: this script lives in <root>/scripts.
@@ -49,8 +49,9 @@ Commands:
   create [<dir>] [--no-binaries] [--force]
       On a machine with internet: put every npm package and Rust crate into <dir>
       (default: ${DEFAULT_BUNDLE_DIR}), plus the prebuilt binaries for this OS unless
-      --no-binaries. A folder that is not empty is refused; --force replaces the bundle
-      files in it (${BUNDLE_PARTS.join(", ")}) and nothing else.
+      --no-binaries. A folder that is not empty is refused. --force replaces a bundle this
+      script made (${REPLACED_PARTS.join(", ")}; its npm-cache is kept) and refuses any
+      other folder.
   setup [<dir>]
       On the offline machine, from a copy of the same source: check the bundle matches it,
       point cargo at the vendored crates (.cargo/config.toml), run npm ci from the bundle,
@@ -71,7 +72,8 @@ With npm scripts, put -- before the options: npm run offline:bundle -- --no-bina
 function defaultDeps() {
   return {
     root: ROOT,
-    cwd: process.cwd(),
+    // Under npm run the working folder is the package root, wherever the person ran npm.
+    cwd: process.env.INIT_CWD ?? process.cwd(),
     host: hostInfo(),
     nodeVersion: process.versions.node,
     tool: spawnTool,
@@ -98,7 +100,7 @@ function hostInfo() {
 // where its output goes: "inherit" (the default) shows it, "capture" returns stdout as text and
 // hides the rest, and "collect" returns stdout and stderr and shows nothing (cargo vendor writes
 // a line per crate). Returns { status, signal, error, stdout, stderr }, like spawnSync.
-function spawnTool(name, args, { cwd, mode = "inherit" } = {}) {
+export function spawnTool(name, args, { cwd, mode = "inherit" } = {}) {
   const start = toolInvocation(name, args);
   const stdio = mode === "capture" ? ["ignore", "pipe", "ignore"]
     : mode === "collect" ? ["ignore", "pipe", "pipe"]
@@ -115,7 +117,7 @@ function spawnTool(name, args, { cwd, mode = "inherit" } = {}) {
   return { status: result.status, signal: result.signal, error: result.error, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 
-function toolInvocation(name, args) {
+export function toolInvocation(name, args) {
   if (name === "npm") {
     return npmInvocation({ platform: process.platform, execPath: process.execPath, npmExecPath: process.env.npm_execpath }, args);
   }
@@ -151,33 +153,34 @@ function bundleDirFor(deps, dirArg) {
   return dirArg === null ? join(deps.root, DEFAULT_BUNDLE_DIR) : resolve(deps.cwd, dirArg);
 }
 
+// The text of a file, or null when there is nothing to read there: no such path, a parent that is
+// a file (ENOTDIR), or a folder where the file should be (EISDIR).
 function readIfExists(path) {
   try {
     return readFileSync(path, "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return null;
+    if (error.code === "ENOENT" || error.code === "ENOTDIR" || error.code === "EISDIR") return null;
     throw error;
   }
 }
 
-// name (as in LOCKED_FILES) -> sha256 of that file in the repo, or null when it is missing.
-function hashLockedFiles(root) {
-  const hashes = {};
-  for (const name of LOCKED_FILES) {
-    const path = join(root, ...name.split("/"));
-    hashes[name] = existsSync(path) ? sha256File(path) : null;
-  }
-  return hashes;
-}
-
-function dirSize(dir) {
-  let total = 0;
+// The size in bytes of the files under `dir`, and the length of the longest path below it
+// (relative to `base`, the bundle folder).
+function measureDir(dir, base = dir) {
+  let bytes = 0;
+  let longest = 0;
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
-    if (entry.isDirectory()) total += dirSize(path);
-    else if (entry.isFile()) total += lstatSync(path).size;
+    if (entry.isDirectory()) {
+      const inner = measureDir(path, base);
+      bytes += inner.bytes;
+      longest = Math.max(longest, inner.longest);
+    } else if (entry.isFile()) {
+      bytes += lstatSync(path).size;
+      longest = Math.max(longest, relative(base, path).length);
+    }
   }
-  return total;
+  return { bytes, longest };
 }
 
 // ---------------------------------------------------------------------------
@@ -204,13 +207,15 @@ export function runCreate(argv, deps) {
     }
   }
   startBundleDir(dir);
-  const longPath = longPathWarning(dir, host.platform);
-  if (longPath) warn(`Warning: ${longPath}`);
+  // Before the bundle exists the longest path inside it is an estimate; the measured one follows.
+  const early = longPathWarning(dir, host.platform);
+  if (early) warn(`Warning: ${early}`);
 
-  const npmTarballCount = addNpmPackages(deps, dir);
+  const npm = addNpmPackages(deps, dir);
   const cargoCrateCount = vendorCrates(deps, dir);
   const binaries = options.binaries ? buildBinaries(deps, dir) : [];
 
+  const { bytes, longest } = measureDir(dir);
   const manifest = {
     formatVersion: FORMAT_VERSION,
     createdAt: new Date().toISOString(),
@@ -220,42 +225,53 @@ export function runCreate(argv, deps) {
     platform: host.platform,
     arch: host.arch,
     glibc: host.platform === "linux" ? host.glibc : null,
-    npmTarballs: npmTarballCount,
-    // npm ci --offline proves the packages this host installs. The other platforms' optional
-    // packages are in the cache because `npm cache add` fetched them, not because they were installed.
-    npmCompletenessCheckedOn: platformKey,
+    npmTarballs: npm.tarballs,
+    // The tarballs whose content is in the cache by its digest, checked without npm: every OS's
+    // optional packages count. npm ci --offline installs only this platform's.
+    npmDigestsPresent: npm.digests,
+    npmInstallCheckedOn: platformKey,
     cargoCrates: cargoCrateCount,
+    longestPathLength: longest,
     binaries,
   };
-  writeFileSync(join(dir, "MANIFEST.json"), JSON.stringify(manifest, null, 2) + "\n");
+  const manifestText = JSON.stringify(manifest, null, 2) + "\n";
+  writeFileSync(join(dir, "MANIFEST.json"), manifestText);
+  const late = early ? null : longPathWarning(dir, host.platform, longest);
+  if (late) warn(`Warning: ${late}`);
 
   log("");
   log(`Offline bundle ready: ${dir}`);
-  log(`  size          ${formatBytes(dirSize(dir))}`);
-  log(`  npm packages  ${npmTarballCount} tarballs (npm ci --offline checked for ${platformKey})`);
+  log(`  size          ${formatBytes(bytes + Buffer.byteLength(manifestText))}`);
+  log(`  npm packages  ${npm.tarballs} tarballs, ${npm.digests} found in the cache by digest (every OS); npm ci --offline worked for ${platformKey}`);
   log(`  rust crates   ${cargoCrateCount}`);
   log(`  binaries      ${binaries.length > 0 ? `${platformKey}: ${binaries.map((file) => basename(file.path)).join(", ")}` : "none"}`);
   log("");
   log("Next steps:");
   log(`  1. Copy the folder ${dir} and the repo source (a clone or an archive; no node_modules) to the offline machine.`);
   log(`     Put the folder at ${DEFAULT_BUNDLE_DIR} in the repo root there, or give its path to setup.`);
-  log("     The source must be the same: setup refuses a bundle made for other lockfiles.");
+  log("     The source must have the same dependencies: setup refuses a bundle made for other ones (package.json's dependency fields, package-lock.json, src-tauri/Cargo.lock).");
   log("  2. There, from the repo root:  npm run offline:setup      (another folder: npm run offline:setup -- <folder>)");
   log("  3. Then:                       npm run offline:verify     (without the Tauri system libraries: npm run offline:verify -- --skip cargo-app)");
   log(`  Made with node ${toolchain.node}, npm ${toolchain.npm}, cargo ${toolchain.cargo}, rustc ${toolchain.rustc}: setup warns when the offline machine differs (rustc matters most: the crates state a minimum).`);
   return 0;
 }
 
-// Refuses a folder that already holds files, unless --force: two bundles must not be mixed.
+// Refuses a folder that already holds files, unless it is a bundle this script made and --force
+// says to replace it: two bundles must not be mixed, and --force must not clear anything else.
 function refuseBundleDir(dir, root, force) {
   if (!existsSync(dir)) return;
   if (!statSync(dir).isDirectory()) {
     throw new UserError(`${dir} is a file, not a folder. Give create a folder that is new or empty.`);
   }
   if (readdirSync(dir).length === 0) return;
+  if (!isBundleFolder(dir)) {
+    throw new UserError(
+      `${dir} is not empty, and is not a bundle made by this script; choose an empty folder or a new one. --force replaces only a bundle this script made.`,
+    );
+  }
   if (!force) {
     throw new UserError(
-      `${dir} is not empty. A new bundle must not be mixed with old files: give create a new or empty folder, or add --force to replace the bundle files in it (${BUNDLE_PARTS.join(", ")}).`,
+      `${dir} is not empty: it holds a bundle. A new bundle must not be mixed with an old one: give create a new or empty folder, or add --force to replace it (${REPLACED_PARTS.join(", ")} are removed and made again; the npm cache is kept).`,
     );
   }
   if (isInsideDir(realpathSync(dir), realpathSync(root))) {
@@ -263,16 +279,24 @@ function refuseBundleDir(dir, root, force) {
   }
 }
 
-// Makes the folder ready: --force removes the bundle files an earlier create left, and only those.
+// Makes the folder ready. The sentinel goes in first, so that a create that stops halfway leaves a
+// folder --force knows it may replace. --force then removes what an earlier create made, except the
+// npm cache: it is addressed by content and safe to reuse, and a retry over a bad connection should
+// not start from zero (the digest check catches any gap).
 function startBundleDir(dir) {
-  for (const part of BUNDLE_PARTS) rmSync(join(dir, part), { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, BUNDLE_SENTINEL), BUNDLE_SENTINEL_TEXT);
+  } catch (error) {
+    throw new UserError(`Cannot make the bundle folder ${dir} (${error.code ?? error.message}). Choose a folder you can write to.`);
+  }
+  for (const part of REPLACED_PARTS) rmSync(join(dir, part), { recursive: true, force: true });
 }
 
 function requireSources(root) {
-  for (const name of LOCKED_FILES) {
-    if (!existsSync(join(root, ...name.split("/")))) {
-      throw new UserError(`${name} was not found in ${root}. Run this from a complete checkout of the repository.`);
+  for (const { file } of LOCKED) {
+    if (!existsSync(join(root, ...file.split("/")))) {
+      throw new UserError(`${file} was not found in ${root}. Run this from a complete checkout of the repository.`);
     }
   }
 }
@@ -286,25 +310,40 @@ function refuseOfflineCheckout(root) {
   }
 }
 
-// Puts every npm tarball the lockfile pins into <dir>/npm-cache, then proves that npm ci works
-// from it, offline, on this machine. Returns the number of tarballs.
+// Puts every npm tarball the lockfile pins into <dir>/npm-cache, checks that the content of each
+// one is there (by its digest, for every OS), then proves that npm ci works from it, offline, on
+// this machine. Returns the number of tarballs, and how many of them the digest check could see.
 function addNpmPackages(deps, dir) {
-  const { root, log } = deps;
+  const { root, log, warn } = deps;
   const lock = readJson(join(root, "package-lock.json"));
-  const tarballs = npmTarballs(lock);
+  const { packages, skipped } = lockedPackages(lock);
+  if (skipped.length > 0) {
+    warn(`Warning: ${skipped.length} package${skipped.length === 1 ? "" : "s"} in package-lock.json ${skipped.length === 1 ? "has" : "have"} no resolved URL or no integrity hash, so ${skipped.length === 1 ? "it is" : "they are"} left out of the bundle and npm ci --offline may fail for ${skipped.length === 1 ? "it" : "them"}: ${describeList(skipped, 5)}.`);
+  }
   const cache = join(dir, "npm-cache");
   mkdirSync(cache, { recursive: true });
-  const groups = batches(tarballs);
-  log(`npm cache: adding ${tarballs.length} packages in ${groups.length} batches ...`);
+  const groups = batches(packages.map((item) => item.resolved));
+  log(`npm cache: adding ${packages.length} packages in ${groups.length} batches ...`);
   groups.forEach((group, index) => {
     log(`npm cache: batch ${index + 1} of ${groups.length} (${group.length} packages)`);
     const result = deps.tool("npm", ["cache", "add", ...group, "--cache", cache], { cwd: root });
     if (!succeeded(result)) {
-      throw new UserError(`npm cache add failed (${describeFailure(result)}) in batch ${index + 1} of ${groups.length}. Check the connection to the npm registry, then run create again with --force.`);
+      throw new UserError(`npm cache add failed (${describeFailure(result)}) in batch ${index + 1} of ${groups.length}. Either the connection to the npm registry failed, or a URL in package-lock.json is wrong or gone (npm's message above says which). Fix that, then run create again with --force: the npm cache is kept, so what was fetched is not fetched again.`);
     }
   });
+  const { missing, unchecked } = missingFromNpmCache(cache, packages);
+  if (missing.length > 0) {
+    // The check reads npm's cache layout (_cacache/content-v2/sha512). If it names every package, this npm may keep its cache another way.
+    const layout = missing.length === packages.length && packages.length > 1 ? " It names every package: this npm may keep its cache in a layout the check does not know (it reads _cacache/content-v2/sha512)." : "";
+    throw new UserError(`npm cache add finished, but the cache does not hold what package-lock.json pins for ${missing.length} package${missing.length === 1 ? "" : "s"}: ${describeList(missing)}. The registry may have served other files than the lockfile names, or a download was cut short. Run create again with --force (what is cached is kept); if it happens again, run npm ci online to see what npm says.${layout}`);
+  }
+  if (unchecked.length > 0) {
+    warn(`Warning: ${unchecked.length} package${unchecked.length === 1 ? "" : "s"} in package-lock.json ${unchecked.length === 1 ? "has" : "have"} no sha512 integrity hash, so the digest check cannot see ${unchecked.length === 1 ? "it" : "them"}; only the npm ci --offline check on this platform covers ${unchecked.length === 1 ? "it" : "them"}: ${describeList(unchecked, 5)}.`);
+  }
   checkNpmCache(deps, cache);
-  return tarballs.length;
+  // npm's logs hold this machine's paths, and are of no use to anyone else.
+  rmSync(join(cache, "_logs"), { recursive: true, force: true });
+  return { tarballs: packages.length, digests: packages.length - unchecked.length };
 }
 
 function readJson(path) {
@@ -412,12 +451,20 @@ export function runSetup(argv, deps) {
   }
   const manifest = parseManifest(manifestText, manifestPath);
 
-  // 1. The bundle must have been made for this source.
+  // 1. The bundle must have been made for this source, and be all there.
   const different = hashMismatches(manifest.sha256, hashLockedFiles(root));
   if (different.length > 0) throw new UserError(mismatchMessage(different, manifest));
   for (const part of ["npm-cache", "cargo-vendor"]) {
     if (!existsSync(join(dir, part))) throw new UserError(`${join(dir, part)} is missing, so the bundle is incomplete. Copy it again from the machine that made it.`);
   }
+  // The content of every npm package the lockfile pins, for every OS: a damaged copy of the folder
+  // shows here, not as a failure of npm ci half way.
+  const { packages } = lockedPackages(readJson(join(root, "package-lock.json")));
+  const { missing, unchecked } = missingFromNpmCache(join(dir, "npm-cache"), packages);
+  if (missing.length > 0) {
+    throw new UserError(`The bundle's npm cache is missing the content of ${missing.length} package${missing.length === 1 ? "" : "s"}: ${describeList(missing)}. The copy of the bundle is damaged or incomplete: copy the folder again from the machine that made it.`);
+  }
+  log(`npm cache: the content of ${packages.length - unchecked.length} packages is there (every OS)`);
 
   // Everything that can refuse comes before the first change.
   const vendorDir = join(dir, "cargo-vendor");
@@ -431,22 +478,27 @@ export function runSetup(argv, deps) {
     );
   }
 
-  // 2. A different toolchain is a warning, not a refusal.
+  // 2. A different toolchain is a warning, not a refusal, and so is a path Windows may not take.
   for (const text of toolchainWarnings(manifest.toolchain, detectToolchain(deps))) warn(`Warning: ${text}`);
-  const longPath = longPathWarning(dir, deps.host.platform);
+  const longPath = longPathWarning(dir, deps.host.platform, manifest.longestPathLength);
   if (longPath) warn(`Warning: ${longPath}`);
 
-  // 3. Cargo reads the vendored crates and stays offline.
-  mkdirSync(dirname(configPath), { recursive: true });
-  writeFileSync(configPath, configText);
-  log(`cargo: wrote ${configPath}`);
-
-  // 4. node_modules from the bundle's npm cache.
+  // 3. node_modules from the bundle's npm cache. Nothing is written before this works: a failed
+  // npm ci must not leave the repo with the network turned off and no word about why.
   log("npm: npm ci --offline ...");
   const result = deps.tool("npm", ["ci", "--offline", "--cache", join(dir, "npm-cache"), "--no-audit", "--no-fund"], { cwd: root });
   if (!succeeded(result)) {
-    throw new UserError(`npm ci --offline failed (${describeFailure(result)}). Read npm's message above: ENOTCACHED means the bundle's npm cache lacks a package, so make the bundle again with --force.`);
+    throw new UserError(`npm ci --offline failed (${describeFailure(result)}), and .cargo/config.toml was not written. Read npm's message above: it says what npm cannot find or use. If the copy of the bundle may be damaged, copy the folder again from the machine that made it.`);
   }
+
+  // 4. Cargo reads the vendored crates and stays offline.
+  try {
+    mkdirSync(dirname(configPath), { recursive: true });
+    writeFileSync(configPath, configText);
+  } catch (error) {
+    throw new UserError(`Cannot write ${configPath} (${error.code ?? error.message}). node_modules is installed; make .cargo/config.toml writable and run setup again.`);
+  }
+  log(`cargo: wrote ${configPath}`);
 
   // 5. The prebuilt binaries for this OS.
   const binaries = installBinaries(manifest, dir, deps);

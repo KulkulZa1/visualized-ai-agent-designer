@@ -1,22 +1,45 @@
 /**
- * Helpers for scripts/offline-bundle.mjs that need no process and no network: reading the
- * lockfiles, comparing a bundle's manifest with a checkout, and writing the cargo config.
- * They live here so tests/unit/scripts/offline-bundle.test.mjs can call them directly.
+ * Helpers for scripts/offline-bundle.mjs that start no process and use no network: reading the
+ * lockfiles, comparing a bundle's manifest with a checkout, checking npm's cache, and writing the
+ * cargo config. They live here so tests/unit/scripts/offline-bundle.test.mjs can call them directly.
  */
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { isAbsolute, relative, sep as pathSep } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, sep as pathSep } from "node:path";
 
-export const FORMAT_VERSION = 1;
+// Version 3: package-lock.json is hashed as canonical JSON without the root project's own name and
+// version. Version 2 named what it hashed ("package.json dependencies", not the whole package.json)
+// and recorded the npm digest check and the longest path. A bundle of an older version is refused.
+export const FORMAT_VERSION = 3;
 export const DEFAULT_BUNDLE_DIR = "offline-bundle";
 
-// The files whose sha256 ties a bundle to the source it was made for (paths are relative to the
-// repo root, always with "/").
-export const LOCKED_FILES = ["package.json", "package-lock.json", "src-tauri/Cargo.lock"];
+// What ties a bundle to the source it was made for: the name the manifest gives each part, the
+// file it comes from (relative to the repo root, always with "/"), and how it is hashed. None of it
+// changes when only what npm and cargo do not install changes:
+//   package.json      counts for its dependency fields only: a new script or version installs nothing
+//   package-lock.json counts as JSON with its keys sorted, without the root project's own name and
+//                     version (`npm version` rewrites them, and no dependency changes), so key
+//                     order, indentation and line endings do not matter either
+//   Cargo.lock        counts as text with CRLF read as LF: a Windows working tree from before
+//                     .gitattributes asked for eol=lf still has CRLF, and git does not renormalise
+//                     files it has not touched
+export const LOCKED = [
+  { name: "package.json dependencies", file: "package.json", hash: hashDependencies },
+  { name: "package-lock.json", file: "package-lock.json", hash: hashLock },
+  { name: "src-tauri/Cargo.lock", file: "src-tauri/Cargo.lock", hash: hashText },
+];
+export const LOCKED_FILES = LOCKED.map((part) => part.name);
 
-// What `create` writes into the bundle folder. `create --force` removes these and nothing else.
-export const BUNDLE_PARTS = ["npm-cache", "cargo-vendor", "bin", "MANIFEST.json"];
+// What `create --force` removes from a bundle folder before it starts again, and nothing else. The
+// folder also holds npm-cache, which stays: it is addressed by content and safe to reuse, so a retry
+// over a bad connection does not start from zero.
+export const REPLACED_PARTS = ["cargo-vendor", "bin", "MANIFEST.json"];
+
+// A file `create` writes into the folder first thing, so that a create that stops halfway still
+// leaves a folder `create --force` knows it made.
+export const BUNDLE_SENTINEL = ".offline-bundle";
+export const BUNDLE_SENTINEL_TEXT = "A folder made by scripts/offline-bundle.mjs create. create --force may replace what it made here.\n";
 
 // The first line of the .cargo/config.toml that `setup` writes. Without it the file is not ours,
 // and `setup` leaves it alone.
@@ -89,23 +112,91 @@ function takeFolder(arg, current) {
 // npm
 // ---------------------------------------------------------------------------
 
-// The `resolved` URL of every npm package the lockfile pins, once each, in lockfile order. That is
-// every platform's optional packages too (esbuild, rollup, @tauri-apps/cli-*), so one bundle
-// serves Windows, Linux and macOS. Skipped: the root project (""), links, packages bundled inside
-// another package, and entries without both `resolved` and `integrity`.
-export function npmTarballs(lock) {
-  const packages = lock?.packages;
-  if (packages === null || typeof packages !== "object") {
+// The npm packages a lockfile pins that a bundle must hold: { name, version, resolved, integrity }
+// once per `resolved` URL, in lockfile order. That is every platform's optional packages too
+// (esbuild, rollup, @tauri-apps/cli-*), so one bundle serves Windows, Linux and macOS. Not in the
+// list: the root project (""), links, and packages bundled inside another package. `skipped` names
+// the installed packages (a path with node_modules in it) left out because they lack `resolved` or
+// `integrity`, a git dependency for one: the bundle cannot hold them.
+export function lockedPackages(lock) {
+  const entries = lock?.packages;
+  if (entries === null || typeof entries !== "object") {
     throw new UserError(
       'package-lock.json has no "packages" list (it needs lockfileVersion 2 or 3). Run npm install with a current npm, then try again.',
     );
   }
-  const urls = new Set();
-  for (const [path, entry] of Object.entries(packages)) {
+  const seen = new Set();
+  const packages = [];
+  const skipped = [];
+  for (const [path, entry] of Object.entries(entries)) {
     if (path === "" || entry.link || entry.inBundle) continue;
-    if (entry.resolved && entry.integrity) urls.add(entry.resolved);
+    // The package's own name when the entry gives one (an alias is installed under another name),
+    // else the last folder name under node_modules.
+    const at = path.lastIndexOf("node_modules/");
+    const name = entry.name ?? (at === -1 ? path : path.slice(at + "node_modules/".length));
+    if (entry.resolved && entry.integrity) {
+      if (seen.has(entry.resolved)) continue;
+      seen.add(entry.resolved);
+      packages.push({ name, version: entry.version, resolved: entry.resolved, integrity: entry.integrity });
+    } else if (path.includes("node_modules/")) {
+      skipped.push(packageLabel({ name, version: entry.version }));
+    }
   }
-  return [...urls];
+  return { packages, skipped };
+}
+
+// The `resolved` URL of each package lockedPackages lists.
+export function npmTarballs(lock) {
+  return lockedPackages(lock).packages.map((item) => item.resolved);
+}
+
+// "name@version", or the name alone when the lockfile gives no version.
+function packageLabel(item) {
+  return item.version ? `${item.name}@${item.version}` : item.name;
+}
+
+// "a, b and 3 more": the first `limit` names of a list.
+export function describeList(names, limit = 20) {
+  return names.length <= limit ? names.join(", ") : `${names.slice(0, limit).join(", ")} and ${names.length - limit} more`;
+}
+
+// Where npm's cache (cacache) keeps the content of a tarball whose lockfile integrity is
+// "sha512-<base64>": a file named by the hash in hex, <cache>/_cacache/content-v2/sha512/ab/cd/<rest>.
+// One path per sha512 hash the integrity lists (it may list several); none when it has no sha512.
+export function cacheContentFiles(cache, integrity) {
+  const files = [];
+  for (const hash of String(integrity).trim().split(/\s+/)) {
+    const match = /^sha512-([A-Za-z0-9+/_-]+={0,2})$/.exec(hash.split("?")[0]);
+    const digest = match ? Buffer.from(match[1], "base64") : null;
+    if (digest === null || digest.length !== 64) continue;
+    const hex = digest.toString("hex");
+    files.push(join(cache, "_cacache", "content-v2", "sha512", hex.slice(0, 2), hex.slice(2, 4), hex.slice(4)));
+  }
+  return files;
+}
+
+// Which of `packages` (from lockedPackages) have no content in the npm cache, whatever OS they are
+// for. This looks at the cache itself, not through npm: `npm ci` skips a missing optional package
+// without a word, even the host's own. Any one listed hash present is enough. `unchecked` are the
+// packages whose integrity has no sha512 to look for (an old lockfile): npm stores their content
+// under a hash the lockfile does not give.
+export function missingFromNpmCache(cache, packages) {
+  const missing = [];
+  const unchecked = [];
+  for (const item of packages) {
+    const files = cacheContentFiles(cache, item.integrity);
+    if (files.length === 0) unchecked.push(packageLabel(item));
+    else if (!files.some(isFile)) missing.push(packageLabel(item));
+  }
+  return { missing, unchecked };
+}
+
+function isFile(path) {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 // Splits `items` into groups of at most `size`, keeping each group's text under `maxChars`
@@ -199,6 +290,85 @@ export function sha256File(path) {
   return sha256Text(readFileSync(path));
 }
 
+// name (as in LOCKED_FILES) -> hash of that part of the repo at `root`, or null when its file is missing.
+export function hashLockedFiles(root) {
+  const hashes = {};
+  for (const { name, file, hash } of LOCKED) {
+    const path = join(root, ...file.split("/"));
+    hashes[name] = existsSync(path) ? hash(path) : null;
+  }
+  return hashes;
+}
+
+function hashText(path) {
+  return sha256Text(lineFeedOnly(readFileSync(path)));
+}
+
+// package-lock.json as canonical JSON (keys sorted at every level) without the root project's name
+// and version: the top-level ones, and the ones of packages[""], the root's own entry. Everything
+// else stays: lockfileVersion, the root's dependency fields, and every installed package.
+function hashLock(path) {
+  const lock = parseJson(readFileSync(path, "utf8"), path);
+  if (lock !== null && typeof lock === "object") {
+    delete lock.name;
+    delete lock.version;
+    const root = lock.packages?.[""];
+    if (root !== null && typeof root === "object") {
+      delete root.name;
+      delete root.version;
+    }
+  }
+  return sha256Text(canonicalJson(lock));
+}
+
+function hashDependencies(path) {
+  return sha256Text(dependencyFingerprint(readFileSync(path, "utf8"), path));
+}
+
+// The bytes with every CRLF made LF. A lone CR stays: it is content.
+function lineFeedOnly(bytes) {
+  const out = Buffer.allocUnsafe(bytes.length);
+  let length = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 0x0d && bytes[i + 1] === 0x0a) continue;
+    out[length++] = bytes[i];
+  }
+  return out.subarray(0, length);
+}
+
+// The fields of package.json that decide what npm installs.
+const DEPENDENCY_FIELDS = [
+  "dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
+  "overrides", "bundleDependencies", "bundledDependencies",
+];
+
+// Those fields of package.json (its text) as JSON with every object's keys sorted, so that neither
+// the order of keys nor anything else in the file (scripts, version, formatting) changes it.
+export function dependencyFingerprint(text, label = "package.json") {
+  const parsed = parseJson(text, label);
+  const fields = {};
+  for (const field of DEPENDENCY_FIELDS) {
+    if (parsed?.[field] !== undefined) fields[field] = parsed[field];
+  }
+  return canonicalJson(fields);
+}
+
+function parseJson(text, label) {
+  try {
+    return JSON.parse(text.replace(/^\uFEFF/, ""));
+  } catch (error) {
+    throw new UserError(`${label} is not valid JSON (${error.message}).`);
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 // The manifest from MANIFEST.json's text, or a UserError that says what is wrong with it.
 export function parseManifest(text, manifestPath) {
   let manifest;
@@ -231,7 +401,7 @@ export function mismatchMessage(names, manifest) {
   const commit = manifest.gitCommit ? ` (git commit ${String(manifest.gitCommit).slice(0, 12)})` : "";
   return (
     `The bundle was made for other dependencies: ${joinNames(names)} ${names.length === 1 ? "differs" : "differ"} ` +
-    `from the file${names.length === 1 ? "" : "s"} the bundle was made from${commit}. ` +
+    `from what the bundle was made from${commit}. ` +
     "Use the same source, or make a new bundle from this one on a machine with internet access (npm run offline:bundle)."
   );
 }
@@ -326,16 +496,34 @@ export function formatTable(header, rows) {
 // Paths
 // ---------------------------------------------------------------------------
 
-// The longest path inside a bundle, relative to its folder, is about 158 characters (an npm cache
-// file), and Windows stops at 260 unless long paths are enabled.
-const LONGEST_BUNDLE_PATH = 160;
+// The longest path inside a bundle, relative to its folder, in characters. `create` measures it
+// and writes it in the manifest; this is the estimate to use before the bundle exists, or when a
+// manifest lacks it (167 in an npm cache file and 166 under cargo-vendor when it was measured).
+const LONGEST_BUNDLE_PATH = 170;
+
+// Windows stops at 260 characters (259 and the end of the string) unless long paths are enabled.
 const WINDOWS_MAX_PATH = 260;
 
-// A warning when the bundle folder's path is long enough that Windows may refuse the files inside
-// it (copying the folder is where it shows first), or null.
-export function longPathWarning(dir, platform) {
-  if (platform !== "win32" || dir.length + 1 + LONGEST_BUNDLE_PATH < WINDOWS_MAX_PATH) return null;
-  return `The bundle folder's path is ${dir.length} characters long, and the bundle holds files with paths up to ${LONGEST_BUNDLE_PATH} characters longer. Windows stops at ${WINDOWS_MAX_PATH} characters unless long paths are enabled, so copying or reading them may fail: use a shorter folder, such as C:\\offline-bundle.`;
+// A warning when the bundle folder's path, and the longest path inside the bundle (`longest`), add
+// up to more than Windows takes, so that copying or reading some files may fail. Or null.
+export function longPathWarning(dir, platform, longest = LONGEST_BUNDLE_PATH) {
+  const below = Number.isFinite(longest) ? longest : LONGEST_BUNDLE_PATH;
+  const total = dir.length + 1 + below;
+  if (platform !== "win32" || total < WINDOWS_MAX_PATH) return null;
+  return `The bundle folder's path is ${dir.length} characters long, and the longest path inside the bundle is ${below} characters, so paths reach ${total}. Windows stops at ${WINDOWS_MAX_PATH} unless long paths are enabled, so copying or reading some files may fail: use a shorter folder, such as C:\\offline-bundle.`;
+}
+
+// True when `dir` is a folder this script made: it holds the sentinel `create` writes first, or the
+// MANIFEST.json of a bundle (a bundle from before the sentinel has only that). What `create --force`
+// may clear must pass this, so that --force cannot empty a folder that just has a `bin` in it.
+export function isBundleFolder(dir) {
+  if (isFile(join(dir, BUNDLE_SENTINEL))) return true;
+  try {
+    const manifest = JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8"));
+    return manifest !== null && typeof manifest === "object" && typeof manifest.formatVersion === "number";
+  } catch {
+    return false;
+  }
 }
 
 // True when `path` is `parent` itself or inside it.
