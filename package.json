@@ -22,7 +22,10 @@
     "build:installer": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1",
     "build:installer:offline": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Offline",
     "build:dev-installer": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Dev",
-    "build:dev-installer:offline": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Dev -Offline"
+    "build:dev-installer:offline": "powershell -ExecutionPolicy Bypass -File scripts/build-installer.ps1 -Dev -Offline",
+    "offline:bundle": "node scripts/offline-bundle.mjs create",
+    "offline:setup": "node scripts/offline-bundle.mjs setup",
+    "offline:verify": "node scripts/offline-bundle.mjs verify"
   },
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
