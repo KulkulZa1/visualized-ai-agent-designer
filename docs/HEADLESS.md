@@ -52,6 +52,9 @@ npm run harness -- run <workflow.harness.yaml> --task "What to do" [options]
 | `--json` | One JSON event per line on stdout, and nothing else |
 | `--core <path>` | The `harness-core` binary. Default: `HARNESS_CORE`, then `src-tauri/target/release/harness-core`. |
 
+What this page says of Ollama's own behavior, and of how a real server answers, was
+not tested against a real server: see `docs/AIRGAPPED.md` §5.
+
 Examples:
 
 ```bash
@@ -70,7 +73,8 @@ LLM_PROVIDER=openai-compatible HARNESS_CUSTOM_BASE_URL=https://llm.example.com/v
   HARNESS_CUSTOM_MODEL=my-model HARNESS_CUSTOM_API_KEY=… \
   node cli/harness.mjs run review.harness.yaml --task "Review src/"
 
-# Ollama on another machine, with a larger context window and a longer call timeout
+# Ollama on another machine, with a larger context window and a longer call timeout.
+# Also raise each agent's own timeoutSeconds in the workflow: it still bounds its whole run.
 node cli/harness.mjs run review.harness.yaml --task "Review src/" --provider ollama \
   --base-url http://192.168.1.20:11434 --model qwen2.5-coder:7b --num-ctx 32768 --request-timeout 1800
 ```
@@ -435,19 +439,18 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
   applied), or use `--max-parallel 1`.
 - **`The model did not answer within the request timeout. On slow hardware, raise
   the model call timeout (Settings in the app, --request-timeout in harness
-  run).`**: one model call to Ollama or an OpenAI-compatible endpoint ran past
-  `--request-timeout` (default 600 s). Raise it with `--request-timeout <secs>` (30 to
-  86400) or `HARNESS_REQUEST_TIMEOUT_SECS`. Raise the agents' `timeoutSeconds` too: an
-  agent gives up at its own timeout even if a call is still going, and an agent's
-  300 s is shorter than the default call timeout (600 s). An agent that gives up does
-  not cancel its call: a local server keeps working on it until it answers or
+  run).`**: one model call to Ollama or an OpenAI-compatible endpoint got no answer
+  within `--request-timeout` (default 600 s). Raise it with `--request-timeout <secs>`
+  (30 to 86400) or `HARNESS_REQUEST_TIMEOUT_SECS`. Raise the agents' `timeoutSeconds`
+  too: an agent gives up at its own timeout even if a call is still going, and an
+  agent's 300 s is shorter than the default call timeout (600 s). An agent that gives
+  up does not cancel its call: a local server keeps working on it until it answers or
   `--request-timeout` ends it, so later calls to the same server may queue behind it.
-  The message appears when the server has not started answering within the timeout. A
-  server that starts a non-streamed reply and then stalls gives `Failed to parse
-  Ollama response: error decoding response body` (or `Failed to parse OpenAI
-  response: …`) instead; real servers normally send nothing until the reply is
-  complete. A non-streamed Anthropic call keeps `Anthropic network error: …`. A
-  refused connection keeps its own message (Ollama: `… is not reachable at <url>`; an
+  A reply that had begun when the timeout ended gives `Failed to parse Ollama
+  response: error decoding response body` (or `Failed to parse OpenAI response: …`)
+  instead; real servers normally send nothing until the reply is complete. An
+  Anthropic call that got no answer keeps `Anthropic network error: …`. A refused
+  connection keeps its own message (Ollama: `… is not reachable at <url>`; an
   OpenAI-compatible endpoint: `Network error: …`), and connecting fails after 10 s.
 - **`warning: <agent>: its prompt is about N tokens and it may reply with up to M
   tokens, but Ollama's context window is W tokens …`**: the agent's estimated prompt
@@ -462,8 +465,9 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
   (16384 by default).
 - **The context window or the call timeout seems to have no effect**: a
   `harness-core` built before this change ignores both without saying so, while the
-  run record still shows them. After updating, rebuild it with `npm run build:core`
-  (the same advice as for `hook_fingerprint`), or pass a new one with `--core`.
+  run record still shows the window. After updating, rebuild it with
+  `npm run build:core` (the same advice as for `hook_fingerprint`), or pass a new one
+  with `--core`.
 - **`harness run: … must be a whole number …` (exit 2)**: `--num-ctx`,
   `--request-timeout` or one of their variables has a value that is not valid (see
   Options from the environment).

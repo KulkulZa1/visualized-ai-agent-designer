@@ -168,7 +168,7 @@ call, a native tool-calling turn and the app's streaming turn) carries
 After updating, rebuild `harness-core` (`npm run build:core`). That includes the
 prebuilt one in an offline bundle made before this change. A `harness-core` built
 before this change ignores the context window and the model call timeout without
-saying so, while the run record still shows them.
+saying so, while the run record still shows the window.
 
 What the server's admin should know:
 
@@ -291,27 +291,28 @@ probes.
 
 A call that runs out of it fails with: "The model did not answer within the request
 timeout. On slow hardware, raise the model call timeout (Settings in the app,
---request-timeout in harness run)." It is the message for calls to Ollama and to
-OpenAI-style endpoints (OpenAI and the Custom endpoint), and for streamed replies, and
-it appears when the server has not started answering within the timeout. A server that
-starts a non-streamed reply and then stalls gives "Failed to parse Ollama response:
-error decoding response body" instead (or "Failed to parse OpenAI response: …"); real
-servers normally send nothing until the reply is complete. A non-streamed Anthropic
-call keeps "Anthropic network error: …". A refused connection keeps its own message
-(Ollama: "… is not reachable at `<url>`"; the Custom endpoint: "Network error: …").
+--request-timeout in harness run)." That message is for a call to Ollama or to an
+OpenAI-style endpoint (OpenAI or the Custom endpoint) that got no answer within the
+timeout, and for a streamed reply that ran out of it, even after it began. A
+non-streamed reply that had begun when the timeout ended gives "Failed to parse Ollama
+response: error decoding response body" instead (or "Failed to parse OpenAI response:
+…"); real servers normally send nothing until the reply is complete. An Anthropic call
+that got no answer keeps "Anthropic network error: …", streamed or not. A refused
+connection keeps its own message (Ollama: "… is not reachable at `<url>`"; the Custom
+endpoint: "Network error: …").
 
 **The agent's own Timeout is a second limit, and it comes first by default.** It
 bounds the agent's whole run: all its model calls and tools (time spent waiting for
 you to approve a command does not count). The agent stops waiting when it runs out,
 and fails with "`<name>` timed out after `<N>`s", even if a model call is still
-going. The call itself cannot be cancelled: a local server keeps working on it until
-it answers or the model call timeout ends it, so later calls to the same server may
-queue behind it, and its late answer is thrown away. So a call cannot outlast its
-agent. With the defaults (600 s for a call, 300 s for an agent made in the app) the
-agent's limit ends a slow call before the call's own does. On slow hardware, raise
-both: the model call timeout above your slowest single reply, and each agent's
-Timeout above what the whole agent needs. The workflow-level `timeoutSeconds` is
-saved but not applied.
+going. So an agent never waits longer than its Timeout, but its call may run on: the
+call itself is not cancelled, so a local server keeps working on it until it answers
+or the model call timeout ends it, later calls to the same server may queue behind it,
+and its late answer is thrown away. With the defaults (600 s for a call, 300 s for an
+agent made in the app) the agent gives up on a slow call before the call's own
+timeout is up. On slow hardware, raise both: the model call timeout above your
+slowest single reply, and each agent's Timeout above what the whole agent needs. The
+workflow-level `timeoutSeconds` is saved but not applied.
 
 ### What was checked
 
@@ -338,7 +339,8 @@ recorded every request, inside a network namespace with only loopback
   was sent nowhere (master sent it in the probe).
 - A server that took the request and never answered failed the agent at
   `--request-timeout` (30 s: 30.4 to 30.5 s) and the preflight probe at 120.3 s. A
-  probe that answered after 15 s passed (master failed it at 10.3 s).
+  probe that answered after 15 s passed (on master, the Ollama probe failed at
+  10.3 s).
 - The warning, with its current rule and text (rechecked on commit 2171368): a prompt
   that did not fit warned once per agent, on stderr and in `--json`. The shipped
   `examples/spec-to-pr.harness.yaml` at the default window gave none (the old rule
@@ -348,9 +350,11 @@ recorded every request, inside a network namespace with only loopback
 **Not run:** a real model server (Ollama, llama.cpp, vLLM or LM Studio); the streaming
 turn end to end (`harness run` never streams); the Tauri window and its `invoke`
 arguments; Windows; macOS; the hosted probes (OpenAI, Anthropic); real HTTPS to
-ollama.com; release builds. The notes about Ollama's own behavior above (its small
-default window, `OLLAMA_CONTEXT_LENGTH`, a model's own `num_ctx`, memory use, reloads)
-were not tested.
+ollama.com; release builds. The notes above about how a real server behaves (Ollama's
+small default window, `OLLAMA_CONTEXT_LENGTH`, a model's own `num_ctx`, that Ollama may
+cut off a prompt that does not fit without saying so, memory use, reloads, that a real
+server sends nothing until a non-streamed reply is complete, that later calls may
+queue behind one an agent gave up on) were not tested.
 
 ---
 
@@ -625,7 +629,7 @@ distro; a machine with no Rust toolchain.
 | Symptom | Cause / fix |
 |---|---|
 | Installer asks for internet / "downloading WebView2" | Built without `-Offline`. Rebuild with `-Offline`, or pre-install the WebView2 Evergreen runtime on the target. |
-| **Test connection**, or a run's preflight, fails with "Cannot reach …" (Custom) or "… is not reachable at `<url>`" (Ollama) | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. Connecting to a host that does not answer fails after 10 s. A probe that runs out of its 120 s fails with the same wording, as if the server were down (Custom: "Cannot reach `<url>`: error sending request"; Ollama: "… is not reachable at `<url>`", with an `ollama pull` hint). So if it fails after about two minutes, the server took the connection but did not answer: it may still be loading a model, or be stuck. |
+| **Test connection**, or a run's preflight, fails with "Cannot reach …" (Custom) or "… is not reachable at `<url>`" (Ollama) | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. Connecting to a host that does not answer fails after 10 s. A probe that runs out of its 120 s fails with the same wording, as if the server were down (Custom: "Cannot reach `<url>`: error sending request"; Ollama: "… is not reachable at `<url>`", with an `ollama pull` hint). So if it fails after about two minutes, the server took the connection but did not answer: a Custom endpoint may still be loading the model (its probe asks for one token), and any server may be stuck. |
 | **Test connection** says "No model name is set …" | The **Model name** field is blank, so nothing was sent. Enter the name your server serves, or click **↻ Models** and copy one (§5). |
 | "Authentication failed — check your API key" | Server requires a key but the field is blank or wrong. |
 | The run does not start, with "Custom endpoint URL is not configured." | Provider mode is **Custom** but no Base URL is saved. Enter it in Settings → Custom. In `harness run`, pass `--base-url` or set `HARNESS_CUSTOM_BASE_URL` (exit 3 when only `LLM_PROVIDER=openai-compatible` is set). |

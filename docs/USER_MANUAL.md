@@ -85,6 +85,9 @@ set up in **Settings** (gear icon). Save with **Save all & close**.
 | **Model name** | Custom Endpoint (OpenAI-compatible) | The model your server serves. There is no default. Blank sends each agent's own model. |
 | **Model call timeout (seconds)** | Execution Behavior | How long one model call may take in total: 30 to 86400, default 600. |
 
+What this section says of Ollama's own behavior was not tested against a real Ollama:
+see [AIRGAPPED.md](AIRGAPPED.md) §5.
+
 - **Context window.** Ollama may cut off a prompt that does not fit its window,
   without saying so. The app's value overrides the server's own
   `OLLAMA_CONTEXT_LENGTH` and a model's own `num_ctx` (its Modelfile): if either sets
@@ -113,10 +116,12 @@ set up in **Settings** (gear icon). Save with **Save all & close**.
   from Settings. **Use Settings** keeps the provider set in Settings.
 - **Slow hardware.** Raise the model call timeout and the agent's **Timeout (s)**
   (Role tab, Limits; 300 for a new agent). The agent's Timeout bounds its whole run,
-  all its model calls and tools, so with the defaults it ends a slow call before the
-  call's own 600 s does. A call that runs out of its timeout says "The model did not
-  answer within the request timeout. On slow hardware, raise the model call timeout
-  (Settings in the app, --request-timeout in harness run)."
+  all its model calls and tools, and the agent never waits longer than it: with the
+  defaults it gives up on a slow call before the call's own 600 s are up, but the call
+  may run on. A call to Ollama or an OpenAI-compatible server that runs out of its
+  timeout says "The model did not answer within the request timeout. On slow
+  hardware, raise the model call timeout (Settings in the app, --request-timeout in
+  harness run)."
 - **`harness run`** has the same settings as flags and variables
   (`--num-ctx`, `--request-timeout`, `HARNESS_CUSTOM_BASE_URL` and others:
   [HEADLESS.md](HEADLESS.md)). The app does not read those variables.

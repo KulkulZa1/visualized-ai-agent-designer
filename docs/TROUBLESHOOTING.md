@@ -60,9 +60,9 @@ switch to Ollama local.
 
 Full message: "The model did not answer within the request timeout. On slow hardware,
 raise the model call timeout (Settings in the app, --request-timeout in harness
-run)." One model call to Ollama or an OpenAI-compatible server ran past the model
-call timeout (600 s by default): the server had not started answering. It used to
-read like an unreachable server.
+run)." One model call to Ollama or an OpenAI-compatible server got no answer within
+the model call timeout (600 s by default), or a streamed reply ran out of it, even
+after it began. It used to read like an unreachable server.
 
 - Raise it: Settings → Execution Behavior → **Model call timeout (seconds)** (30 to
   86400), then **Save all & close**. In `harness run`: `--request-timeout <secs>` or
@@ -74,17 +74,22 @@ read like an unreachable server.
   timeout. The agent's giving up does not cancel the call: a local server keeps
   working on it until it answers or the model call timeout ends it, so later calls to
   the same server may queue behind it.
-- A server that starts a non-streamed reply and then stalls gives "Failed to parse
+- A non-streamed reply that had begun when the timeout ended gives "Failed to parse
   Ollama response: error decoding response body" instead (or "Failed to parse OpenAI
-  response: …"). Real servers normally send nothing until the reply is complete. A
-  non-streamed Anthropic call keeps "Anthropic network error: …".
+  response: …"). Real servers normally send nothing until the reply is complete. An
+  Anthropic call that got no answer keeps "Anthropic network error: …", streamed or
+  not.
 - A refused connection keeps its own message (Ollama: "… is not reachable at
   `<url>`"; the Custom endpoint: "Network error: …"). Connecting fails after 10 s,
   whatever the timeout.
 - **Test connection** and the run's preflight have their own limits: 120 s for
-  Ollama, Ollama Cloud and the Custom endpoint (a local server may still be loading
-  its model), 10 s for OpenAI and Anthropic. The model call timeout does not change
-  them.
+  Ollama, Ollama Cloud and the Custom endpoint (the Custom probe asks for one token
+  of a model, so a server that has not loaded it yet must do so first; the Ollama
+  probes only list the models), 10 s for OpenAI and Anthropic. The model call
+  timeout does not change them.
+
+What this section says of how a real server behaves, such as queued calls and when
+a reply is sent, was not tested against a real server: see `docs/AIRGAPPED.md` §5.
 
 ### Test connection or a run fails after about two minutes
 
@@ -92,8 +97,9 @@ A probe that runs out of its 120 s fails with the wording of a server that is do
 Ollama "… is not reachable at `<url>`" (with an `ollama pull` hint), the Custom
 endpoint "Cannot reach `<url>`: error sending request". If **Test connection** or a
 run fails after about two minutes with one of these, the server took the connection
-but did not answer: it may still be loading a model, or be stuck. Wait, and try again.
-Connecting to a host that does not answer fails after 10 s instead.
+but did not answer: a Custom endpoint may still be loading the model (its probe asks
+for one token), and any server may be stuck. Wait, and try again. Connecting to a
+host that does not answer fails after 10 s instead.
 
 ### Ollama may cut off a prompt, or the run warns about its context window
 
@@ -127,6 +133,9 @@ reply as 8192, so it warns when its prompt is more than 8192 tokens.
 - The estimate is a minimum. It covers the first prompt, and leaves out the tool
   definitions and the steps after it, so a long run can still pass the window with no
   warning.
+
+What this section says of Ollama's own behavior was not tested against a real Ollama:
+see `docs/AIRGAPPED.md` §5.
 
 ### Test connection says "No model name is set"
 
