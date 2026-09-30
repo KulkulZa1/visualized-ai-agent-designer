@@ -30,8 +30,8 @@ import { fileURLToPath } from "node:url";
 import {
   BUNDLE_SENTINEL, BUNDLE_SENTINEL_TEXT, DEFAULT_BUNDLE_DIR, FORMAT_VERSION, LOCKED, REPLACED_PARTS, UserError,
   batches, cargoConfigAction, cargoConfigText, countLockedCrates, describeList, formatBytes, formatTable,
-  glibcWarning, hashLockedFiles, hashMismatches, isBundleFolder, isInsideDir, lockedPackages, longPathWarning,
-  mismatchMessage, missingFromNpmCache, npmInvocation, parseCreateArgs, parseManifest, parseSetupArgs,
+  glibcWarning, hashLockedFiles, hashMismatches, inspectNpmCache, isBundleFolder, isInsideDir, lockedPackages,
+  longPathWarning, mismatchMessage, npmInvocation, parseCreateArgs, parseManifest, parseSetupArgs,
   parseVerifyArgs, parseVersion, sha256File, toolchainWarnings,
 } from "./offline-bundle-lib.mjs";
 
@@ -193,13 +193,17 @@ export function runCreate(argv, deps) {
   const dir = bundleDirFor(deps, options.dir);
   const platformKey = `${host.platform}-${host.arch}`;
 
-  // Everything that can refuse comes before the first change to the folder.
+  // Everything that can refuse comes before the first change to the folder, which under --force
+  // includes removing the old bundle's parts: reading the lockfiles and hashing them for the
+  // manifest refuse too (a lockfile of version 1, a package.json that is not JSON).
   refuseBundleDir(dir, root, options.force);
   requireSources(root);
   refuseOfflineCheckout(root);
   if (options.binaries && !existsSync(join(root, "node_modules"))) {
     throw new UserError("node_modules is missing, and the binaries are built from it. Run npm ci first, or make the bundle without binaries (--no-binaries).");
   }
+  const locked = lockedPackages(readJson(join(root, "package-lock.json")));
+  const sha256 = hashLockedFiles(root);
   const toolchain = detectToolchain(deps);
   for (const tool of ["npm", "cargo", "rustc"]) {
     if (toolchain[tool] === null) {
@@ -211,7 +215,7 @@ export function runCreate(argv, deps) {
   const early = longPathWarning(dir, host.platform);
   if (early) warn(`Warning: ${early}`);
 
-  const npm = addNpmPackages(deps, dir);
+  const npm = addNpmPackages(deps, dir, locked);
   const cargoCrateCount = vendorCrates(deps, dir);
   const binaries = options.binaries ? buildBinaries(deps, dir) : [];
 
@@ -220,14 +224,14 @@ export function runCreate(argv, deps) {
     formatVersion: FORMAT_VERSION,
     createdAt: new Date().toISOString(),
     gitCommit: gitCommit(deps),
-    sha256: hashLockedFiles(root),
+    sha256,
     toolchain,
     platform: host.platform,
     arch: host.arch,
     glibc: host.platform === "linux" ? host.glibc : null,
     npmTarballs: npm.tarballs,
-    // The tarballs whose content is in the cache by its digest, checked without npm: every OS's
-    // optional packages count. npm ci --offline installs only this platform's.
+    // The tarballs whose content is in the cache and hashes to the digest it is named by, checked
+    // without npm: every OS's optional packages count. npm ci --offline installs only this platform's.
     npmDigestsPresent: npm.digests,
     npmInstallCheckedOn: platformKey,
     cargoCrates: cargoCrateCount,
@@ -242,7 +246,7 @@ export function runCreate(argv, deps) {
   log("");
   log(`Offline bundle ready: ${dir}`);
   log(`  size          ${formatBytes(bytes + Buffer.byteLength(manifestText))}`);
-  log(`  npm packages  ${npm.tarballs} tarballs, ${npm.digests} found in the cache by digest (every OS); npm ci --offline worked for ${platformKey}`);
+  log(`  npm packages  ${npm.tarballs} tarballs, ${npm.digests} in the cache with the sha512 the lockfile pins (every OS); npm ci --offline worked for ${platformKey}`);
   log(`  rust crates   ${cargoCrateCount}`);
   log(`  binaries      ${binaries.length > 0 ? `${platformKey}: ${binaries.map((file) => basename(file.path)).join(", ")}` : "none"}`);
   log("");
@@ -310,13 +314,12 @@ function refuseOfflineCheckout(root) {
   }
 }
 
-// Puts every npm tarball the lockfile pins into <dir>/npm-cache, checks that the content of each
-// one is there (by its digest, for every OS), then proves that npm ci works from it, offline, on
-// this machine. Returns the number of tarballs, and how many of them the digest check could see.
-function addNpmPackages(deps, dir) {
+// Puts every npm tarball the lockfile pins (`locked`, from lockedPackages) into <dir>/npm-cache,
+// checks the content of each one (by its digest, for every OS: it is there, and its sha512 is the
+// digest it is named by), then proves that npm ci works from it, offline, on this machine. Returns
+// the number of tarballs, and how many of them the digest check could see.
+function addNpmPackages(deps, dir, { packages, skipped }) {
   const { root, log, warn } = deps;
-  const lock = readJson(join(root, "package-lock.json"));
-  const { packages, skipped } = lockedPackages(lock);
   if (skipped.length > 0) {
     warn(`Warning: ${skipped.length} package${skipped.length === 1 ? "" : "s"} in package-lock.json ${skipped.length === 1 ? "has" : "have"} no resolved URL or no integrity hash, so ${skipped.length === 1 ? "it is" : "they are"} left out of the bundle and npm ci --offline may fail for ${skipped.length === 1 ? "it" : "them"}: ${describeList(skipped, 5)}.`);
   }
@@ -331,11 +334,16 @@ function addNpmPackages(deps, dir) {
       throw new UserError(`npm cache add failed (${describeFailure(result)}) in batch ${index + 1} of ${groups.length}. Either the connection to the npm registry failed, or a URL in package-lock.json is wrong or gone (npm's message above says which). Fix that, then run create again with --force: the npm cache is kept, so what was fetched is not fetched again.`);
     }
   });
-  const { missing, unchecked } = missingFromNpmCache(cache, packages);
-  if (missing.length > 0) {
+  log("npm cache: checking the content of every package against its sha512 ...");
+  const { missing, corrupt, unchecked } = inspectNpmCache(cache, packages);
+  if (missing.length > 0 || corrupt.length > 0) {
     // The check reads npm's cache layout (_cacache/content-v2/sha512). If it names every package, this npm may keep its cache another way.
     const layout = missing.length === packages.length && packages.length > 1 ? " It names every package: this npm may keep its cache in a layout the check does not know (it reads _cacache/content-v2/sha512)." : "";
-    throw new UserError(`npm cache add finished, but the cache does not hold what package-lock.json pins for ${missing.length} package${missing.length === 1 ? "" : "s"}: ${describeList(missing)}. The registry may have served other files than the lockfile names, or a download was cut short. Run create again with --force (what is cached is kept); if it happens again, run npm ci online to see what npm says.${layout}`);
+    const problems = [];
+    if (missing.length > 0) problems.push(`does not hold what package-lock.json pins for ${packageCount(missing.length)}: ${describeList(missing)}`);
+    if (corrupt.length > 0) problems.push(`holds damaged content for ${packageCount(corrupt.length)} (its sha512 is not the one package-lock.json pins): ${describeList(corrupt)}`);
+    const cause = missing.length > 0 ? " The registry may have served other files than the lockfile names, or a download was cut short." : "";
+    throw new UserError(`npm cache add finished, but the cache ${problems.join(". It ")}.${cause} Run create again with --force (what is intact in the cache is kept); if it happens again, run npm ci online to see what npm says.${layout}`);
   }
   if (unchecked.length > 0) {
     warn(`Warning: ${unchecked.length} package${unchecked.length === 1 ? "" : "s"} in package-lock.json ${unchecked.length === 1 ? "has" : "have"} no sha512 integrity hash, so the digest check cannot see ${unchecked.length === 1 ? "it" : "them"}; only the npm ci --offline check on this platform covers ${unchecked.length === 1 ? "it" : "them"}: ${describeList(unchecked, 5)}.`);
@@ -344,6 +352,11 @@ function addNpmPackages(deps, dir) {
   // npm's logs hold this machine's paths, and are of no use to anyone else.
   rmSync(join(cache, "_logs"), { recursive: true, force: true });
   return { tarballs: packages.length, digests: packages.length - unchecked.length };
+}
+
+// "1 package", "2 packages".
+function packageCount(count) {
+  return `${count} package${count === 1 ? "" : "s"}`;
 }
 
 function readJson(path) {
@@ -457,16 +470,22 @@ export function runSetup(argv, deps) {
   for (const part of ["npm-cache", "cargo-vendor"]) {
     if (!existsSync(join(dir, part))) throw new UserError(`${join(dir, part)} is missing, so the bundle is incomplete. Copy it again from the machine that made it.`);
   }
-  // The content of every npm package the lockfile pins, for every OS: a damaged copy of the folder
-  // shows here, not as a failure of npm ci half way.
+  // The content of every npm package the lockfile pins, for every OS, and each file's sha512 against
+  // the digest it is named by: a damaged copy of the folder shows here, before npm ci runs (it leaves
+  // out a missing or damaged optional package, even this platform's, and still exits 0).
   const { packages } = lockedPackages(readJson(join(root, "package-lock.json")));
-  const { missing, unchecked } = missingFromNpmCache(join(dir, "npm-cache"), packages);
-  if (missing.length > 0) {
-    throw new UserError(`The bundle's npm cache is missing the content of ${missing.length} package${missing.length === 1 ? "" : "s"}: ${describeList(missing)}. The copy of the bundle is damaged or incomplete: copy the folder again from the machine that made it.`);
+  log("npm cache: checking the content of every package against its sha512 ...");
+  const { missing, corrupt, unchecked } = inspectNpmCache(join(dir, "npm-cache"), packages);
+  if (missing.length > 0 || corrupt.length > 0) {
+    const problems = [];
+    if (missing.length > 0) problems.push(`is missing the content of ${packageCount(missing.length)}: ${describeList(missing)}`);
+    if (corrupt.length > 0) problems.push(`holds damaged content for ${packageCount(corrupt.length)} (its sha512 is not the one package-lock.json pins): ${describeList(corrupt)}`);
+    throw new UserError(`The bundle's npm cache ${problems.join(". It ")}. The copy of the bundle is damaged or incomplete: copy the folder again from the machine that made it.`);
   }
-  log(`npm cache: the content of ${packages.length - unchecked.length} packages is there (every OS)`);
+  log(`npm cache: the content of ${packageCount(packages.length - unchecked.length)} is there and intact (every OS)`);
 
-  // Everything that can refuse comes before the first change.
+  // Everything that can refuse comes before the first change: npm ci writes node_modules, and the
+  // cargo config is the next write.
   const vendorDir = join(dir, "cargo-vendor");
   const configText = cargoConfigText(vendorDir);
   const configPath = join(root, ".cargo", "config.toml");
@@ -478,10 +497,15 @@ export function runSetup(argv, deps) {
     );
   }
 
+  // The prebuilt binaries for this OS are chosen and checked against the manifest's sha256 here, so
+  // that a damaged one refuses before npm ci runs; they are copied at the end.
+  const binaries = planBinaries(manifest, dir, deps);
+
   // 2. A different toolchain is a warning, not a refusal, and so is a path Windows may not take.
   for (const text of toolchainWarnings(manifest.toolchain, detectToolchain(deps))) warn(`Warning: ${text}`);
   const longPath = longPathWarning(dir, deps.host.platform, manifest.longestPathLength);
   if (longPath) warn(`Warning: ${longPath}`);
+  if (binaries.warning) warn(`Warning: ${binaries.warning}`);
 
   // 3. node_modules from the bundle's npm cache. Nothing is written before this works: a failed
   // npm ci must not leave the repo with the network turned off and no word about why.
@@ -501,23 +525,27 @@ export function runSetup(argv, deps) {
   log(`cargo: wrote ${configPath}`);
 
   // 5. The prebuilt binaries for this OS.
-  const binaries = installBinaries(manifest, dir, deps);
+  const installed = installBinaries(binaries, deps);
 
   // 6. What was done.
   log("");
   log("Offline setup done.");
   log(`  cargo     ${configPath} uses ${vendorDir} and turns the network off`);
   log(`  npm       node_modules installed from ${join(dir, "npm-cache")}`);
-  for (const line of binaries) log(`  binaries  ${line}`);
+  for (const line of installed) log(`  binaries  ${line}`);
   log("");
   log("Next: npm run offline:verify   (without the Tauri system libraries: npm run offline:verify -- --skip cargo-app)");
   log("Back online: delete .cargo/config.toml. If you move the bundle folder, run setup again: the config holds its absolute path.");
   return 0;
 }
 
-// Copies the bundle's binaries for this platform-arch to where harness run looks, unless a file is
-// already there, after checking each against the manifest's sha256. Returns lines to report.
-function installBinaries(manifest, dir, deps) {
+// Chooses the bundle's binaries for this platform-arch and where harness run looks for them, and
+// checks each file that will be copied against the manifest's sha256, without writing anything. A
+// file that is already in place is kept, and its copy in the bundle is not read. Returns
+//   files    for each: { source, target, shown, program, keep }
+//   none     the line to report when the bundle has no binaries for this platform, else null
+//   warning  what glibcWarning says about the bundle's glibc and this one's, else null
+function planBinaries(manifest, dir, deps) {
   const { root, host } = deps;
   const key = `${host.platform}-${host.arch}`;
   const prefix = `bin/${key}/`;
@@ -525,25 +553,30 @@ function installBinaries(manifest, dir, deps) {
   const entries = listed.filter((entry) => entry.path.startsWith(prefix) && BINARY_HOMES.has(entry.path.slice(prefix.length)));
   if (entries.length === 0) {
     const others = [...new Set(listed.map((entry) => entry.path.split("/")[1]))];
-    return [`none for ${key} in this bundle${others.length > 0 ? ` (it has ${others.join(", ")})` : ""}; build them with npm run build:cli and npm run build:core (verify does)`];
+    return { files: [], none: `none for ${key} in this bundle${others.length > 0 ? ` (it has ${others.join(", ")})` : ""}; build them with npm run build:cli and npm run build:core (verify does)`, warning: null };
   }
-  if (host.platform === "linux") {
-    const warning = glibcWarning(manifest.glibc, host.glibc);
-    if (warning) deps.warn(`Warning: ${warning}`);
-  }
-  return entries.map((entry) => {
+  const files = entries.map((entry) => {
     const name = entry.path.slice(prefix.length);
     const home = BINARY_HOMES.get(name);
     const target = join(root, ...home.dir, name);
-    const shown = relative(root, target);
-    if (existsSync(target)) return `kept ${shown}, already there`;
     const source = join(dir, ...entry.path.split("/"));
-    if (!existsSync(source) || sha256File(source) !== entry.sha256) {
+    const keep = existsSync(target);
+    if (!keep && (!existsSync(source) || sha256File(source) !== entry.sha256)) {
       throw new UserError(`${source} is missing or does not match its sha256 in MANIFEST.json, so the bundle is damaged. Copy it again from the machine that made it.`);
     }
+    return { source, target, shown: relative(root, target), program: home.program, keep };
+  });
+  return { files, none: null, warning: host.platform === "linux" ? glibcWarning(manifest.glibc, host.glibc) : null };
+}
+
+// Copies what planBinaries chose. Returns lines to report.
+function installBinaries(plan, deps) {
+  if (plan.none !== null) return [plan.none];
+  return plan.files.map(({ source, target, shown, program, keep }) => {
+    if (keep) return `kept ${shown}, already there`;
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
-    if (home.program && host.platform !== "win32") chmodSync(target, 0o755);
+    if (program && deps.host.platform !== "win32") chmodSync(target, 0o755);
     return `installed ${shown}`;
   });
 }

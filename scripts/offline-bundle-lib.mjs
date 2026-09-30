@@ -5,7 +5,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import { isAbsolute, join, relative, sep as pathSep } from "node:path";
 
 // Version 3: package-lock.json is hashed as canonical JSON without the root project's own name and
@@ -145,11 +145,6 @@ export function lockedPackages(lock) {
   return { packages, skipped };
 }
 
-// The `resolved` URL of each package lockedPackages lists.
-export function npmTarballs(lock) {
-  return lockedPackages(lock).packages.map((item) => item.resolved);
-}
-
 // "name@version", or the name alone when the lockfile gives no version.
 function packageLabel(item) {
   return item.version ? `${item.name}@${item.version}` : item.name;
@@ -160,35 +155,77 @@ export function describeList(names, limit = 20) {
   return names.length <= limit ? names.join(", ") : `${names.slice(0, limit).join(", ")} and ${names.length - limit} more`;
 }
 
-// Where npm's cache (cacache) keeps the content of a tarball whose lockfile integrity is
-// "sha512-<base64>": a file named by the hash in hex, <cache>/_cacache/content-v2/sha512/ab/cd/<rest>.
-// One path per sha512 hash the integrity lists (it may list several); none when it has no sha512.
-export function cacheContentFiles(cache, integrity) {
-  const files = [];
+// The sha512 hashes, in hex, that a lockfile integrity lists: "sha512-<base64>", possibly several
+// separated by spaces, each possibly followed by options after a "?". Not in the list: hashes of
+// other kinds, and anything that is not 64 bytes long.
+function sha512Digests(integrity) {
+  const digests = [];
   for (const hash of String(integrity).trim().split(/\s+/)) {
     const match = /^sha512-([A-Za-z0-9+/_-]+={0,2})$/.exec(hash.split("?")[0]);
     const digest = match ? Buffer.from(match[1], "base64") : null;
-    if (digest === null || digest.length !== 64) continue;
-    const hex = digest.toString("hex");
-    files.push(join(cache, "_cacache", "content-v2", "sha512", hex.slice(0, 2), hex.slice(2, 4), hex.slice(4)));
+    if (digest !== null && digest.length === 64) digests.push(digest.toString("hex"));
   }
-  return files;
+  return digests;
 }
 
-// Which of `packages` (from lockedPackages) have no content in the npm cache, whatever OS they are
-// for. This looks at the cache itself, not through npm: `npm ci` skips a missing optional package
-// without a word, even the host's own. Any one listed hash present is enough. `unchecked` are the
-// packages whose integrity has no sha512 to look for (an old lockfile): npm stores their content
-// under a hash the lockfile does not give.
-export function missingFromNpmCache(cache, packages) {
-  const missing = [];
-  const unchecked = [];
-  for (const item of packages) {
-    const files = cacheContentFiles(cache, item.integrity);
-    if (files.length === 0) unchecked.push(packageLabel(item));
-    else if (!files.some(isFile)) missing.push(packageLabel(item));
+// npm's cache (cacache) keeps the content of a tarball in a file named by its sha512 in hex:
+// <cache>/_cacache/content-v2/sha512/ab/cd/<rest>.
+function contentFile(cache, hex) {
+  return join(cache, "_cacache", "content-v2", "sha512", hex.slice(0, 2), hex.slice(2, 4), hex.slice(4));
+}
+
+// Where that is for a tarball with this lockfile integrity: one path for each sha512 hash it lists
+// (it may list several), none when it has no sha512.
+export function cacheContentFiles(cache, integrity) {
+  return sha512Digests(integrity).map((hex) => contentFile(cache, hex));
+}
+
+// The sha512 of a file, in hex, read a piece at a time: a tarball is never held whole in memory.
+export function sha512OfFile(path) {
+  const hash = createHash("sha512");
+  const piece = Buffer.allocUnsafe(1024 * 1024);
+  const fd = openSync(path, "r");
+  try {
+    let read;
+    while ((read = readSync(fd, piece, 0, piece.length, null)) > 0) hash.update(piece.subarray(0, read));
+  } finally {
+    closeSync(fd);
   }
-  return { missing, unchecked };
+  return hash.digest("hex");
+}
+
+// What is wrong in the npm cache with the content of `packages` (from lockedPackages), whatever OS
+// they are for. This looks at the cache itself, not through npm: `npm ci --offline` leaves out a
+// missing optional package without a word, even the host's own, and a damaged one with only a
+// warning, and exits 0 either way (it also removes the damaged content from the cache).
+//   missing    no content file for any hash the integrity lists
+//   corrupt    content is there, but no file hashes to the digest it is named by (cut short, or a
+//              byte changed)
+//   unchecked  no sha512 to look for (an old lockfile): npm keeps those under a hash the lockfile
+//              does not give
+// Any one listed hash with intact content is enough. Each list holds name@version, in lockfile order.
+export function inspectNpmCache(cache, packages) {
+  const found = { missing: [], corrupt: [], unchecked: [] };
+  for (const item of packages) {
+    const digests = sha512Digests(item.integrity);
+    if (digests.length === 0) {
+      found.unchecked.push(packageLabel(item));
+      continue;
+    }
+    const present = digests.filter((hex) => isFile(contentFile(cache, hex)));
+    if (present.length === 0) found.missing.push(packageLabel(item));
+    else if (!present.some((hex) => hashesTo(contentFile(cache, hex), hex))) found.corrupt.push(packageLabel(item));
+  }
+  return found;
+}
+
+// True when the file's sha512 is `hex`. A file that cannot be read is no good either.
+function hashesTo(file, hex) {
+  try {
+    return sha512OfFile(file) === hex;
+  } catch {
+    return false;
+  }
 }
 
 function isFile(path) {
@@ -514,16 +551,22 @@ export function longPathWarning(dir, platform, longest = LONGEST_BUNDLE_PATH) {
 }
 
 // True when `dir` is a folder this script made: it holds the sentinel `create` writes first, or the
-// MANIFEST.json of a bundle (a bundle from before the sentinel has only that). What `create --force`
+// MANIFEST.json of a bundle (a bundle from before the sentinel has only that): a numeric
+// formatVersion and the sha256 object, which every version of the manifest has. What `create --force`
 // may clear must pass this, so that --force cannot empty a folder that just has a `bin` in it.
 export function isBundleFolder(dir) {
   if (isFile(join(dir, BUNDLE_SENTINEL))) return true;
   try {
     const manifest = JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8"));
-    return manifest !== null && typeof manifest === "object" && typeof manifest.formatVersion === "number";
+    return isObject(manifest) && typeof manifest.formatVersion === "number" && isObject(manifest.sha256);
   } catch {
     return false;
   }
+}
+
+// A JSON object: not null, not a list.
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // True when `path` is `parent` itself or inside it.

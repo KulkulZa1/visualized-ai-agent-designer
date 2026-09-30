@@ -10,8 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync,
-  symlinkSync, writeFileSync,
+  chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync,
+  statSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
@@ -19,10 +19,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   CARGO_CONFIG_MARKER, FORMAT_VERSION, LOCKED, LOCKED_FILES, UserError,
   batches, cacheContentFiles, cargoConfigAction, cargoConfigText, countLockedCrates, dependencyFingerprint,
-  describeList, formatBytes, formatTable, glibcWarning, hashLockedFiles, hashMismatches, isBundleFolder,
-  isInsideDir, lockedPackages, longPathWarning, majorMinor, mismatchMessage, missingFromNpmCache, npmInvocation,
-  npmTarballs, parseCreateArgs, parseManifest, parseSetupArgs, parseVerifyArgs, parseVersion, quoteArg,
-  sha256Text, toolchainWarnings,
+  describeList, formatBytes, formatTable, glibcWarning, hashLockedFiles, hashMismatches, inspectNpmCache,
+  isBundleFolder, isInsideDir, lockedPackages, longPathWarning, majorMinor, mismatchMessage, npmInvocation,
+  parseCreateArgs, parseManifest, parseSetupArgs, parseVerifyArgs, parseVersion, quoteArg,
+  sha256Text, sha512OfFile, toolchainWarnings,
 } from "../../../scripts/offline-bundle-lib.mjs";
 import { main, runCreate, runSetup, runVerify, spawnTool, toolInvocation } from "../../../scripts/offline-bundle.mjs";
 
@@ -57,8 +57,12 @@ function messageOf(fn) {
 const COMMIT = "1b61fddd0c7da39deba0bb216138e2a7b85fb2af";
 
 const registryUrl = (name, version = "1.0.0") => `https://registry.npmjs.org/${name}/-/${name.split("/").pop()}-${version}.tgz`;
-// A real integrity string: sha512 of the name, in base64, as a lockfile has it.
-const integrityOf = (name) => `sha512-${createHash("sha512").update(name).digest("base64")}`;
+// What the fake registry serves at a URL: a tarball's bytes. A lockfile's integrity is the sha512 of
+// them, as in real life, and npm's cache keeps them in a file named by that digest.
+const tarballAt = (url) => `the tarball served at ${url}\n`;
+const sha512Integrity = (content) => `sha512-${createHash("sha512").update(content).digest("base64")}`;
+// The integrity a lockfile has for the package `name`, whose tarball registryUrl(name) serves.
+const integrityOf = (name) => sha512Integrity(tarballAt(registryUrl(name)));
 const entry = (name, extra = {}) => [`node_modules/${name}`, { version: "1.0.0", resolved: registryUrl(name), integrity: integrityOf(name), ...extra }];
 const lockOf = (...entries) => ({ name: "app", lockfileVersion: 3, packages: { "": { name: "app", version: "0.1.0" }, ...Object.fromEntries(entries) } });
 
@@ -167,7 +171,7 @@ function makeDeps(root, { host = LINUX, versions = { npm: "10.9.7", cargo: "1.94
         const found = Object.values(lock.packages).find((item) => item.resolved === url);
         // Content already in the cache stays as it is: cacache does not write the same digest twice.
         if (found?.integrity && !notCached?.(url) && !existsSync(contentFile(cache, found.integrity))) {
-          write(contentFile(cache, found.integrity), "a tarball");
+          write(contentFile(cache, found.integrity), tarballAt(url));
         }
       }
       write(join(cache, "_logs", "add-debug.log"), "/home/someone/private/path\n");
@@ -209,14 +213,17 @@ function makeBundle(root, dir, host = LINUX, extraArgs = []) {
 // Lockfile to tarball list
 // ---------------------------------------------------------------------------
 
-describe("npmTarballs", () => {
+describe("lockedPackages: the tarballs to fetch", () => {
+  // The resolved URL of each package it lists, which is what npm cache add is given.
+  const tarballs = (lock) => lockedPackages(lock).packages.map((item) => item.resolved);
+
   it("lists the resolved URL of every package and skips the root", () => {
-    const urls = npmTarballs(lockOf(entry("a"), entry("@scope/c")));
+    const urls = tarballs(lockOf(entry("a"), entry("@scope/c")));
     expect(urls).toEqual([registryUrl("a"), registryUrl("@scope/c")]);
   });
 
   it("skips links, packages bundled in another package, and entries without resolved or integrity", () => {
-    const urls = npmTarballs(
+    const urls = tarballs(
       lockOf(
         entry("kept"),
         entry("linked", { link: true }),
@@ -231,12 +238,12 @@ describe("npmTarballs", () => {
 
   it("lists a URL once, however many places install it", () => {
     const shared = entry("shared");
-    const urls = npmTarballs(lockOf(shared, ["node_modules/x/node_modules/shared", shared[1]], entry("other")));
+    const urls = tarballs(lockOf(shared, ["node_modules/x/node_modules/shared", shared[1]], entry("other")));
     expect(urls).toEqual([registryUrl("shared"), registryUrl("other")]);
   });
 
   it("keeps the optional packages of every platform, not only this one", () => {
-    const urls = npmTarballs(
+    const urls = tarballs(
       lockOf(
         entry("@esbuild/linux-x64", { optional: true, os: ["linux"], cpu: ["x64"] }),
         entry("@esbuild/win32-x64", { optional: true, os: ["win32"], cpu: ["x64"] }),
@@ -250,7 +257,7 @@ describe("npmTarballs", () => {
 
   it("does the same for the repository's own package-lock.json", () => {
     const lock = JSON.parse(readFileSync(join(repoRoot, "package-lock.json"), "utf8"));
-    const urls = npmTarballs(lock);
+    const urls = tarballs(lock);
     const otherPlatforms = Object.values(lock.packages).filter((item) => item.optional && Array.isArray(item.os) && !item.os.includes(process.platform));
     expect(otherPlatforms.length).toBeGreaterThan(0);
     for (const item of otherPlatforms) expect(urls).toContain(item.resolved);
@@ -259,7 +266,7 @@ describe("npmTarballs", () => {
   });
 
   it("refuses a lockfile that has no packages list (lockfileVersion 1)", () => {
-    expect(messageOf(() => npmTarballs({ lockfileVersion: 1, dependencies: {} }))).toMatch(/lockfileVersion 2 or 3/);
+    expect(messageOf(() => tarballs({ lockfileVersion: 1, dependencies: {} }))).toMatch(/lockfileVersion 2 or 3/);
   });
 });
 
@@ -875,13 +882,27 @@ describe("dependencyFingerprint", () => {
   });
 });
 
-// A fake npm cache with the content of some tarballs in it, laid out as npm's cacache does.
-function fakeCache(integrities) {
+// A fake npm cache holding the tarballs of the named packages, laid out as npm's cacache does.
+function fakeCache(names) {
   const cache = makeDir("cache");
-  for (const integrity of integrities) write(contentFile(cache, integrity), "a tarball");
+  for (const name of names) write(fileOf(cache, name), tarballAt(registryUrl(name)));
   return cache;
 }
+// The file in `cache` that holds the tarball of the package `name`.
+const fileOf = (cache, name) => contentFile(cache, integrityOf(name));
 const pkg = (name, extra = {}) => ({ name, version: "1.0.0", resolved: registryUrl(name), integrity: integrityOf(name), ...extra });
+
+// Ways a content file gets damaged on disk or in a copy of the folder.
+const damage = {
+  cutShort: (file) => writeFileSync(file, readFileSync(file).subarray(0, 10)),
+  // One byte changed: the file is as long as before.
+  flipByte: (file) => {
+    const bytes = readFileSync(file);
+    bytes[bytes.length >> 1] ^= 0xff;
+    writeFileSync(file, bytes);
+  },
+  empty: (file) => writeFileSync(file, ""),
+};
 
 describe("cacheContentFiles", () => {
   // sha512 of the empty string, in base64 and in hex: a value to pin the layout to.
@@ -906,7 +927,7 @@ describe("cacheContentFiles", () => {
     expect(cacheContentFiles("/c", `sha256-${sixtyFour}`)).toEqual([]);
     expect(cacheContentFiles("/c", `sha1-${sixtyFour}`)).toEqual([]);
     expect(cacheContentFiles("/c", `sha512-${sixtyFour}`)).toHaveLength(1);
-    expect(missingFromNpmCache(makeDir("cache"), [{ ...pkg("odd"), integrity: `sha256-${sixtyFour}` }])).toEqual({ missing: [], unchecked: ["odd@1.0.0"] });
+    expect(inspectNpmCache(makeDir("cache"), [{ ...pkg("odd"), integrity: `sha256-${sixtyFour}` }])).toEqual({ missing: [], corrupt: [], unchecked: ["odd@1.0.0"] });
   });
 
   it("ignores the options an integrity can carry", () => {
@@ -914,54 +935,140 @@ describe("cacheContentFiles", () => {
   });
 });
 
-describe("missingFromNpmCache", () => {
-  it("finds nothing missing when the content of every package is in the cache", () => {
-    const packages = [pkg("a"), pkg("b"), pkg("@scope/c")];
-    expect(missingFromNpmCache(fakeCache(packages.map((item) => item.integrity)), packages)).toEqual({ missing: [], unchecked: [] });
+describe("inspectNpmCache", () => {
+  const CLEAN = { missing: [], corrupt: [], unchecked: [] };
+
+  it("finds nothing wrong when the content of every package is in the cache and hashes to its digest", () => {
+    expect(inspectNpmCache(fakeCache(["a", "b", "@scope/c"]), [pkg("a"), pkg("b"), pkg("@scope/c")])).toEqual(CLEAN);
   });
 
   it("names a package whose content is not in the cache, as name@version", () => {
     const packages = [pkg("a"), pkg("b", { version: "2.5.0" }), pkg("@scope/c")];
-    const cache = fakeCache([packages[0].integrity, packages[2].integrity]);
-    expect(missingFromNpmCache(cache, packages).missing).toEqual(["b@2.5.0"]);
+    expect(inspectNpmCache(fakeCache(["a", "@scope/c"]), packages)).toEqual({ ...CLEAN, missing: ["b@2.5.0"] });
   });
 
   it("looks for the optional packages of every OS, the host's own included", () => {
     const linux = pkg("@esbuild/linux-x64", { os: ["linux"] });
     const win = pkg("@esbuild/win32-x64", { os: ["win32"] });
     const mac = pkg("@esbuild/darwin-arm64", { os: ["darwin"] });
-    expect(missingFromNpmCache(fakeCache([win.integrity, mac.integrity]), [linux, win, mac]).missing).toEqual(["@esbuild/linux-x64@1.0.0"]);
-    expect(missingFromNpmCache(fakeCache([linux.integrity]), [linux, win, mac]).missing).toEqual(["@esbuild/win32-x64@1.0.0", "@esbuild/darwin-arm64@1.0.0"]);
+    expect(inspectNpmCache(fakeCache(["@esbuild/win32-x64", "@esbuild/darwin-arm64"]), [linux, win, mac]).missing).toEqual(["@esbuild/linux-x64@1.0.0"]);
+    expect(inspectNpmCache(fakeCache(["@esbuild/linux-x64"]), [linux, win, mac]).missing).toEqual(["@esbuild/win32-x64@1.0.0", "@esbuild/darwin-arm64@1.0.0"]);
   });
 
   it("counts a package present when any one of the hashes its integrity lists has content", () => {
-    const first = integrityOf("first");
-    const second = integrityOf("second");
-    const both = { ...pkg("multi"), integrity: `${first} ${second}` };
-    expect(missingFromNpmCache(fakeCache([first]), [both]).missing).toEqual([]);
-    expect(missingFromNpmCache(fakeCache([second]), [both]).missing).toEqual([]);
-    expect(missingFromNpmCache(fakeCache([]), [both]).missing).toEqual(["multi@1.0.0"]);
+    const both = { ...pkg("multi"), integrity: `${integrityOf("first")} ${integrityOf("second")}` };
+    expect(inspectNpmCache(fakeCache(["first"]), [both])).toEqual(CLEAN);
+    expect(inspectNpmCache(fakeCache(["second"]), [both])).toEqual(CLEAN);
+    expect(inspectNpmCache(fakeCache([]), [both]).missing).toEqual(["multi@1.0.0"]);
     // A hash of another kind next to a sha512 one is not looked for, and does not hide a gap.
     const mixed = { ...pkg("mixed"), integrity: `sha1-abcdefghijklmnopqrstuvwxyz0= ${integrityOf("mixed")}` };
-    expect(missingFromNpmCache(fakeCache([integrityOf("mixed")]), [mixed]).missing).toEqual([]);
-    expect(missingFromNpmCache(fakeCache([]), [mixed]).missing).toEqual(["mixed@1.0.0"]);
+    expect(inspectNpmCache(fakeCache(["mixed"]), [mixed])).toEqual(CLEAN);
+    expect(inspectNpmCache(fakeCache([]), [mixed]).missing).toEqual(["mixed@1.0.0"]);
   });
 
   it("does not take a folder where the content should be for the content", () => {
-    const item = pkg("a");
     const cache = makeDir("cache");
-    mkdirSync(contentFile(cache, item.integrity), { recursive: true });
-    expect(missingFromNpmCache(cache, [item]).missing).toEqual(["a@1.0.0"]);
+    mkdirSync(fileOf(cache, "a"), { recursive: true });
+    expect(inspectNpmCache(cache, [pkg("a")])).toEqual({ ...CLEAN, missing: ["a@1.0.0"] });
   });
 
   it("cannot look for a package whose integrity has no sha512, and says so instead of calling it missing", () => {
     const old = pkg("old", { integrity: "sha1-abcdefghijklmnopqrstuvwxyz0=" });
-    expect(missingFromNpmCache(makeDir("cache"), [old, pkg("a")])).toEqual({ missing: ["a@1.0.0"], unchecked: ["old@1.0.0"] });
+    expect(inspectNpmCache(makeDir("cache"), [old, pkg("a")])).toEqual({ ...CLEAN, missing: ["a@1.0.0"], unchecked: ["old@1.0.0"] });
   });
 
   it("names nothing for an empty list, and copes with a cache folder that does not exist", () => {
-    expect(missingFromNpmCache(join(makeDir("none"), "no-cache"), [])).toEqual({ missing: [], unchecked: [] });
-    expect(missingFromNpmCache(join(makeDir("none"), "no-cache"), [pkg("a")]).missing).toEqual(["a@1.0.0"]);
+    expect(inspectNpmCache(join(makeDir("none"), "no-cache"), [])).toEqual(CLEAN);
+    expect(inspectNpmCache(join(makeDir("none"), "no-cache"), [pkg("a")]).missing).toEqual(["a@1.0.0"]);
+  });
+
+  describe("content that is there but does not hash to the digest it is named by", () => {
+    it("names a file that was cut short as corrupt, not missing", () => {
+      const cache = fakeCache(["a", "b"]);
+      damage.cutShort(fileOf(cache, "b"));
+      expect(inspectNpmCache(cache, [pkg("a"), pkg("b")])).toEqual({ ...CLEAN, corrupt: ["b@1.0.0"] });
+    });
+
+    it("names a file with one byte changed, still the same size, as corrupt", () => {
+      const cache = fakeCache(["a"]);
+      const size = statSync(fileOf(cache, "a")).size;
+      damage.flipByte(fileOf(cache, "a"));
+      expect(statSync(fileOf(cache, "a")).size).toBe(size);
+      expect(inspectNpmCache(cache, [pkg("a")])).toEqual({ ...CLEAN, corrupt: ["a@1.0.0"] });
+    });
+
+    it("names an empty file as corrupt, and another package's content under this one's digest", () => {
+      const cache = fakeCache(["a", "b"]);
+      damage.empty(fileOf(cache, "a"));
+      writeFileSync(fileOf(cache, "b"), tarballAt(registryUrl("a")));
+      expect(inspectNpmCache(cache, [pkg("a"), pkg("b")]).corrupt).toEqual(["a@1.0.0", "b@1.0.0"]);
+    });
+
+    it("keeps corrupt, missing and unchecked apart, each package once, in lockfile order", () => {
+      const cache = fakeCache(["a", "c", "d"]);
+      damage.cutShort(fileOf(cache, "d"));
+      damage.flipByte(fileOf(cache, "a"));
+      const old = pkg("old", { integrity: "sha1-abcdefghijklmnopqrstuvwxyz0=" });
+
+      expect(inspectNpmCache(cache, [pkg("a"), pkg("b"), pkg("c"), pkg("d"), old])).toEqual({
+        missing: ["b@1.0.0"],
+        corrupt: ["a@1.0.0", "d@1.0.0"],
+        unchecked: ["old@1.0.0"],
+      });
+    });
+
+    it("counts a package sound when one hash it lists has intact content, whatever the file of another has come to", () => {
+      const both = { ...pkg("multi"), integrity: `${integrityOf("first")} ${integrityOf("second")}` };
+      const cache = fakeCache(["first", "second"]);
+      damage.flipByte(fileOf(cache, "first"));
+      expect(inspectNpmCache(cache, [both])).toEqual(CLEAN);
+      // With both files damaged the package is corrupt, and so it is with one damaged and the other not there.
+      damage.cutShort(fileOf(cache, "second"));
+      expect(inspectNpmCache(cache, [both])).toEqual({ ...CLEAN, corrupt: ["multi@1.0.0"] });
+      rmSync(fileOf(cache, "second"));
+      expect(inspectNpmCache(cache, [both])).toEqual({ ...CLEAN, corrupt: ["multi@1.0.0"] });
+    });
+
+    it.skipIf(process.platform === "win32" || process.getuid?.() === 0)("takes a file it cannot read for a corrupt one, instead of stopping", () => {
+      const cache = fakeCache(["a"]);
+      chmodSync(fileOf(cache, "a"), 0o000);
+      try {
+        expect(inspectNpmCache(cache, [pkg("a")]).corrupt).toEqual(["a@1.0.0"]);
+      } finally {
+        chmodSync(fileOf(cache, "a"), 0o644);
+      }
+    });
+  });
+});
+
+describe("sha512OfFile", () => {
+  const hexOf = (bytes) => createHash("sha512").update(bytes).digest("hex");
+
+  it("is the sha512 of the file in hex, whether the file takes no read, one, or several", () => {
+    const dir = makeDir("hash");
+    // Sizes around the one-piece boundary of 1 MiB, and a file of several pieces with a short one last.
+    // The bytes vary, so that a piece that was counted twice or cut wrongly would change the hash.
+    for (const size of [0, 1, 1048575, 1048576, 1048577, 2621447]) {
+      const bytes = Buffer.alloc(size);
+      for (let i = 0; i < size; i++) bytes[i] = (i * 131 + (i >> 8) + (i >> 20)) & 0xff;
+      const file = join(dir, `file-${size}`);
+      writeFileSync(file, bytes);
+      expect(sha512OfFile(file), `${size} bytes`).toBe(hexOf(bytes));
+    }
+  });
+
+  it("notices one changed byte in the last piece of a large file", () => {
+    const file = join(makeDir("hash"), "big");
+    const bytes = Buffer.alloc(2621447, 5);
+    writeFileSync(file, bytes);
+    const before = sha512OfFile(file);
+    bytes[bytes.length - 1] ^= 1;
+    writeFileSync(file, bytes);
+    expect(sha512OfFile(file)).not.toBe(before);
+  });
+
+  it("stops with the file system's error for a file that is not there", () => {
+    expect(() => sha512OfFile(join(makeDir("hash"), "missing"))).toThrow(/ENOENT/);
   });
 });
 
@@ -980,7 +1087,7 @@ describe("isBundleFolder", () => {
     expect(isBundleFolder(dir)).toBe(true);
   });
 
-  it("knows a folder with a MANIFEST.json that has a numeric formatVersion, as a bundle from before the sentinel has", () => {
+  it("knows a folder with a MANIFEST.json that has a numeric formatVersion and a sha256 object, as a bundle from before the sentinel has", () => {
     const dir = makeDir("manifest");
     write(join(dir, "MANIFEST.json"), JSON.stringify({ formatVersion: 1, sha256: {} }));
     expect(isBundleFolder(dir)).toBe(true);
@@ -996,6 +1103,12 @@ describe("isBundleFolder", () => {
       ["a manifest that is not an object", "[1]"],
       ["a manifest that is not JSON", "{ nope"],
       ["an empty manifest", ""],
+      // Another program's manifest may have a formatVersion too: what a bundle's manifest always has is the hashes.
+      ["a formatVersion and nothing else", '{"formatVersion":3}'],
+      ["a sha256 that is null", '{"formatVersion":3,"sha256":null}'],
+      ["a sha256 that is a list", '{"formatVersion":3,"sha256":[]}'],
+      ["a sha256 that is text", '{"formatVersion":3,"sha256":"abc"}'],
+      ["a sha256 without a formatVersion", '{"sha256":{}}'],
     ]) {
       const dir = makeDir("other");
       write(join(dir, "MANIFEST.json"), text);
@@ -1359,6 +1472,23 @@ describe("create: the folder", () => {
     expect(record.calls).toEqual([]);
   });
 
+  it("with --force, refuses a folder whose MANIFEST.json has a formatVersion and no hashes, as another program's may, and leaves it all", () => {
+    const root = makeRepo();
+    const dir = makeDir("foreign");
+    write(join(dir, "MANIFEST.json"), '{"formatVersion":3}');
+    write(join(dir, "bin", "mine"), "precious");
+    write(join(dir, "cargo-vendor", "mine"), "precious");
+    const { deps, record } = makeDeps(root);
+
+    expect(messageOf(() => runCreate([dir, "--force", "--no-binaries"], deps))).toContain("is not a bundle made by this script");
+
+    expect(readFileSync(join(dir, "MANIFEST.json"), "utf8")).toBe('{"formatVersion":3}');
+    expect(readFileSync(join(dir, "bin", "mine"), "utf8")).toBe("precious");
+    expect(readFileSync(join(dir, "cargo-vendor", "mine"), "utf8")).toBe("precious");
+    expect(existsSync(join(dir, ".offline-bundle"))).toBe(false);
+    expect(record.calls).toEqual([]);
+  });
+
   it("with --force, refuses a folder inside the repository that has a tracked bin", () => {
     const root = makeRepo();
     write(join(root, "src-tauri", "src", "bin", "harness-core.rs"), "// tracked source");
@@ -1614,7 +1744,7 @@ describe("create: the steps", () => {
     const text = record.log.join("\n");
     expect(text).toContain(`Offline bundle ready: ${dir}`);
     expect(text).toMatch(/size\s+\d+(\.\d)? (B|KB|MB|GB)/);
-    expect(text).toMatch(/npm packages\s+3 tarballs, 3 found in the cache by digest \(every OS\); npm ci --offline worked for linux-x64/);
+    expect(text).toMatch(/npm packages\s+3 tarballs, 3 in the cache with the sha512 the lockfile pins \(every OS\); npm ci --offline worked for linux-x64/);
     expect(text).toMatch(/rust crates\s+2/);
     expect(text).toContain("npm run offline:setup");
     expect(text).toContain("npm run offline:verify");
@@ -1632,14 +1762,15 @@ describe("create: the steps", () => {
 });
 
 describe("create: the npm cache", () => {
-  it("checks by digest that the content of every package is in the cache, before it runs npm ci", () => {
+  it("checks by digest that the content of every package is in the cache and is what the digest says, before it runs npm ci", () => {
     const root = makeRepo();
     const { deps, record } = makeDeps(root);
     const dir = makeDir("bundle");
 
     runCreate([dir, "--no-binaries"], deps);
 
-    for (const name of ["a", "b", "@scope/c"]) expect(existsSync(contentFile(join(dir, "npm-cache"), integrityOf(name))), name).toBe(true);
+    for (const name of ["a", "b", "@scope/c"]) expect(readFileSync(fileOf(join(dir, "npm-cache"), name), "utf8"), name).toBe(tarballAt(registryUrl(name)));
+    expect(record.log).toContain("npm cache: checking the content of every package against its sha512 ...");
     expect(record.warn).toEqual([]);
   });
 
@@ -1651,7 +1782,9 @@ describe("create: the npm cache", () => {
     const text = messageOf(() => runCreate([dir, "--no-binaries"], deps));
 
     expect(text).toContain("the cache does not hold what package-lock.json pins for 2 packages: b@2.5.0, @scope/c@1.0.0");
-    expect(text).toContain("Run create again with --force (what is cached is kept)");
+    expect(text).toContain("The registry may have served other files than the lockfile names");
+    expect(text).toContain("Run create again with --force (what is intact in the cache is kept)");
+    expect(text).not.toContain("damaged");
     // The gap is named before npm ci is asked, and before the crates are fetched, and there is no manifest.
     expect(commandLines(record).some((line) => line.startsWith("npm ci"))).toBe(false);
     expect(commandLines(record).some((line) => line.startsWith("cargo vendor"))).toBe(false);
@@ -1698,16 +1831,90 @@ describe("create: the npm cache", () => {
     expect(JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8"))).toMatchObject({ npmTarballs: 2, npmDigestsPresent: 1 });
   });
 
-  it("keeps the npm cache's own content when it is made again with --force, and asks for no package that is already there", () => {
+  it("keeps the npm cache's own content when it is made again with --force, so that it is not fetched again", () => {
     const root = makeRepo();
     const dir = makeDir("bundle");
     runCreate([dir, "--no-binaries"], makeDeps(root).deps);
-    const content = contentFile(join(dir, "npm-cache"), integrityOf("a"));
-    write(content, "content from the first run");
+    const content = fileOf(join(dir, "npm-cache"), "a");
+    // A time long ago: a file the second run wrote again would have the time of now.
+    const longAgo = new Date("2020-01-01T00:00:00Z");
+    utimesSync(content, longAgo, longAgo);
 
     runCreate([dir, "--no-binaries", "--force"], makeDeps(root).deps);
 
-    expect(readFileSync(content, "utf8")).toBe("content from the first run");
+    expect(readFileSync(content, "utf8")).toBe(tarballAt(registryUrl("a")));
+    expect(statSync(content).mtime.getTime()).toBe(longAgo.getTime());
+  });
+
+  describe("content in the cache that does not hash to its digest", () => {
+    // A bundle that was made whole, and whose npm cache then came to harm (a disk fault, a copy that
+    // was cut short); create --force reuses that cache. The fake npm, like cacache, leaves alone
+    // what is under a digest already. (The real npm reads what it is asked for, finds a damaged file
+    // and fetches it again, with a warning; the check is for what it leaves.)
+    function madeThenDamaged(root, harm, names = ["b"]) {
+      const dir = makeBundle(root, makeDir("bundle"), LINUX, ["--no-binaries"]);
+      for (const name of names) harm(fileOf(join(dir, "npm-cache"), name));
+      return dir;
+    }
+
+    it.each([
+      ["cut short", damage.cutShort],
+      ["one byte changed", damage.flipByte],
+      ["emptied", damage.empty],
+    ])("stops and names a package whose content is %s as damaged, not as missing, before npm ci", (_label, harm) => {
+      const root = makeRepo();
+      const dir = madeThenDamaged(root, harm);
+      const { deps, record } = makeDeps(root);
+
+      const text = messageOf(() => runCreate([dir, "--force", "--no-binaries"], deps));
+
+      expect(text).toContain("the cache holds damaged content for 1 package (its sha512 is not the one package-lock.json pins): b@1.0.0.");
+      expect(text).toContain("Run create again with --force (what is intact in the cache is kept)");
+      expect(text).not.toContain("does not hold what package-lock.json pins");
+      expect(text).not.toContain("The registry may have served");
+      // One package of three is damaged: the hint about the cache's layout is for a cache with no content at all.
+      expect(text).not.toContain("layout");
+      expect(commandLines(record).some((line) => line.startsWith("npm ci"))).toBe(false);
+      expect(commandLines(record).some((line) => line.startsWith("cargo vendor"))).toBe(false);
+      expect(existsSync(join(dir, "MANIFEST.json"))).toBe(false);
+    });
+
+    it("names the packages whose content is missing and the ones whose content is damaged, apart, in one message", () => {
+      const root = makeRepo(lockOf(entry("a"), entry("b", { version: "2.5.0" }), entry("@scope/c"), entry("d")));
+      const dir = makeBundle(root, makeDir("bundle"), LINUX, ["--no-binaries"]);
+      const cache = join(dir, "npm-cache");
+      rmSync(fileOf(cache, "a"));
+      damage.flipByte(fileOf(cache, "b"));
+      damage.cutShort(fileOf(cache, "@scope/c"));
+      // The registry serves nothing for a, so that it stays missing.
+      const { deps } = makeDeps(root, { notCached: (url) => url === registryUrl("a") });
+
+      const text = messageOf(() => runCreate([dir, "--force", "--no-binaries"], deps));
+
+      expect(text).toContain(
+        "the cache does not hold what package-lock.json pins for 1 package: a@1.0.0. It holds damaged content for 2 packages (its sha512 is not the one package-lock.json pins): b@2.5.0, @scope/c@1.0.0.",
+      );
+      expect(text).toContain("The registry may have served other files than the lockfile names");
+      expect(text).not.toContain("d@1.0.0");
+    });
+
+    it("looks at the optional packages of every OS, as well as the ones for this machine", () => {
+      const root = makeRepo(lockOf(entry("a"), entry("@esbuild/win32-x64", { optional: true, os: ["win32"], cpu: ["x64"] })));
+      const dir = madeThenDamaged(root, damage.flipByte, ["@esbuild/win32-x64"]);
+
+      expect(messageOf(() => runCreate([dir, "--force", "--no-binaries"], makeDeps(root).deps))).toContain("damaged content for 1 package (its sha512 is not the one package-lock.json pins): @esbuild/win32-x64@1.0.0.");
+    });
+
+    it("cuts a long list of damaged packages after twenty", () => {
+      const many = Array.from({ length: 30 }, (_, i) => entry(`pkg${i}`));
+      const root = makeRepo(lockOf(...many));
+      const dir = madeThenDamaged(root, damage.cutShort, many.map(([path]) => path.replace("node_modules/", "")));
+      const text = messageOf(() => runCreate([dir, "--force", "--no-binaries"], makeDeps(root).deps));
+      expect(text).toContain("damaged content for 30 packages");
+      expect(text).toContain("pkg19@1.0.0 and 10 more");
+      // Every package is named, and none is missing: the hint about the cache's layout is for a cache with no content at all.
+      expect(text).not.toContain("layout");
+    });
   });
 
   it("removes npm's logs from the cache, the ones an earlier run left as well", () => {
@@ -1887,6 +2094,70 @@ describe("create: what stops it", () => {
     const root = makeRepo();
     rmSync(join(root, "src-tauri", "Cargo.lock"));
     expect(messageOf(() => runCreate([makeDir("bundle")], makeDeps(root).deps))).toMatch(/src-tauri\/Cargo\.lock was not found/);
+  });
+});
+
+describe("create: every refusal comes before the first change", () => {
+  // The folder an earlier create left: what --force removes, and the cache it keeps.
+  const OLD = {
+    ".offline-bundle": "made by create\n",
+    "MANIFEST.json": JSON.stringify({ formatVersion: 3, sha256: {}, note: "the old bundle" }),
+    "cargo-vendor/old-crate/Cargo.toml": "old crate",
+    "bin/linux-x64/harness-core": "old binary",
+    "npm-cache/_cacache/content-v2/sha512/aa/bb/kept": "old content",
+  };
+  function oldBundle() {
+    const dir = makeDir("old-bundle");
+    for (const [file, text] of Object.entries(OLD)) write(join(dir, ...file.split("/")), text);
+    return dir;
+  }
+  // Every file of the old bundle is still there, as it was, and nothing else came.
+  function expectOldBundle(dir) {
+    for (const [file, text] of Object.entries(OLD)) expect(readFileSync(join(dir, ...file.split("/")), "utf8"), file).toBe(text);
+    expect(readdirSync(dir).sort()).toEqual([".offline-bundle", "MANIFEST.json", "bin", "cargo-vendor", "npm-cache"]);
+  }
+  // What a refusal leaves for the tools: they are asked for their versions, and for nothing that changes anything.
+  const started = (record) => commandLines(record).filter((line) => !line.endsWith("--version"));
+
+  const SPOILED = [
+    ["a package-lock.json of lockfileVersion 1", (root) => write(join(root, "package-lock.json"), JSON.stringify({ lockfileVersion: 1, dependencies: {} })), /lockfileVersion 2 or 3/],
+    ["a package-lock.json that is not JSON", (root) => write(join(root, "package-lock.json"), "not json at all"), /package-lock\.json could not be read as JSON/],
+    ["a package.json that is not JSON", (root) => write(join(root, "package.json"), "{ nope"), /package\.json is not valid JSON/],
+  ];
+
+  it.each(SPOILED)("with --force, refuses %s before it removes any part of the old bundle", (_label, spoil, refusal) => {
+    const root = makeRepo();
+    spoil(root);
+    const dir = oldBundle();
+    const { deps, record } = makeDeps(root);
+
+    expect(messageOf(() => runCreate([dir, "--force", "--no-binaries"], deps))).toMatch(refusal);
+
+    expectOldBundle(dir);
+    expect(started(record)).toEqual([]);
+  });
+
+  it.each(SPOILED)("does not make a folder that is new when it refuses %s", (_label, spoil, refusal) => {
+    const root = makeRepo();
+    spoil(root);
+    const parent = makeDir("parent");
+    const dir = join(parent, "not", "yet");
+
+    expect(messageOf(() => runCreate([dir, "--no-binaries"], makeDeps(root).deps))).toMatch(refusal);
+
+    expect(readdirSync(parent)).toEqual([]);
+  });
+
+  it("with --force and a lockfile it accepts, does replace the old parts of that same folder: only the refusal kept them", () => {
+    const root = makeRepo();
+    const dir = oldBundle();
+
+    runCreate([dir, "--force", "--no-binaries"], makeDeps(root).deps);
+
+    expect(existsSync(join(dir, "bin"))).toBe(false);
+    expect(existsSync(join(dir, "cargo-vendor", "old-crate"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8")).note).toBeUndefined();
+    expect(readFileSync(join(dir, "npm-cache", "_cacache", "content-v2", "sha512", "aa", "bb", "kept"), "utf8")).toBe("old content");
   });
 });
 
@@ -2075,14 +2346,15 @@ describe("setup: what it refuses", () => {
     const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
     const offline = copyRepo(source);
     // A copy that lost the content of the win32 package (which this Linux machine would never install), and of the Linux one.
-    rmSync(contentFile(join(dir, "npm-cache"), integrityOf("@esbuild/win32-x64")));
-    rmSync(contentFile(join(dir, "npm-cache"), integrityOf("@esbuild/linux-x64")));
+    rmSync(fileOf(join(dir, "npm-cache"), "@esbuild/win32-x64"));
+    rmSync(fileOf(join(dir, "npm-cache"), "@esbuild/linux-x64"));
     const { deps, record } = makeDeps(offline);
 
     const text = messageOf(() => runSetup([dir], deps));
 
     expect(text).toContain("The bundle's npm cache is missing the content of 2 packages: @esbuild/win32-x64@0.25.1, @esbuild/linux-x64@1.0.0");
     expect(text).toContain("copy the folder again");
+    expect(text).not.toContain("damaged content");
     // Nothing was started or written.
     expect(record.calls).toEqual([]);
     expect(existsSync(join(offline, ".cargo"))).toBe(false);
@@ -2091,10 +2363,57 @@ describe("setup: what it refuses", () => {
   it("names a package missing from the cache only once, and not a package that is there", () => {
     const source = makeRepo();
     const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
-    rmSync(contentFile(join(dir, "npm-cache"), integrityOf("b")));
+    rmSync(fileOf(join(dir, "npm-cache"), "b"));
     const text = messageOf(() => runSetup([dir], makeDeps(copyRepo(source)).deps));
     expect(text).toContain("missing the content of 1 package: b@1.0.0.");
     expect(text).not.toContain("a@1.0.0");
+  });
+
+  it.each([
+    ["cut short", damage.cutShort],
+    ["one byte changed", damage.flipByte],
+    ["emptied", damage.empty],
+  ])("refuses a damaged copy of the bundle whose npm cache holds content that is %s, whatever OS it is for", (_label, harm) => {
+    const source = makeRepo(
+      lockOf(
+        entry("a"),
+        entry("@esbuild/win32-x64", { version: "0.25.1", optional: true, os: ["win32"], cpu: ["x64"] }),
+        entry("@esbuild/linux-x64", { optional: true, os: ["linux"], cpu: ["x64"] }),
+      ),
+    );
+    const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
+    const offline = copyRepo(source);
+    const file = fileOf(join(dir, "npm-cache"), "@esbuild/win32-x64");
+    harm(file);
+    const size = statSync(file).size;
+    const { deps, record } = makeDeps(offline);
+
+    const text = messageOf(() => runSetup([dir], deps));
+
+    expect(text).toContain("The bundle's npm cache holds damaged content for 1 package (its sha512 is not the one package-lock.json pins): @esbuild/win32-x64@0.25.1.");
+    expect(text).toContain("The copy of the bundle is damaged or incomplete: copy the folder again from the machine that made it.");
+    expect(text).not.toContain("is missing the content");
+    // Nothing was started or written, and the bundle itself is left as it was.
+    expect(record.calls).toEqual([]);
+    expect(existsSync(join(offline, ".cargo"))).toBe(false);
+    expect(existsSync(join(offline, "node_modules"))).toBe(false);
+    expect(statSync(file).size).toBe(size);
+  });
+
+  it("names the packages missing and the ones damaged apart, in one message", () => {
+    const source = makeRepo(lockOf(entry("a"), entry("b", { version: "2.5.0" }), entry("@scope/c"), entry("d")));
+    const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
+    const cache = join(dir, "npm-cache");
+    rmSync(fileOf(cache, "a"));
+    damage.flipByte(fileOf(cache, "b"));
+    damage.cutShort(fileOf(cache, "@scope/c"));
+
+    const text = messageOf(() => runSetup([dir], makeDeps(copyRepo(source)).deps));
+
+    expect(text).toContain(
+      "The bundle's npm cache is missing the content of 1 package: a@1.0.0. It holds damaged content for 2 packages (its sha512 is not the one package-lock.json pins): b@2.5.0, @scope/c@1.0.0. The copy of the bundle is damaged or incomplete",
+    );
+    expect(text).not.toContain("d@1.0.0");
   });
 
   it("refuses a package-lock.json that is not JSON, saying which file, instead of printing a stack", () => {
@@ -2147,15 +2466,28 @@ describe("setup: what it does", () => {
     expect(readFileSync(join(offline, ".cargo", "config.toml"), "utf8")).toContain(join(dir, "cargo-vendor"));
   });
 
-  it("checks the npm cache first, and says how many packages it found", () => {
+  it("checks the npm cache first, and says how many packages it found intact", () => {
     const source = makeRepo();
     const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
     const { deps, record } = makeDeps(copyRepo(source));
 
     runSetup([dir], deps);
 
-    expect(record.log).toContain("npm cache: the content of 3 packages is there (every OS)");
-    expect(record.log.indexOf("npm cache: the content of 3 packages is there (every OS)")).toBeLessThan(record.log.indexOf("npm: npm ci --offline ..."));
+    const checking = record.log.indexOf("npm cache: checking the content of every package against its sha512 ...");
+    const found = record.log.indexOf("npm cache: the content of 3 packages is there and intact (every OS)");
+    expect(checking).toBeGreaterThanOrEqual(0);
+    expect(found).toBeGreaterThan(checking);
+    expect(found).toBeLessThan(record.log.indexOf("npm: npm ci --offline ..."));
+  });
+
+  it("counts only the packages it could check, in the singular when there is one", () => {
+    const source = makeRepo(lockOf(entry("a"), entry("old", { integrity: "sha1-abcdefghijklmnopqrstuvwxyz0=" })));
+    const dir = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
+    const { deps, record } = makeDeps(copyRepo(source));
+
+    runSetup([dir], deps);
+
+    expect(record.log).toContain("npm cache: the content of 1 package is there and intact (every OS)");
   });
 
   it("installs node_modules with npm ci --offline from the bundle's cache, in the repo", () => {
@@ -2354,6 +2686,40 @@ describe("setup: the prebuilt binaries", () => {
     expect(existsSync(corePath(offline))).toBe(false);
   });
 
+  it.each([
+    ["does not match its sha256", (dir) => write(join(dir, "bin", "linux-x64", "harness-core"), "tampered")],
+    ["is not there", (dir) => rmSync(join(dir, "bin", "linux-x64", "harness-core"))],
+  ])("refuses a binary that %s before npm ci runs, before the cargo config is written, and before any binary is copied", (_label, spoil) => {
+    const source = makeRepo();
+    const dir = makeBundle(source, makeDir("bundle"));
+    spoil(dir);
+    const offline = copyRepo(source);
+    const { deps, record } = makeDeps(offline);
+
+    expect(messageOf(() => runSetup([dir], deps))).toMatch(/harness-core is missing or does not match its sha256.*damaged/);
+
+    expect(commandLines(record).some((line) => line.startsWith("npm ci"))).toBe(false);
+    expect(existsSync(join(offline, ".cargo"))).toBe(false);
+    expect(existsSync(join(offline, "node_modules"))).toBe(false);
+    // harness-run.mjs is listed first and is fine, and it is not copied either: all are checked before one is.
+    expect(existsSync(cliPath(offline))).toBe(false);
+    expect(existsSync(join(offline, "src-tauri", "target"))).toBe(false);
+    expect(record.log.join("\n")).not.toContain("cargo: wrote");
+  });
+
+  it("does not read the bundle's copy of a binary that is already in place, even one that is damaged", () => {
+    const source = makeRepo();
+    const dir = makeBundle(source, makeDir("bundle"));
+    write(join(dir, "bin", "linux-x64", "harness-core"), "tampered");
+    const offline = copyRepo(source);
+    write(corePath(offline), "my own build");
+
+    expect(runSetup([dir], makeDeps(offline).deps)).toBe(0);
+
+    expect(readFileSync(corePath(offline), "utf8")).toBe("my own build");
+    expect(existsSync(cliPath(offline))).toBe(true);
+  });
+
   it("installs nothing when the bundle's binaries are for another platform, and says what it has", () => {
     const source = makeRepo();
     const dir = makeBundle(source, makeDir("bundle"), { platform: "win32", arch: "x64", glibc: null });
@@ -2387,6 +2753,20 @@ describe("setup: the prebuilt binaries", () => {
     runSetup([dir], deps);
 
     expect(record.warn.join("\n")).toMatch(/built on glibc 2\.39; this machine has glibc 2\.31/);
+  });
+
+  it("does not warn about glibc when the bundle has no binaries for this machine, or when this machine is not Linux", () => {
+    const source = makeRepo();
+    const withoutBinaries = makeBundle(source, makeDir("bundle"), LINUX, ["--no-binaries"]);
+    const old = makeDeps(copyRepo(source), { host: { ...LINUX, glibc: "2.31" } });
+    runSetup([withoutBinaries], old.deps);
+    expect(old.record.warn).toEqual([]);
+
+    const mac = { platform: "darwin", arch: "arm64", glibc: null };
+    const macBundle = makeBundle(source, makeDir("bundle"), mac);
+    const here = makeDeps(copyRepo(source), { host: mac });
+    runSetup([macBundle], here.deps);
+    expect(here.record.warn).toEqual([]);
   });
 });
 
@@ -2583,8 +2963,24 @@ describe("main", () => {
 // cargo is started: what a step would start is what the tests above check.
 describe("scripts/offline-bundle.mjs as a command", () => {
   const script = join(repoRoot, "scripts", "offline-bundle.mjs");
+  // The environment of a process that can start no tool: PATH is a folder with nothing in it, and
+  // npm_execpath, which npm sets and which lets the script start npm without the PATH, is gone. A
+  // refusal that these tests expect and that were lost would then stop at "npm was not found",
+  // instead of going on to run a real npm or cargo on these tests' folders. Values in `extra`
+  // replace those of the environment; undefined removes one.
+  function toollessEnv(extra = {}) {
+    const kept = Object.entries(process.env).filter(([key]) => !["PATH", "NPM_EXECPATH"].includes(key.toUpperCase()));
+    return { ...Object.fromEntries(kept), PATH: makeDir("no-tools"), ...extra };
+  }
   const run = (args, options = {}) =>
-    spawnSync(process.execPath, [options.script ?? script, ...args], { encoding: "utf8", cwd: options.cwd ?? repoRoot, env: options.env ?? process.env });
+    spawnSync(process.execPath, [options.script ?? script, ...args], { encoding: "utf8", cwd: options.cwd ?? repoRoot, env: options.env ?? toollessEnv() });
+  // A scratch repo with its own copy of the script, because create and setup work on the repo the script is in.
+  function repoWithScript(packageLock) {
+    const repo = makeRepo(packageLock);
+    mkdirSync(join(repo, "scripts"));
+    for (const name of ["offline-bundle.mjs", "offline-bundle-lib.mjs"]) copyFileSync(join(repoRoot, "scripts", name), join(repo, "scripts", name));
+    return { repo, script: join(repo, "scripts", "offline-bundle.mjs") };
+  }
 
   it("prints the usage for --help", () => {
     const result = run(["--help"]);
@@ -2632,6 +3028,49 @@ describe("scripts/offline-bundle.mjs as a command", () => {
     expect(readdirSync(dir).sort()).toEqual([".bashrc", "bin"]);
   });
 
+  it("create refuses a foreign folder that has a manifest with a formatVersion and nothing else: exit 1, files unchanged", () => {
+    const dir = makeDir("foreign");
+    write(join(dir, "MANIFEST.json"), '{"formatVersion":3}');
+    write(join(dir, "bin", "mine"), "precious");
+
+    const result = run(["create", dir, "--force", "--no-binaries"]);
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/^offline-bundle: .* is not a bundle made by this script/);
+    expect(readdirSync(dir).sort()).toEqual(["MANIFEST.json", "bin"]);
+    expect(readFileSync(join(dir, "bin", "mine"), "utf8")).toBe("precious");
+  });
+
+  it("can start no tool here: create in an empty folder goes as far as looking for npm, having changed nothing", () => {
+    // If this ever finds npm, the tests above no longer show that a refusal comes before any tool is asked for.
+    const { repo, script: copy } = repoWithScript();
+    const dir = makeDir("bundle");
+
+    const result = run(["create", dir, "--no-binaries"], { script: copy, cwd: repo });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/^offline-bundle: npm was not found on the PATH\./);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("create --force refuses a lockfile npm cannot use before it removes any part of the old bundle: exit 1", () => {
+    const { repo, script: copy } = repoWithScript({ lockfileVersion: 1, dependencies: {} });
+    const dir = makeDir("bundle");
+    write(join(dir, ".offline-bundle"), "made by create\n");
+    write(join(dir, "MANIFEST.json"), JSON.stringify({ formatVersion: 3, sha256: {} }));
+    write(join(dir, "cargo-vendor", "old-crate", "Cargo.toml"), "old");
+    write(join(dir, "bin", "linux-x64", "harness-core"), "old binary");
+
+    const result = run(["create", dir, "--force", "--no-binaries"], { script: copy, cwd: repo });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/^offline-bundle: package-lock\.json has no "packages" list \(it needs lockfileVersion 2 or 3\)/);
+    expect(readdirSync(dir).sort()).toEqual([".offline-bundle", "MANIFEST.json", "bin", "cargo-vendor"]);
+    expect(readFileSync(join(dir, "cargo-vendor", "old-crate", "Cargo.toml"), "utf8")).toBe("old");
+    expect(readFileSync(join(dir, "bin", "linux-x64", "harness-core"), "utf8")).toBe("old binary");
+    expect(JSON.parse(readFileSync(join(dir, "MANIFEST.json"), "utf8"))).toEqual({ formatVersion: 3, sha256: {} });
+  });
+
   it("setup says a folder is not a bundle when the path is a file, instead of printing a stack", () => {
     const file = join(makeDir("parent"), "hostname");
     write(file, "some-host\n");
@@ -2645,18 +3084,16 @@ describe("scripts/offline-bundle.mjs as a command", () => {
 
   describe("a relative folder", () => {
     // Under npm run the working folder is the package root, and npm says where it was run in INIT_CWD.
-    const without = (name) => Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== name));
-
     it("is taken from INIT_CWD when npm set it, wherever the working folder is", () => {
       const ranFrom = realpathSync(makeDir("ran-from"));
-      const result = run(["setup", "some-bundle"], { env: { ...process.env, INIT_CWD: ranFrom } });
+      const result = run(["setup", "some-bundle"], { env: toollessEnv({ INIT_CWD: ranFrom }) });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(join(ranFrom, "some-bundle", "MANIFEST.json"));
     });
 
     it("is taken from the working folder when INIT_CWD is not set", () => {
       const cwd = realpathSync(makeDir("cwd"));
-      const result = run(["setup", "some-bundle"], { cwd, env: without("INIT_CWD") });
+      const result = run(["setup", "some-bundle"], { cwd, env: toollessEnv({ INIT_CWD: undefined }) });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(join(cwd, "some-bundle", "MANIFEST.json"));
     });
@@ -2664,7 +3101,7 @@ describe("scripts/offline-bundle.mjs as a command", () => {
     it("is not touched when it is absolute", () => {
       const elsewhere = realpathSync(makeDir("elsewhere"));
       const absolute = join(realpathSync(makeDir("absolute")), "some-bundle");
-      const result = run(["setup", absolute], { env: { ...process.env, INIT_CWD: elsewhere } });
+      const result = run(["setup", absolute], { env: toollessEnv({ INIT_CWD: elsewhere }) });
       expect(result.stderr).toContain(join(absolute, "MANIFEST.json"));
       expect(result.stderr).not.toContain(elsewhere);
     });
