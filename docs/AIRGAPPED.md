@@ -31,17 +31,18 @@ the internet once, on a connected machine:
 - **Install the app.** Build the installer (§1), move it over, and run it (§2). The
   workstation only runs the installer.
 - **Build and test from source.** Make an **offline bundle**: every npm package and
-  Rust crate the lockfiles name, and prebuilt binaries for its platform. Move it
-  with the source, then run `npm run offline:setup` and `npm run offline:verify` on
-  the workstation. See "Build and test from source, offline". It does not cover the
-  Windows installer build, which still needs the internet.
+  Rust crate that `package-lock.json` and `src-tauri/Cargo.lock` name, and prebuilt
+  binaries for its platform. Move it with the source, then run
+  `npm run offline:setup` and `npm run offline:verify` on the workstation. See
+  "Build and test from source, offline". It does not cover the Windows installer
+  build, which still needs the internet.
 
 ---
 
 ## 1. Build the installer (on an internet-connected machine)
 
 Prerequisites on the **build** machine (not the target): Node.js
-^20.19.0 or >=22.12.0 (LTS), Rust 1.86 or newer (stable), and VS Build Tools
+^20.19.0 or >=22.12.0 (LTS), Rust 1.88 or newer (stable), and VS Build Tools
 with "Desktop development with C++".
 
 ```powershell
@@ -97,10 +98,11 @@ Then:
    fails: wait, and test again.
 2. (Optional) Click **Load models** to list `<base-url>/models`.
 3. **Save.**
-4. Set the run provider to **Custom**: top-level provider mode → **Custom**. This
-   forces every agent to the custom endpoint. **Auto** never picks Custom: it
-   chooses OpenAI, Anthropic or local Ollama from each agent's model name, and
-   nodes have no provider setting of their own. From a terminal, run
+4. Set the run provider to **Custom**: in **Provider Settings**, set
+   **Active Provider Mode** to **Custom**. This forces every agent to the custom
+   endpoint. **Auto** never picks Custom: it chooses OpenAI, Anthropic or local
+   Ollama from each agent's model name, and nodes have no provider setting of
+   their own. From a terminal, run
    `harness run --provider openai-compatible --base-url <base-url> --model <model>`
    (`docs/HEADLESS.md`).
 
@@ -126,10 +128,17 @@ Use this to build, test and change Harness Studio's source on a workstation with
 internet. Sections 1 and 2 install the finished app; this path is for the source.
 It was checked on Linux x64 only: see "What was verified" below.
 
-An **offline bundle** holds everything a build would download: every npm package and
-Rust crate the lockfiles name, and prebuilt binaries for the platform it was made
-on. You make it once on a connected machine, move it with the source, and set it up.
-After that, `npm ci`, `cargo` and the builds fetch nothing.
+An **offline bundle** covers the two lockfiles the build reads, `package-lock.json`
+and `src-tauri/Cargo.lock`: every npm package and Rust crate they name, and prebuilt
+binaries for the platform it was made on. You make it once on a connected machine,
+move it with the source, and set it up. After that, `cargo` and the builds fetch
+nothing (the installer build excepted: see Not covered).
+
+On the workstation, only setup's own `npm ci` uses the bundle's npm cache, and only
+cargo stays offline: setup writes `.cargo/config.toml` for it. A plain `npm ci`
+afterwards goes to the npm registry, and with no route out it stalls for a while,
+then fails. To reinstall `node_modules`, run setup again, or run
+`npm ci --offline --cache <bundle>/npm-cache` (`<bundle>` is the bundle folder).
 
 It is `scripts/offline-bundle.mjs`, with three npm scripts. With npm, put `--` before
 the options.
@@ -146,24 +155,42 @@ npm run offline:bundle -- ../harness-bundle  # or to a folder you choose
 
 | Option | What it does |
 |---|---|
-| `<dir>` | Where to write the bundle. Default: `offline-bundle` in the repo root (gitignored). |
+| `<dir>` | Where to write the bundle. Default: `offline-bundle` in the repo root (gitignored). A relative path is taken from the folder you ran npm in. |
 | `--no-binaries` | Leave out the prebuilt `harness-run.mjs` and `harness-core`. |
-| `--force` | Re-create a folder this script made, and only such a folder. It keeps `npm-cache` for reuse. |
+| `--force` | Re-create a folder this script made, and only such a folder. It keeps `npm-cache` and replaces the rest. |
 
-`create` refuses a folder that is not empty. It writes:
+`create` refuses a folder that is not empty. Before it clears anything, it also
+refuses a `package.json` or `package-lock.json` that is not valid JSON, and a
+lockfile without a `packages` list (lockfileVersion 1). It writes:
 
 | Path | Holds |
 |---|---|
-| `npm-cache/` | Every package in `package-lock.json`, including the optional platform packages of every OS: the esbuild, rollup and Tauri CLI binaries for Windows, macOS and Linux |
+| `.offline-bundle` | A marker file, written first, so that `--force` knows a folder `create` made even if it stopped halfway |
+| `npm-cache/` | Every package in `package-lock.json` (an entry without `resolved` or `integrity` is left out, with a warning; the current lock has none), including the optional platform packages of every OS: the esbuild, rollup and Tauri CLI binaries for Windows, macOS and Linux |
 | `cargo-vendor/` | `cargo vendor --locked`: every platform's crates |
 | `bin/<platform>-<arch>/` | `harness-run.mjs` and `harness-core`, prebuilt for the platform the bundle was made on only |
-| `MANIFEST.json` | The git commit; hashes of `package-lock.json`, `src-tauri/Cargo.lock` (line endings normalized) and the dependency fields of `package.json`; the node, npm, cargo and rustc versions; the platform and arch, and glibc on Linux; counts; binary checksums; the longest path inside the bundle |
+| `MANIFEST.json` | `formatVersion` 3; the git commit; hashes of `package-lock.json` (as canonical JSON without the root project's name and version, so a bump of the project's own version, indentation or line endings do not matter), `src-tauri/Cargo.lock` (line endings normalized) and the dependency fields of `package.json`; the node, npm, cargo and rustc versions; the platform and arch, and glibc on Linux; counts; binary checksums; the longest path inside the bundle |
 
-It checks the npm cache: a digest check confirms every package is in it, for every
-OS, and an offline install runs for the platform the bundle was made on.
+It checks the npm cache: for every package and every OS, the content is there and
+hashes to the sha512 that `package-lock.json` pins (an entry with no sha512 is not
+hashed, and a warning says so; the current lock has none). An offline install then
+runs for the platform the bundle was made on. A `package.json` that disagrees with
+the lock fails only at that install check, after `--force` has removed the old parts.
 
 Measured on Linux x64: about 1.1 GB (`npm-cache` about 307 MB, `cargo-vendor` about
 836 MB, binaries about 6 MB), and about 2 minutes with binaries on a fast machine.
+
+About `--force`:
+
+- It keeps `npm-cache` and replaces `cargo-vendor`, `bin` and `MANIFEST.json`. The
+  npm cache only grows: to start it clean, delete `npm-cache` or use a new folder.
+- A `--force` that fails partway has already removed the old `cargo-vendor`, `bin`
+  and `MANIFEST.json`. Keep a copy of a working bundle if you need one.
+- It repairs a damaged bundle: npm fetches again only what is missing or damaged.
+  That needs the connected machine.
+- It recognises a bundle by the `.offline-bundle` marker file, or by a
+  `MANIFEST.json` with a numeric `formatVersion` and a `sha256` object. It refuses
+  any other folder that is not empty.
 
 ### Move it
 
@@ -177,6 +204,9 @@ git clone harness-studio.bundle harness-studio  # air-gapped machine
 
 An archive of the repo works too, for example `git archive -o harness-studio.tar.gz HEAD`.
 
+Setup only checks that the dependencies match (see Set up). It does not check that
+the source is the commit the prebuilt binaries were built from, so use that commit.
+
 ### Set up (air-gapped machine)
 
 From the repo root of the moved source:
@@ -189,17 +219,28 @@ npm run offline:setup -- ../harness-bundle  # or the folder you made
 Setup:
 
 - Refuses a bundle made for other dependencies, and names the file that differs.
-- Refuses a bundle with missing packages, and lists them. This catches a damaged
-  copy.
+  A bump of the project's own version, a reformatted `package-lock.json` and CRLF
+  line endings do not count as a difference; a changed dependency does.
+- Refuses a bundle of another format version, made by an older or a newer version
+  of the script (this one reads `formatVersion` 3): make a new bundle.
+- Refuses a missing or damaged npm package, names it, and changes nothing. Every
+  package's content must be in the bundle's cache and hash to the sha512 that
+  `package-lock.json` pins, for every OS. This catches a damaged copy of the npm
+  cache. The prebuilt binaries' checksums (below) do the same for them. Setup does
+  not check the vendored crates: cargo does, when it builds ("the listed checksum
+  of … has changed").
 - Warns when node, npm, cargo or rustc differ from the bundle's versions.
 - Runs `npm ci --offline` from the bundle's cache.
-- Writes a gitignored `.cargo/config.toml` in the repo root. It points cargo at the
-  vendored crates and sets `net.offline = true`. It refuses to overwrite a
-  `.cargo/config.toml` it did not write.
+- Writes a gitignored `.cargo/config.toml` in the repo root, once `npm ci` has
+  worked. It points cargo at the vendored crates and sets `net.offline = true`. It
+  refuses to overwrite a `.cargo/config.toml` it did not write.
 - Installs the prebuilt `cli/dist/harness-run.mjs` and
   `src-tauri/target/release/harness-core` where they are missing, after checking
   their sha256 against `MANIFEST.json`. That catches a damaged copy, not a swapped
   file: the manifest is in the same folder.
+
+Every refusal comes before setup changes anything: the prebuilt binaries' checksums
+are checked before `npm ci` runs.
 
 Keep the bundle folder where it is: cargo reads the vendored crates from it on every
 build, and the config holds its path. If you move it, run setup again.
@@ -253,8 +294,10 @@ The bundle holds dependencies, not toolchains or system packages. Install these 
 the workstation first:
 
 - **Node.js** ^20.19.0 or >=22.12.0 (what Vite 7 needs), and npm.
-- **Rust**, at least the version in the bundle's `MANIFEST.json`. The vendored crates
-  have `rust-version` floors.
+- **Rust** 1.88 or newer: the locked crates need it (`rust-version = "1.88.0"` in
+  darling 0.23.0, plist 1.9.0, serde_with 3.19.0 and time 0.3.47). Setup warns when
+  your rustc differs from the one that made the bundle, and says to update Rust when
+  yours is older.
 - **A C compiler.** `rusqlite` builds its bundled SQLite.
 - **Linux:** `pkg-config` and the OpenSSL development files (`harness-core` links
   `libssl.so.3`). For the app build (`cargo-app`) only, also webkit2gtk and Tauri's
@@ -262,37 +305,52 @@ the workstation first:
 - **Windows:** MSVC Build Tools ("Desktop development with C++"). Keep the bundle in
   a short folder, such as `C:\offline-bundle`: some paths inside it are long, and
   Windows stops at 260 characters unless long paths are enabled. Not run on Windows.
+- **macOS:** the npm packages for macOS are in the bundle, but a macOS build was not
+  run.
 - **The bundle's platform**, to use its prebuilt binaries. They run only on the
   platform the bundle was made on. The Linux ones are also tied to its glibc (2.39 in
   the verified bundle; `MANIFEST.json` records it).
 
 ### Not covered
 
-- **The Windows installer build.** The Tauri bundler downloads WiX, NSIS utilities
-  and the WebView2 bootstrapper. Build installers on a connected machine, as in §1.
+- **The Windows installer build.** The Tauri bundler downloads WiX and NSIS
+  utilities, and the WebView2 bootstrapper (with `-Offline`, the full WebView2
+  offline installer instead). It needs the network either way. Build installers on a
+  connected machine, as in §1.
+- **`vscode-extension/`.** It has its own `package-lock.json`, which is not in the
+  bundle.
 - **The toolchains and system packages themselves** (see Prerequisites).
 
 ### What was verified
 
-2026-09-30, on Linux x64 (node 22.22.2, npm 10.9.7, cargo and rustc 1.94.1). This
-check is not part of the test suite or CI. A bundle was made with network access.
-Then, in a fresh clone inside a network namespace with no route out (`unshare -rn`),
-and with empty cargo and npm caches so that the bundle was the only source:
+2026-09-30, on Linux x64 (node 22.22.2, npm 10.9.7, cargo and rustc 1.94.1), with
+the final script (commit `0e95a27`). This check is not part of the test suite or CI.
+A bundle was made with network access. Then, in a fresh clone inside a network
+namespace with no route out (`unshare -rn`), and with empty cargo and npm caches so
+that the bundle was the only source:
 
 - **Setup** installed 271 packages offline and placed both binaries.
 - **The shipped binary.** `harness-core` ran
   `harness run examples/purchasing-decision.harness.yaml --provider openai` with no
   key, before anything was built. It exited 3 with `not_started`, which is CI's own
   check.
-- **Verify** passed all 7 steps: vitest 1269 tests / 73 files; `cargo test` 143
-  (app) and 143 + 2 (core); both release builds and the vite build. The compile took
-  about 6 minutes.
+- **Verify** passed all 7 steps: vitest 1413 tests / 73 files, and 1 skipped (it
+  needs a non-root user; it runs on CI); `cargo test` 143 (app) and 143 + 2 (core);
+  both release builds and the vite build. The compile took about 6 minutes.
 - **No downloads.** Every crate compiled from the vendored folder, none from the
   machine's own cache, and nothing was downloaded.
 - **Negative controls.** Without the bundle, the same steps fail at once:
   `cargo fetch` cannot resolve crates.io, and `npm ci --offline` gives ENOTCACHED.
-- **Refusals.** A one-byte change to `package-lock.json`, and a `.cargo/config.toml`
-  that setup did not write, were both refused, and the file was left unchanged.
+- **Refusals.** A changed dependency version was refused, naming the file, and a
+  `.cargo/config.toml` that setup did not write was refused; the file was left
+  unchanged.
+- **Accepted.** A bump of the project's own version, a reformatted
+  `package-lock.json` and CRLF line endings.
+- **A damaged cache.** A missing, a truncated and a same-size-corrupted package for
+  another OS were each refused, with the package named, and nothing was written.
+- **`create --force`** repaired a damaged bundle (on the connected machine: npm
+  fetched again only what was missing or damaged), and refused a folder it did not
+  make.
 
 **Not verified:** Windows; macOS; a physically air-gapped machine (a network
 namespace is not one); the installer build; the prebuilt binary on another Linux
@@ -317,8 +375,8 @@ distro; a machine with no Rust toolchain.
 ## Notes and limitations
 
 - **CSP still lists cloud hosts** (`api.openai.com`, `api.anthropic.com`,
-  `ollama.com`, `openrouter.ai`) in `connect-src`. Offline these are simply
-  unreachable. Because provider calls are made by the Rust process — not the
+  `ollama.com`, `api.ollama.com`, `openrouter.ai`) in `connect-src`. Offline these are
+  simply unreachable. Because provider calls are made by the Rust process — not the
   WebView — this list does not affect whether your local server works, and tightening
   it would not change those calls. It does govern the model picker's **Load from
   API**, the in-WebView `fetch()` in the table above (local Ollama's tag list at

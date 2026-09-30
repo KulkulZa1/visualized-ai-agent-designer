@@ -8,7 +8,7 @@
 winget install Rustlang.Rustup
 # Restart terminal, then:
 rustup default stable
-cargo --version  # must be 1.86+ (Cargo.lock pins icu_* 2.2 crates, which need 1.86)
+cargo --version  # must be 1.88+ (Cargo.lock pins time 0.3.47, plist 1.9.0 and darling 0.23, which need 1.88)
 ```
 
 ### 2. Visual C++ Build Tools 2022
