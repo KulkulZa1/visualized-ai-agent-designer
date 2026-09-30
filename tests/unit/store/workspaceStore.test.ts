@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { useWorkspaceStore, openWorkspaceFolder } from "@/store/workspaceStore";
+import { useWorkspaceStore, openWorkspaceFolder, refreshWorkspaceFiles } from "@/store/workspaceStore";
 import { mockInvokeHandler } from "@/ipc/mockTauri";
+import type { FileTreeEntry } from "@/types/filesystem";
 import { act, renderHook } from "@testing-library/react";
 import { useWorkflow } from "@/hooks/useWorkflow";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
@@ -60,6 +61,82 @@ describe("openWorkspaceFolder", () => {
     await openWorkspaceFolder();
 
     expect(useWorkspaceStore.getState().workspacePath).toBe("/before");
+  });
+});
+
+describe("refreshWorkspaceFiles", () => {
+  const file = (path: string): FileTreeEntry => ({ name: path, path, isDirectory: false });
+  const shownPaths = () => useWorkspaceStore.getState().fileTree.map((e) => e.path);
+  /** A file listing that answers when the test says so. */
+  const listing = () => {
+    let answer!: (tree: FileTreeEntry[]) => void;
+    const pending = new Promise<FileTreeEntry[]>((resolve) => { answer = resolve; });
+    return { pending, answer };
+  };
+
+  beforeEach(() => { useWorkspaceStore.setState({ workspacePath: "/ws", fileTree: [] }); });
+
+  // A run's refresh is not awaited, so the next run's can start while it is still listing.
+  it("ends with the newest refresh's tree when an older listing comes back last", async () => {
+    const [older, newer] = [listing(), listing()];
+    const listings = [older.pending, newer.pending];
+    mockInvokeHandler("list_workspace_files", () => listings.shift());
+    const olderRefresh = refreshWorkspaceFiles();
+    const newerRefresh = refreshWorkspaceFiles();
+
+    newer.answer([file("made-by-run-2.txt")]);
+    await newerRefresh;
+    expect(shownPaths()).toEqual(["made-by-run-2.txt"]);
+
+    older.answer([file("made-by-run-1.txt")]);
+    await olderRefresh;
+    expect(shownPaths()).toEqual(["made-by-run-2.txt"]);
+  });
+
+  it("ends with the newest refresh's tree when the older listing comes back first too", async () => {
+    const [older, newer] = [listing(), listing()];
+    const listings = [older.pending, newer.pending];
+    mockInvokeHandler("list_workspace_files", () => listings.shift());
+    const olderRefresh = refreshWorkspaceFiles();
+    const newerRefresh = refreshWorkspaceFiles();
+
+    older.answer([file("made-by-run-1.txt")]);
+    await olderRefresh;
+    newer.answer([file("made-by-run-2.txt")]);
+    await newerRefresh;
+
+    expect(shownPaths()).toEqual(["made-by-run-2.txt"]);
+  });
+
+  it("applies a refresh that starts after the earlier ones are done", async () => {
+    mockInvokeHandler("list_workspace_files", () => [file("first.txt")]);
+    await refreshWorkspaceFiles();
+    mockInvokeHandler("list_workspace_files", () => [file("second.txt")]);
+    await refreshWorkspaceFiles();
+
+    expect(shownPaths()).toEqual(["second.txt"]);
+  });
+
+  it("does not put a tree in when another workspace was opened while it listed", async () => {
+    const slow = listing();
+    mockInvokeHandler("list_workspace_files", () => slow.pending);
+    const refresh = refreshWorkspaceFiles();
+
+    useWorkspaceStore.setState({ workspacePath: "/other", fileTree: [file("other.txt")] });
+    slow.answer([file("of-ws.txt")]);
+    await refresh;
+
+    expect(shownPaths()).toEqual(["other.txt"]);
+  });
+
+  it("does nothing without a workspace", async () => {
+    let listed = 0;
+    mockInvokeHandler("list_workspace_files", () => { listed++; return []; });
+    useWorkspaceStore.setState({ workspacePath: null });
+
+    await refreshWorkspaceFiles();
+
+    expect(listed).toBe(0);
   });
 });
 

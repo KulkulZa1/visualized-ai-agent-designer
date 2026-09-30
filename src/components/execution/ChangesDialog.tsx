@@ -33,6 +33,7 @@ const smallButton: React.CSSProperties = {
 
 export function ChangesDialog({ onClose }: { onClose: () => void }) {
   const changes = useExecutionStore((s) => s.currentRun?.changes) ?? NO_CHANGES;
+  const runWorkspace = useExecutionStore((s) => s.currentRun?.workspacePath);
   const forgetFileChange = useExecutionStore((s) => s.forgetFileChange);
   const workspacePath = useWorkspaceStore((s) => s.workspacePath);
   const [selected, setSelected] = useState<string | null>(null);
@@ -47,6 +48,13 @@ export function ChangesDialog({ onClose }: { onClose: () => void }) {
 
   async function revert(targets: FileChange[]) {
     if (!workspacePath) { setMessage("Open the workspace to revert changes."); return; }
+    // The paths are relative to the folder the run worked in. Another folder open now has files
+    // of its own under the same names: reverting there would overwrite them with this run's
+    // old content, so nothing is read, written or deleted. (The diff stays viewable.)
+    if (runWorkspace && runWorkspace !== workspacePath) {
+      setMessage(`These changes were made in ${runWorkspace}. Open that folder to revert them.`);
+      return;
+    }
     const reverted: string[] = [];
     try {
       for (const change of targets) {

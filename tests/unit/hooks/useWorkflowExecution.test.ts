@@ -106,6 +106,77 @@ describe("useWorkflowExecution", () => {
     expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]);
   });
 
+  it("does not wait for that refresh: a file listing that is slow to come back holds up neither the run's end nor the next run", async () => {
+    // A big workspace: the (synchronous) Rust listing is still walking the tree.
+    let listingDone!: () => void;
+    const listing = new Promise<void>((resolve) => { listingDone = resolve; });
+    let listings = 0;
+    mockInvokeHandler("list_workspace_files", async () => {
+      listings++;
+      await listing;
+      return [{ name: "notes.md", path: "notes.md", isDirectory: false }];
+    });
+    let providerCalls = 0;
+    mockInvokeHandler("call_ollama_api", () => { providerCalls++; return "ok"; });
+    useWorkspaceStore.setState({ fileTree: [] });
+    const { result } = renderHook(() => useWorkflowExecution());
+    const onError = vi.fn();
+    try {
+      let firstReturned = false;
+      await act(async () => {
+        const first = result.current.executeWorkflow(undefined, vi.fn()).then(() => { firstReturned = true; });
+        // Raced, so that a run that waits for the listing fails here, at once and clearly.
+        await Promise.race([first, new Promise((resolve) => setTimeout(resolve, 2000))]);
+      });
+
+      expect(firstReturned).toBe(true);
+      expect(listings).toBe(1); // the refresh was started, and is still waiting
+      // The undo history records again: an edit made now is not lost to the run's pause.
+      const undoSteps = useWorkflowStore.temporal.getState().pastStates.length;
+      act(() => { useWorkflowStore.getState().addNode(makeNode("C")); });
+      expect(useWorkflowStore.temporal.getState().pastStates).toHaveLength(undoSteps + 1);
+
+      await act(async () => { await result.current.executeWorkflow(undefined, onError); });
+
+      expect(onError).not.toHaveBeenCalled(); // not refused as "already in progress"
+      expect(providerCalls).toBe(2 + 3); // A and B in the first run, A, B and C in the second
+      expect(useExecutionStore.getState().currentRun?.status).toBe("done");
+    } finally {
+      listingDone();
+    }
+
+    // The refresh still lands once the listing comes back.
+    await act(async () => { await listing; });
+    await vi.waitFor(() => expect(useWorkspaceStore.getState().fileTree.map((e) => e.path)).toEqual(["notes.md"]));
+  });
+
+  // The run's changes are paths in the folder the engine was given: Revert writes only there.
+  it("records the folder the run worked in, though another folder is opened while it runs", async () => {
+    const recordedIn = new Set<string>();
+    mockInvokeHandler("write_workspace_file", (args) => {
+      const { workspacePath, relativePath } = args as { workspacePath: string; relativePath: string };
+      if (relativePath.startsWith(".harness/runs/")) recordedIn.add(workspacePath);
+    });
+    mockInvokeHandler("call_ollama_api", () => {
+      useWorkspaceStore.setState({ workspacePath: "/other" }); // the user opens another folder mid-run
+      return "ok";
+    });
+
+    const finished = await run();
+
+    expect(finished?.workspacePath).toBe("/ws");
+    expect([...recordedIn]).toEqual(["/ws"]); // where the engine saved the run's record
+  });
+
+  it("records no folder for a run that has no workspace open", async () => {
+    useWorkspaceStore.setState({ workspacePath: null });
+
+    const finished = await run();
+
+    expect(finished?.status).toBe("done");
+    expect(finished?.workspacePath).toBeUndefined();
+  });
+
   it("reports the run as failed when an agent errors, even with continueOnError", async () => {
     mockInvokeHandler("call_ollama_api", (args) =>
       (args as { system: string }).system.startsWith("You are B")
@@ -351,7 +422,7 @@ describe("useWorkflowExecution", () => {
     await act(async () => {
       const first = result.current.executeWorkflow(undefined, vi.fn());
       while (!helperCalled) await new Promise((resolve) => setTimeout(resolve, 10));
-      useExecutionStore.getState().startRun("next run"); // the helper now belongs to an old run
+      useExecutionStore.getState().startRun("next run", "run-next"); // the helper now belongs to an old run
       await first;
     });
 
@@ -756,7 +827,7 @@ describe("useWorkflowExecution", () => {
     it("does not change the next run's node: a late delta from the stopped run is ignored", async () => {
       const stream = await stopWhileStreaming();
       act(() => {
-        useExecutionStore.getState().startRun("next run");
+        useExecutionStore.getState().startRun("next run", "run-next");
         useExecutionStore.getState().updateAgent("A", { output: "run two" });
         stream.onmessage({ text: "stale" });
       });
@@ -767,7 +838,7 @@ describe("useWorkflowExecution", () => {
 
     it("ignores a delta once a newer run has replaced the run it belongs to", async () => {
       await streamingUntil(async (stream) => {
-        useExecutionStore.getState().startRun("next run"); // the node is still waiting on its call
+        useExecutionStore.getState().startRun("next run", "run-next"); // the node is still waiting on its call
         useExecutionStore.getState().updateAgent("A", { output: "run two" });
         stream.onmessage({ text: "stale" });
         await new Promise((resolve) => setTimeout(resolve, 120)); // past the flush
@@ -779,7 +850,7 @@ describe("useWorkflowExecution", () => {
     it("drops a flush that was already waiting when a newer run replaced the run", async () => {
       await streamingUntil(async (stream) => {
         stream.onmessage({ text: "queued" }); // taken: this run is still the current one; the flush is due in 50 ms
-        useExecutionStore.getState().startRun("next run"); // the node is still waiting on its call
+        useExecutionStore.getState().startRun("next run", "run-next"); // the node is still waiting on its call
         useExecutionStore.getState().updateAgent("A", { output: "run two" });
         await new Promise((resolve) => setTimeout(resolve, 120)); // past the flush
       });
@@ -795,6 +866,32 @@ describe("useWorkflowExecution", () => {
       await pastFlush();
 
       expect(useExecutionStore.getState().currentRun?.agents.A.output).toBeUndefined();
+    });
+
+    // Stop ends the run at once, but the node is told to stop a moment later. When another workflow
+    // is opened in between, that late "stopped" report must not land on the new workflow's nodes.
+    it("keeps the stopped node's late report off a workflow that was opened right after Stop", async () => {
+      // loadWorkflow also replaces the meta and the settings, which the tests after this one share
+      // (beforeEach resets only the nodes and edges): put them back.
+      const { meta, executionSettings, isDirty, filePath } = useWorkflowStore.getState();
+      try {
+        await streamingUntil(() => {
+          useExecutionStore.getState().cancelRun();
+          useWorkflowStore.getState().loadWorkflow({
+            meta: { name: "Other", version: "1.0.0", description: "", projectRoot: "", createdAt: "", updatedAt: "" },
+            agents: [makeNode("x").data],
+            connections: [],
+            executionSettings: { maxParallel: 2, timeoutSeconds: 60, retryOnFailure: false, maxRetries: 0 },
+            nodePositions: {},
+          });
+        });
+
+        // The run is kept, as stopped, with none of the node results.
+        expect(useExecutionStore.getState().currentRun?.status).toBe("cancelled");
+        expect(useExecutionStore.getState().currentRun?.agents).toEqual({});
+      } finally {
+        act(() => { useWorkflowStore.setState({ meta, executionSettings, isDirty, filePath }); });
+      }
     });
 
     it("shows no streamed text on a node whose model call failed", async () => {

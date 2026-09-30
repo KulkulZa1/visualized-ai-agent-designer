@@ -508,8 +508,8 @@ export function AgentActivityPanel({
             ))
           )}
 
-          {/* Run info */}
-          {currentRun && (
+          {/* Run info: not for a run whose results were cleared, it belongs to another workflow */}
+          {currentRun && !currentRun.agentsCleared && (
             <>
               <SectionLabel>Run</SectionLabel>
               <div style={{ fontSize: 10, color: "var(--hint)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>

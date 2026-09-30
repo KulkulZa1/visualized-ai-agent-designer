@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { useWorkflowStore, makeDefaultAgentNode } from "@/store/workflowStore";
 import { useExecutionStore } from "@/store/executionStore";
 import { AgentRole } from "@/types/agent";
+import type { WorkflowRun } from "@/types/execution";
 import { workflowDefSchema } from "@/schemas/workflowSchema";
 import type { Edge } from "@xyflow/react";
 
@@ -84,29 +85,46 @@ describe("workflowStore", () => {
     const runCoder = (finished: boolean) => {
       useExecutionStore.setState({ currentRun: null, isRunning: false });
       const run = useExecutionStore.getState();
-      run.startRun("Fix the sum bug", "run-1");
+      run.startRun("Fix the sum bug", "run-1", "/ws-x");
       run.updateAgent("agent-0", { agentName: "Coder", status: "done", output: "fixed sum.mjs" });
+      run.recordFileChange("src/sum.mjs", "a", "b", "Coder");
       if (finished) run.finishRun("done");
     };
+    const expectResultsClearedRunKept = (finished: WorkflowRun) => {
+      const kept = useExecutionStore.getState().currentRun;
+      // Node ids are places in the file (agent-0, …), so another workflow's first
+      // node would otherwise show this run's output in the inspector: no agent result stays.
+      expect(kept?.agents).toEqual({});
+      // The files the agents wrote stay on disk, so the run's Changes and Revert stay too, with
+      // the folder they were written in: Revert must know it, whatever folder is open by then.
+      expect(kept).toMatchObject({
+        id: "run-1", workflowName: "Fix the sum bug", status: "done", workspacePath: "/ws-x",
+        startedAt: finished.startedAt, finishedAt: finished.finishedAt,
+      });
+      expect(kept?.changes).toEqual([{ path: "src/sum.mjs", before: "a", after: "b", agents: ["Coder"], edits: 1 }]);
+    };
 
-    // Node ids are places in the file (agent-0, …), so another workflow's first
-    // node would otherwise show this run's output in the inspector.
-    it("are cleared when another workflow is loaded", () => {
+    it("are cleared when another workflow is loaded, and the run's workflow, status, timing and changes are kept", () => {
       runCoder(true);
+      const finished = useExecutionStore.getState().currentRun!;
       useWorkflowStore.getState().loadWorkflow(otherWorkflow());
-      expect(useExecutionStore.getState().currentRun).toBeNull();
+      expectResultsClearedRunKept(finished);
     });
 
-    it("are cleared for a new workflow", () => {
+    it("are cleared for a new workflow, and the run's workflow, status, timing and changes are kept", () => {
       runCoder(true);
+      const finished = useExecutionStore.getState().currentRun!;
       useWorkflowStore.getState().reset();
-      expect(useExecutionStore.getState().currentRun).toBeNull();
+      expectResultsClearedRunKept(finished);
     });
 
     it("are kept while the run is still going", () => {
       runCoder(false);
       useWorkflowStore.getState().loadWorkflow(otherWorkflow());
-      expect(useExecutionStore.getState().currentRun?.id).toBe("run-1");
+      const kept = useExecutionStore.getState().currentRun;
+      expect(kept?.id).toBe("run-1");
+      expect(kept?.status).toBe("running");
+      expect(kept?.agents["agent-0"]?.output).toBe("fixed sum.mjs");
     });
   });
 
