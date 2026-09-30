@@ -1,5 +1,47 @@
 ﻿# Development Log
 
+## 2026-09-30 - Follow-ups: #10's review fixes, and the hook check in Rust
+
+- **Goal:** two follow-ups on this branch. The review of #10 (the Windows QA's UI fixes) found problems in them. The hook script check of 2026-09-29 had two known gaps, scripts that aren't valid UTF-8 and the gap between the check and the hook's start; a check in Rust closes the first and narrows the second.
+- **#10's review fixes:**
+  - **Changes survive a workflow switch.** Opening another workflow (or a new one) clears the last run's per-agent results but keeps the run: its status, its time, and **Changes (N)** with the diff and Revert. The run panel says "Agent results were cleared when another workflow was opened." Late updates from a stopped agent of that run are dropped.
+  - **Revert checks the folder.** The app remembers the folder the run worked in. Revert refuses while another folder is open ("These changes were made in `<folder>`. Open that folder to revert them."): nothing is read, written or deleted, and the diff stays viewable. Before, Revert in another folder overwrote or deleted that folder's files of the same name.
+  - **The file search** waits 150 ms after typing stops. On a big workspace it lists the first 500 matching files, with "First 500 of N matches".
+  - **The file-tree refresh** no longer holds up the next Run. If refreshes overlap, only the latest listing applies.
+  - **The Ollama fallback warning:** when local Ollama is only the billing-error fallback and its server answers but lacks the model, the warning says the model isn't pulled and gives the `ollama pull` command. It said "not available at `<url>`".
+- **The hook check in Rust:**
+  - **The fingerprint.** The engine used to hash the script's text with Web Crypto. Now the Rust command `hook_fingerprint` (in the app and in `harness-core`) takes a SHA-256 of each Hook node's script bytes and of its `env`, reading the script at the path the interpreter is given. A script that isn't valid UTF-8, and its `env`, are checked too.
+  - **When.** The run takes baselines when it first starts (`hookScripts`: a fingerprint, `null` for no such script, or `"unverifiable"` when `harness-core` could not check it), and again just before a hook that runs without asking. Then `execute_hook` re-reads the script and re-checks it as its last step before it starts the interpreter. A resume never takes new baselines.
+  - **Refusals** fail the node, stop the run and go to `.harness/audit.log.jsonl`; `harness run` exits 1. "… was changed during this run" is unchanged. New: "… could not be checked (`<harness-core's reason>`), so it is not run unasked" (a path outside the workspace, a folder or a FIFO, or a `harness-core` older than the CLI bundle, which fails closed), "… was not found in the workspace, so it was not run", and `execute_hook`'s own "… changed after it was checked; it was not run."
+  - **Web Crypto** is no longer needed. The JavaScript hash and `harness run`'s exit-3 preflight for it are removed; `package.json` still declares Node 20 or later.
+  - **Older records** hold hashes of the script's text, which never match the fingerprints. Resuming one refuses its unasked hooks as changed; start a new run.
+- **Found and fixed along the way** (two review findings):
+  - The check read the resolved path while the interpreter was given its text form. A resolved name that isn't valid UTF-8 changes when made into text (each bad byte becomes U+FFFD), so a link re-pointed to such a name let one file be checked and another run. `hook_fingerprint` and `execute_hook`'s last check now read the text path the interpreter is given.
+  - On Windows, cmd.exe takes the path it is asked to run as a command line: `& | < > ^` are operators or the escape, `%` (and `!`) expand, `, ; =` end an unquoted command name, and `( ) @` in a quoted path with a space make `/C` drop the quotes. So `C:\ws\x&evil\gate.bat` would run `C:\ws\x`, then `evil\gate.bat`, not the file that was checked. `execute_hook` now refuses such a path for a hook that runs without asking through cmd.exe (`.bat`, `.cmd`, `.exe` and any extension other than `.sh`/`.bash`, `.ps1` and `.py`). The check is on the full resolved path, the workspace folder and the folders above it included. The set is broad on purpose, so it also refuses some paths cmd.exe would run correctly: a workspace under a folder named `OneDrive - Acme, Inc` or `proj(1)` refuses even `.harness/hooks/gate.bat`. The Hooks tab passes no fingerprint and has no such check. This was reasoned from cmd.exe's documented rules, not run on Windows.
+- **Verification** (Linux):
+  - `npx tsc --noEmit` passed. `npx vitest run`: 1151 tests / 72 files. `npx vite build` passed: `vendor-react` is not empty, and the large `index`/`monacoLocal` warning remains.
+  - `cargo test`: 143 tests. `cargo test --no-default-features --features core`: 143 + 2. The 2 Windows-only tests are not compiled on Linux.
+  - The commands of CI's `harness run` step, against the real `harness-core` with no key: exit 3 with `not_started`.
+  - Comparisons below are with 1c3511c, the code before this change.
+  - **The hook check end to end**, by hand, not a test: the real `harness run` bundle and a real debug `harness-core`, hook-only workflows, no model. 78 of 78 checks passed:
+    - an untouched hook runs;
+    - a script rewritten by an earlier hook is refused (exit 1) and audited, refused again on `--resume`, and a new run takes the changed script;
+    - a script that isn't valid UTF-8, changed by one byte, is refused (the 1c3511c bundle ran it);
+    - a link re-pointed to a name that isn't valid UTF-8, with another script at the name's U+FFFD form, is refused and the other script did not run (a `harness-core` from before the fix ran it);
+    - an `env`-only edit is refused on resume;
+    - `../outside.sh` is refused with "could not be checked (Path traversal detected: ../outside.sh)", and a missing script gets "was not found";
+    - a record saved by the 1c3511c bundle, resumed, is refused as changed;
+    - with Web Crypto disabled (`node --no-experimental-global-webcrypto`) the run finishes, where 1c3511c exits 3;
+    - a `harness-core` without `hook_fingerprint` fails closed.
+  - **The fixes for #10's review, in a browser**, by hand: Chromium ran the app's production build, every Tauri `invoke` was answered by the real `harness-core` through an injected bridge, and a scripted OpenAI-compatible server was the model:
+    - **Changes (2)** stays after loading another workflow;
+    - Revert with another folder open is refused, and both folders are untouched (the 1c3511c build overwrote the other folder's file and deleted another);
+    - a search matching 1,200 files shows "First 500 of 1,200 matches" with 500 rows;
+    - with a 4 s file listing, a second Run started 346 ms after the first finished (1c3511c refused it as "already in progress").
+  - **The Ollama warning**, with a fake local Ollama: the pull hint is shown (the 1c3511c warning did not show it).
+- **Not verified:** Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and `.py` hooks); macOS; the Tauri window and its IPC; a live model.
+- **Known gaps** (`docs/SECURITY.md`): the hook script check does not cover files a script sources or imports, the moment between `execute_hook`'s last read and the interpreter's own opening of the file (narrowed, not closed), or an approved `bash` command that writes anywhere in the workspace, run records included. A new run takes the scripts as they are as its baselines. Closed or narrowed since the 2026-09-29 entry: scripts that aren't valid UTF-8, and their `env`, are now checked, and the gap between the check and the hook's start is narrowed to that moment.
+
 ## 2026-09-29 - Review fixes in the run engine, the hook script check, MCP and CLI link safety (Linux)
 
 - **Goal:** this branch merged master (#9: the shared run engine, `harness-core`, `harness run`, CI). The run-loop fixes its own review had found lived in the old React hook, so they were ported into `src/engine/runWorkflow.ts`, and the review of the port was closed.

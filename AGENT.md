@@ -36,16 +36,23 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. The UI issues it found are fixed and were re-checked the same way (see `docs/DEVELOPMENT_LOG.md`) |
 | MCP | stdio server and read/test tools tested |
 
-Linux pass, 2026-09-29, with master's #10 (the UI fixes) merged (not a Windows
-re-run: the rows above stand): `npx tsc --noEmit` passed; `npx vitest run`
-passed, 1082 tests / 70 files;
-`cargo test` passed, 116 tests (the 2 Windows-only tests are not compiled on
-Linux); `cargo test --no-default-features --features core` passed, 116 + 2 tests;
+Linux pass, 2026-09-30 (not a Windows re-run: the rows above stand):
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1151 tests / 72 files;
+`cargo test` passed, 143 tests (the 2 Windows-only tests are not compiled on
+Linux); `cargo test --no-default-features --features core` passed, 143 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
-`index`/`monacoLocal` warning remains). Not re-run in this pass: the desktop app,
-macOS, and a live `harness run` with a model. `.github/workflows/ci.yml` runs
-these checks and `harness run` against the real `harness-core` on every pull
-request and push to master.
+`index`/`monacoLocal` warning remains). The commands of CI's `harness run` step,
+against the real `harness-core` with no key, stopped with exit 3 and `not_started`.
+Also run by hand, not as tests: the hook script check end to end, with the real
+`harness run` bundle and a debug `harness-core`, hook-only workflows and no model
+(78 of 78 checks passed); and the fixes for #10's review, in a browser (Chromium
+on the app's production build, every Tauri `invoke` answered by the real
+`harness-core`, a scripted OpenAI-compatible server as the model). Details are in
+`docs/DEVELOPMENT_LOG.md`.
+Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
+`.py` hooks), macOS, the Tauri window and its IPC, and a live model.
+`.github/workflows/ci.yml` runs these checks and `harness run` against the real
+`harness-core` on every pull request and push to master.
 
 ## Tech Stack
 
@@ -83,7 +90,7 @@ request and push to master.
   - It uses the same engine (`src/engine/runWorkflow.ts`) and `harness-core`: the app's Rust commands built without Tauri, over JSON lines on stdin/stdout.
   - Keys come from the environment. Agent commands run only if passed exactly with `--allow-command`.
   - Output is readable lines or `--json` events, with exit codes for CI.
-- Run records: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`. `harness run --resume <runId>` reuses the agents that finished and did not change. The record also keeps a SHA-256 of each Hook node's script and env (`hookScripts`), never the text.
+- Run records: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`. `harness run --resume <runId>` reuses the agents that finished and did not change. The record also keeps a fingerprint of each Hook node's script bytes and env (`hookScripts`), never the text.
 - CI: `.github/workflows/ci.yml` runs on Linux, with read-only permissions: types, the TypeScript tests, the production frontend build, the Rust tests (with and without Tauri), and `harness run` against the real `harness-core`. `examples/ci/harness-run.yml` is a template for other repositories.
 - MCP v0 tools:
   - `project_status`
@@ -114,10 +121,12 @@ request and push to master.
 - Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command: once, or for the rest of the run ("Allow for this run" grants that exact text). This goes through `commandConsentStore` + `CommandConsentDialog` and the Rust `execute_command`. Keep it that way: no other auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed. Stop kills a running command's process tree (`cancel_command`).
 - During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. A Hook node fails, and the run stops, instead of running when:
   - it is marked `requireConsent`;
-  - its script or env changed during the run (checked only for a hook without `requireConsent`). Either an agent's file tools changed the script (the change log, in any attempt of the run), or the SHA-256 of the script and of the node's `env` taken when the run first starts differs from one taken just before the hook runs. The hash also catches other spellings of the path, links, approved shell commands and an `env` (a `BASH_ENV` or `PATH`) added to the workflow file;
+  - its script or env changed during the run (checked only for a hook without `requireConsent`). Either an agent's file tools changed the script (the change log, in any attempt of the run), or the fingerprint of the script and of the node's `env` taken when the run first starts differs from one taken just before the hook runs. The Rust command `hook_fingerprint` (in the app and in `harness-core`) takes the fingerprint: a SHA-256 of the script's bytes, in any encoding, and of the `env`, read at the path the interpreter is given. It also catches other spellings of the path, links, approved shell commands and an `env` (a `BASH_ENV` or `PATH`) added to the workflow file. The engine gives the fingerprint to `execute_hook` for every hook that runs without asking, and `execute_hook` reads the script again and re-checks it as its last step before it starts the interpreter (a run from the Hooks tab passes none, so nothing is checked there);
+  - its script could not be checked: `hook_fingerprint` failed (a path outside the workspace, a folder or a FIFO, or a `harness-core` older than the CLI bundle, which lacks the command: rebuild it with `npm run build:core`). The message gives harness-core's reason, and the hook is not run unasked. A script that is missing at the start and still missing fails the node too ("was not found in the workspace");
+  - on Windows, its full path is one cmd.exe would not run as written: a hook that runs without asking and starts through cmd.exe (any extension except `.sh`/`.bash`, `.ps1` and `.py`) is refused if its resolved path, the workspace folder and the folders above it included, contains one of `& | < > ^ % ! ( ) @ , ; =`, because cmd.exe reads the path as a command line. This is reasoned from cmd.exe's rules and was not run on Windows. The Hooks tab does not check this;
   - the run is a resume and the hook has no baseline (a Hook node added, or given a script, since the first attempt). The baselines are saved in the run record and a resume never takes new ones, so that hook is refused until a new run. After a refusal a resume refuses again: start a new run, which takes the scripts as they are as its baselines. (A record saved before `hookScripts` existed has none; resuming it takes them then.)
-- Hook refusals are audited. `harness run` needs Node 20 or later (Web Crypto) when a workflow has a Hook node with a script and without `requireConsent`; otherwise the run does not start (exit 3).
-- The hook script check does not cover scripts that aren't valid UTF-8 (nor their `env`), files a script sources or imports, the gap between the check and the hook's start, or an approved `bash` command that writes anywhere in the workspace (`docs/SECURITY.md`).
+- Hook refusals are audited (`.harness/audit.log.jsonl`), and `harness run` exits 1. The check needs no Web Crypto, so `harness run` has no exit-3 preflight for it (`package.json` still declares Node 20 or later). A record saved by a build that hashed the script's text in JavaScript never matches: resuming it refuses its unasked hooks as changed, so start a new run.
+- The hook script check does not cover files a script sources or imports, the moment between `execute_hook`'s last read and the interpreter's own opening of the file (narrowed, not closed), or an approved `bash` command that writes anywhere in the workspace, run records included. A new run takes the scripts as they are as its baselines (`docs/SECURITY.md`).
 - Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
 - The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).
 
@@ -139,7 +148,7 @@ request and push to master.
 | File | Purpose |
 |---|---|
 | `src/engine/runWorkflow.ts` | Workflow run engine (uses `runParallel`); no React, stores or Tauri |
-| `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`), the resume rule and the hook-script hash |
+| `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`), the resume rule and the saved hook baselines (`hookScripts`) |
 | `src/cli/runCli.ts` | `harness run` (bundled by `npm run build:cli`) |
 | `src-tauri/src/commands/core_server.rs` | `harness-core`: the run's Rust commands over stdin/stdout (`npm run build:core`) |
 | `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
@@ -150,7 +159,7 @@ request and push to master.
 | `cli/harness.mjs` | CLI: read-only commands, and `run` (headless runs: `src/cli/`, needs `npm run build:cli` and `npm run build:core`) |
 | `mcp/server.mjs` | MCP stdio server |
 | `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
-| `src-tauri/src/commands/process_commands.rs` | Hook execution and approved agent commands (`execute_command`) |
+| `src-tauri/src/commands/process_commands.rs` | Hook execution, the hook script fingerprint (`hook_fingerprint`) and approved agent commands (`execute_command`) |
 | `docs/DEPLOYMENT_READINESS.md` | Current readiness source of truth |
 | `docs/AIRGAPPED.md` | Offline / air-gapped deployment runbook |
 | `scripts/build-installer.ps1` | Installer build; `-Offline` embeds WebView2 |
@@ -160,8 +169,8 @@ request and push to master.
 1. Git-native runs: a worktree per run, a diff that includes command-made changes, commit/PR.
 2. Persist real per-run artifacts and full provider request traces (run records keep outputs and the audit only).
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
-4. Hash hook scripts in Rust, from their bytes, and verify the hash in `execute_hook`: that covers scripts that aren't UTF-8 and the gap between the check and the hook's start.
-5. Add installer smoke tests on a clean Windows user profile.
-6. Add a Windows CI job for the Windows-only Rust tests and the Tauri build (`.github/workflows/ci.yml` runs on Linux only).
+4. Add installer smoke tests on a clean Windows user profile.
+5. Add a Windows CI job for the Windows-only Rust tests and the Tauri build (`.github/workflows/ci.yml` runs on Linux only).
+6. Close the moment between `execute_hook`'s last read of a hook script and the interpreter's own opening of the file, for example by running a private copy of the checked bytes.
 
 

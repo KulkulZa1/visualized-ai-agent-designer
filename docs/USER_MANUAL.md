@@ -23,6 +23,7 @@ run the workflow against configured providers.
   - A file the run created is deleted.
   - A file that changed again after the agent's last edit is only overwritten after you confirm.
   - Changes made by shell commands are not listed.
+  - Opening another workflow clears the agents' results but keeps **Changes (N)**. Revert needs the folder the run worked in to be open: with another folder open it says "These changes were made in `<folder>`. Open that folder to revert them." and changes nothing. The diff stays viewable.
 - A node's **Token budget** (Role tab) now applies. Once an agent's conversation passes 75% of it, older steps are summarized into a progress note by one extra model call. The newest step stays as it is. Raise the budget for agents that read large files; 0 turns this off.
 - If the workspace has an `AGENTS.md` at its root, agents with workspace tools (and their helpers) get it as project instructions (at most 32 KB).
 - An agent with the `bash` tool can run shell commands, for example the tests:

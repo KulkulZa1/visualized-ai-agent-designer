@@ -22,9 +22,7 @@ npm run build:core   # src-tauri/target/release/harness-core (.exe on Windows)
 `harness-core` is built without Tauri, so it needs a Rust toolchain but none of
 Tauri's system packages (WebKit, GTK).
 
-Use Node 20 or later (`package.json` declares it). A workflow with a hook that
-runs without asking needs Web Crypto (`globalThis.crypto`), which older Node
-versions lack by default; without it the run does not start (see Hooks).
+Use Node 20 or later (`package.json` declares it).
 
 ## Run
 
@@ -116,16 +114,20 @@ A hook marked `requireConsent` is not run. A hook without it runs with nobody
 asking, so it is also refused when its script or its `env` is not what the run
 started with:
 - an agent's file tools changed the script, in any attempt of the run; or
-- its SHA-256 differs from the one taken when the run first started. The hash is
-  of the script's text and the node's `env` (the hook runs with it as it is, and an
-  agent can edit the workflow file to add a `BASH_ENV` or `PATH`). The run hashes
-  every Hook node at its start (`requireConsent` ones too) and hashes an unasked
-  hook again just before it runs. This also catches other spellings of the path,
-  links and shell commands you allowed. A script that was there and is gone, or
-  the other way round, counts as changed.
+- its fingerprint differs from the one taken when the run first started.
+  `harness-core` takes the fingerprint (the command `hook_fingerprint`): a SHA-256
+  of the script's bytes, in any encoding, and of the node's `env` (the hook runs
+  with it as it is, and an agent can edit the workflow file to add a `BASH_ENV` or
+  `PATH`). It reads the script at the path the interpreter is given. The run
+  fingerprints every Hook node at its start (`requireConsent` ones too) and again
+  just before an unasked hook runs. Then `execute_hook` reads the script once more
+  and re-checks it as its last step before it starts the interpreter. This also
+  catches other spellings of the path, links and shell commands you allowed. A
+  script that was there and is gone, or the other way round, counts as changed.
 
-A refusal goes to `.harness/audit.log.jsonl`, and is the hook's error in the
-output, for example:
+A refusal fails the hook's node, stops the run and goes to
+`.harness/audit.log.jsonl`. It is the hook's error in the output, and `harness run`
+exits 1. For example:
 
 ```
 ✗ Gate failed: Hook script .harness/hooks/gate.sh or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.
@@ -133,22 +135,59 @@ output, for example:
 
 The Hooks tab is in the app. Here, review the script and start a new run.
 
-The hashes are the run's baselines. They are saved in the run record
+The refusals:
+- "… or its environment was changed during this run; …": the script or the `env`
+  changed, or the script appeared or disappeared. `execute_hook`'s own check
+  words it "… changed after it was checked; it was not run."
+- "… could not be checked (`<reason>`), so it is not run unasked; …": `harness-core`
+  could not fingerprint the script. The reason is its own, for example
+  `Path traversal detected: ../outside.sh` (a path outside the workspace),
+  `IO error: not a regular file` (a folder or a FIFO), or
+  `Unknown command: hook_fingerprint` (a `harness-core` older than the CLI bundle:
+  rebuild it with `npm run build:core`). A resumed run whose saved baseline could
+  not be checked says "the script could not be read, or harness-core is older than
+  the app" instead.
+- "… was not found in the workspace, so it was not run.": the script was missing
+  when the run started and still is.
+
+On Windows, an unasked hook that `execute_hook` starts through cmd.exe is also
+refused if its full resolved path contains one of `& | < > ^ % ! ( ) @ , ; =`,
+because cmd.exe reads the path as a command line and could run another file. The
+whole path counts: the hook's own path, the workspace folder and the folders above
+it. cmd.exe runs `.bat`, `.cmd`, `.exe` and any extension other than `.sh`/`.bash`,
+`.ps1` and `.py`. The message is "… is at `<path>`, a path cmd.exe would not run as
+written (it contains one of …), so it was not run; move it to a path without
+them." The set is broad on purpose (fail closed): it also refuses some paths
+cmd.exe would run correctly, for example a workspace under a folder named
+`OneDrive - Acme, Inc` or `proj(1)`, where even `.harness/hooks/gate.bat` is
+refused. Moving the hook inside the workspace does not help: move or rename the
+workspace or the hook so that the full path has none of these characters. The
+Hooks tab does not check this: run a hook from there only if you know cmd.exe runs
+its path as written. How cmd.exe parses the path was reasoned from its documented
+rules, not tested on Windows.
+
+The fingerprints are the run's baselines. They are saved in the run record
 (`hookScripts`, see below) and a resume keeps them; it takes no new ones. So:
 - a script changed during an earlier attempt, or an `env` changed in the workflow
   file since, is refused on every resume;
+- a script that could not be checked when the run started is refused on every
+  resume;
 - a Hook node added to the workflow file, or given a script, since the first
-  attempt has no baseline and is refused;
+  attempt has no baseline ("… has no baseline from this run's first attempt …")
+  and is refused;
 - after a refusal a resume refuses again, even though the summary prints a
   `Resume:` line: start a new run. A new run takes the scripts as they are as its
   baselines, so review the script first.
 
 The one exception is a record saved before `hookScripts` existed: it has no
-baselines, and resuming it takes them from the scripts as they are then.
+baselines, and resuming it takes them from the scripts as they are then. A record
+saved by a build that hashed the script's text, before the check moved into
+`harness-core`, holds hashes that never match the fingerprints: resuming it
+refuses its unasked hooks as changed, so start a new run.
 
-The check does not cover scripts that aren't valid UTF-8 (only the change log
-does; their `env` is not checked either), files a script sources or imports, or a
-change between the check and the hook's start. See `docs/SECURITY.md`.
+The check does not cover files a script sources or imports, or the moment between
+`execute_hook`'s last read and the interpreter's own opening of the file (narrowed,
+not closed). See `docs/SECURITY.md`.
 
 ## Output
 
@@ -202,7 +241,7 @@ and `run_finished.agents`, hold its final status.
 | `0` | The run finished and every agent is done |
 | `1` | An agent failed, or the run failed as a whole rather than through an agent: the reason is in the summary and in the JSON `error` field of `run_finished` |
 | `2` | Bad usage, a missing file, an invalid workflow, or a resume that cannot be done |
-| `3` | The run could not start: `harness-core` is missing or stopped, the provider check failed (for example, no key), or Web Crypto is missing (a Node older than 20) and a hook would run without asking |
+| `3` | The run could not start: `harness-core` is missing or stopped, or the provider check failed (for example, no key) |
 | `130` | Stopped with Ctrl+C |
 
 ## Stopping
@@ -226,9 +265,11 @@ The record holds:
   helpers and definition hash;
 - the text each agent passed on, the memory, the gateway routes, the files the
   run changed, and the audit;
-- `hookScripts`: for each Hook node with a script, the SHA-256 (hex) of the script
-  as the run first read it and of the node's `env`, or `null` if the script could
-  not be read. Never the script's text or the `env` (see Hooks).
+- `hookScripts`: for each Hook node with a script, a fingerprint (64 hex digits),
+  `null` if there was no such script, or `"unverifiable"` if `harness-core` could
+  not check it. The fingerprint is not the file's plain SHA-256: it is a SHA-256
+  over a versioned encoding of the script's bytes, as the run first found them,
+  and of the node's `env`. Never the script's text or the `env` (see Hooks).
 
 To resume a run that failed or was stopped:
 
@@ -291,9 +332,9 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
 - Replies do not stream in the terminal: each agent's output arrives when it is
   done.
 - Commands are not sandboxed. Only the exact commands you allow run.
-- The hook script check has gaps: scripts that aren't valid UTF-8, files a script
-  sources or imports, and a change between the check and the hook's start (see
-  Hooks).
+- The hook script check has gaps: files a script sources or imports, and a change
+  in the moment between `execute_hook`'s last read and the interpreter's own
+  opening of the file (see Hooks).
 - There are no prebuilt binaries: build the bundle and `harness-core` from the
   repository.
 - The app has no Resume button; resume with `harness run`.
