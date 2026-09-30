@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runParallel } from "@/services/execution/parallelScheduler";
+import { prunedNodes, runParallel } from "@/services/execution/parallelScheduler";
 import { AgentRole } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import type { Edge } from "@xyflow/react";
@@ -411,5 +411,234 @@ describe("runParallel — gateway skip", () => {
       defaultOptions({ gatewayRoutes: new Map([["G", "mixed"]]) }));
 
     expect(executed).toEqual(expect.arrayContaining(["G", "UI", "Rust"]));
+  });
+});
+
+describe("runParallel — gateway label matching", () => {
+  /** Run gateway G with one branch per edge label; report which labels ran and which were skipped. */
+  async function routeGateway(route: string, labels: string[]) {
+    const branches = labels.map((_, i) => `B${i}`);
+    const nodes = [makeNode("G", AgentRole.Gateway), ...branches.map((id) => makeNode(id))];
+    const edges = labels.map((label, i) => makeEdge("G", branches[i], label));
+    const executed: string[] = [];
+    const skipped: string[] = [];
+
+    await runParallel(nodes, edges, async (id) => { executed.push(id); },
+      defaultOptions({ gatewayRoutes: new Map([["G", route]]), onSkipped: (id) => skipped.push(id) }));
+
+    return {
+      ran: labels.filter((_, i) => executed.includes(branches[i])),
+      skipped: labels.filter((_, i) => skipped.includes(branches[i])),
+    };
+  }
+
+  it.each([
+    ["valid", ["valid", "invalid"]],
+    ["valid", ["invalid", "valid"]],
+    ["safe", ["safe", "unsafe"]],
+    ["ok", ["ok", "not ok"]],
+    ["ok", ["not ok", "ok"]],
+  ])("route %j among labels %j follows only the exact label", async (route, labels) => {
+    const { ran, skipped } = await routeGateway(route, labels);
+    expect(ran).toEqual([route]);
+    expect(skipped).toEqual(labels.filter((label) => label !== route));
+  });
+
+  it("compares the route and the labels trimmed and case-insensitively", async () => {
+    const { ran, skipped } = await routeGateway("  VALID ", [" Valid", "invalid "]);
+    expect(ran).toEqual([" Valid"]);
+    expect(skipped).toEqual(["invalid "]);
+  });
+
+  it("follows every branch that carries the exact label", async () => {
+    const { ran, skipped } = await routeGateway("ok", ["ok", "OK ", "not ok"]);
+    expect(ran).toEqual(["ok", "OK "]);
+    expect(skipped).toEqual(["not ok"]);
+  });
+
+  it("still follows unlabelled edges when a label matches exactly", async () => {
+    const { ran, skipped } = await routeGateway("safe", ["safe", "unsafe", ""]);
+    expect(ran).toEqual(["safe", ""]);
+    expect(skipped).toEqual(["unsafe"]);
+  });
+
+  it("falls back to substring matching only when no label equals the route", async () => {
+    // The route sits inside a label.
+    expect(await routeGateway("backend", ["backend-api", "frontend"]))
+      .toEqual({ ran: ["backend-api"], skipped: ["frontend"] });
+    // A label sits inside the route.
+    expect(await routeGateway("approved-with-changes", ["approved", "rejected"]))
+      .toEqual({ ran: ["approved"], skipped: ["rejected"] });
+    // Several labels match by substring: all of them are followed.
+    expect(await routeGateway("api", ["backend-api", "frontend-api", "docs"]))
+      .toEqual({ ran: ["backend-api", "frontend-api"], skipped: ["docs"] });
+  });
+});
+
+describe("prunedNodes", () => {
+  const G = AgentRole.Gateway;
+
+  /** What runParallel skips for these routes, set before the run: the reference. */
+  async function skippedByScheduler(nodes: AgentNode[], edges: Edge[], routes: Map<string, string>) {
+    const skipped = new Set<string>();
+    await runParallel(nodes, edges, async () => {},
+      defaultOptions({ gatewayRoutes: routes, onSkipped: (id) => skipped.add(id) }));
+    return skipped;
+  }
+  /** The same, with the routes produced as the engine produces them: a gateway sets its route when it runs, so a
+   *  gateway that is pruned never does. Returns what was skipped and the routes the run ended with. */
+  async function skippedWithProducedRoutes(nodes: AgentNode[], edges: Edge[], decisions: Map<string, string>) {
+    const produced = new Map<string, string>();
+    const skipped = new Set<string>();
+    await runParallel(nodes, edges, async (id) => {
+      const decision = decisions.get(id);
+      if (decision !== undefined) produced.set(id, decision);
+    }, defaultOptions({ gatewayRoutes: produced, onSkipped: (id) => skipped.add(id) }));
+    return { skipped, produced };
+  }
+  const sorted = (ids: Iterable<string>) => [...ids].sort();
+
+  /** prunedNodes must equal what runParallel skips, whether the routes are there from the start or produced as
+   *  the run goes, and all of it must equal `expected`: that keeps the test from being merely self-consistent. */
+  async function expectPruned(nodes: AgentNode[], edges: Edge[], routes: Record<string, string>, expected: string[]) {
+    const map = new Map(Object.entries(routes));
+    expect(sorted(await skippedByScheduler(nodes, edges, map))).toEqual(sorted(expected));
+    expect(sorted(prunedNodes(nodes, edges, map))).toEqual(sorted(expected));
+    const { skipped, produced } = await skippedWithProducedRoutes(nodes, edges, map);
+    expect(sorted(skipped)).toEqual(sorted(expected));
+    expect(sorted(prunedNodes(nodes, edges, produced))).toEqual(sorted(expected));
+  }
+
+  it("prunes the branch a gateway with two branches does not take", async () => {
+    await expectPruned(
+      [makeNode("G", G), makeNode("B1"), makeNode("B2")],
+      [makeEdge("G", "B1", "yes"), makeEdge("G", "B2", "no")],
+      { G: "yes" }, ["B2"]);
+    await expectPruned(
+      [makeNode("G", G), makeNode("B1"), makeNode("B2")],
+      [makeEdge("G", "B1", "yes"), makeEdge("G", "B2", "no")],
+      { G: "no" }, ["B1"]);
+  });
+
+  it("prunes what only the dropped branch feeds, and keeps a join that has one live input", async () => {
+    // G -yes-> Y -> J, G -no-> N -> J, N -> Child (fed only by N)
+    const nodes = [makeNode("G", G), makeNode("Y"), makeNode("N"), makeNode("J"), makeNode("Child")];
+    const edges = [
+      makeEdge("G", "Y", "yes"), makeEdge("G", "N", "no"),
+      makeEdge("Y", "J"), makeEdge("N", "J"), makeEdge("N", "Child"),
+    ];
+    await expectPruned(nodes, edges, { G: "yes" }, ["N", "Child"]); // J still has Y
+    await expectPruned(nodes, edges, { G: "no" }, ["Y"]);           // J still has N; Child is live
+  });
+
+  it("prunes a join whose every input is dead, however each one died", async () => {
+    // G1 -a-> A, G1 -b-> B; G2 -c-> C, G2 -d-> D; B and D both feed J. Route a and c: B is pruned
+    // (its only input is a dead edge), D is pruned likewise, so J has nothing live left.
+    const nodes = [makeNode("G1", G), makeNode("G2", G), makeNode("A"), makeNode("B"), makeNode("C"), makeNode("D"), makeNode("J")];
+    const edges = [
+      makeEdge("G1", "A", "a"), makeEdge("G1", "B", "b"), makeEdge("G2", "C", "c"), makeEdge("G2", "D", "d"),
+      makeEdge("B", "J"), makeEdge("D", "J"),
+    ];
+    await expectPruned(nodes, edges, { G1: "a", G2: "c" }, ["B", "D", "J"]);
+    await expectPruned(nodes, edges, { G1: "a", G2: "d" }, ["B", "C"]);           // D is live, so J runs
+  });
+
+  it("handles nested gateways, including the stale route of a gateway that is itself pruned", async () => {
+    // G1 -left-> G2, G1 -right-> Z; G2 -a-> A, G2 -b-> B
+    const nodes = [makeNode("G1", G), makeNode("G2", G), makeNode("Z"), makeNode("A"), makeNode("B")];
+    const edges = [
+      makeEdge("G1", "G2", "left"), makeEdge("G1", "Z", "right"), makeEdge("G2", "A", "a"), makeEdge("G2", "B", "b"),
+    ];
+    await expectPruned(nodes, edges, { G1: "left", G2: "a" }, ["Z", "B"]);
+    // G2 is pruned, so everything behind it is, whatever route it once had.
+    await expectPruned(nodes, edges, { G1: "right", G2: "a" }, ["G2", "A", "B"]);
+    await expectPruned(nodes, edges, { G1: "right" }, ["G2", "A", "B"]);
+  });
+
+  it("prunes nothing when the route matches no label, or a gateway has no route", async () => {
+    const nodes = [makeNode("G", G), makeNode("UI"), makeNode("Rust")];
+    const edges = [makeEdge("G", "UI", "ui"), makeEdge("G", "Rust", "rust")];
+    await expectPruned(nodes, edges, { G: "mixed" }, []);
+    await expectPruned(nodes, edges, {}, []);
+  });
+
+  it("always follows an unlabelled gateway edge", async () => {
+    const nodes = [makeNode("G", G), makeNode("X"), makeNode("Y"), makeNode("Z")];
+    const edges = [makeEdge("G", "X"), makeEdge("G", "Y", "a"), makeEdge("G", "Z", "c")];
+    await expectPruned(nodes, edges, { G: "a" }, ["Z"]);
+    await expectPruned(nodes, edges, { G: "zz" }, []);
+  });
+
+  it("keeps a node the gateway feeds by a taken edge and an untaken one, and drops a node it feeds by a plain and an untaken one", async () => {
+    // Dead edges are kept by node pair: an untaken labelled edge to U also kills the unlabelled edge to U.
+    const nodes = [makeNode("G", G), makeNode("Y"), makeNode("T"), makeNode("U")];
+    const edges = [
+      makeEdge("G", "Y", "yes"),
+      makeEdge("G", "T", "yes"), makeEdge("G", "T", "no"),
+      makeEdge("G", "U", "no"), makeEdge("G", "U"),
+    ];
+    await expectPruned(nodes, edges, { G: "yes" }, ["U"]);
+  });
+
+  it("does not count feedback edges as inputs", async () => {
+    // B's only forward input is the untaken edge; R feeds it back, which does not keep it alive.
+    const nodes = [makeNode("G", G), makeNode("Y"), makeNode("B"), makeNode("R")];
+    const edges = [
+      makeEdge("G", "Y", "yes"), makeEdge("G", "B", "no"), makeEdge("Y", "R"), makeEdge("R", "B", "revise", "feedback"),
+    ];
+    await expectPruned(nodes, edges, { G: "yes" }, ["B"]);
+  });
+
+  it("agrees with runParallel on random graphs", async () => {
+    // mulberry32: a small seeded generator, so a failure names a graph that can be rebuilt.
+    const seeded = (seed: number) => () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    const pick = <T,>(random: () => number, items: T[]) => items[Math.floor(random() * items.length)];
+    let withPruning = 0;
+    let deeperThanOneHop = 0;
+
+    for (let seed = 1; seed <= 400; seed++) {
+      const random = seeded(seed);
+      const count = 3 + Math.floor(random() * 8);
+      // The first node is always a gateway, so that most graphs have a branch to prune.
+      const nodes = Array.from({ length: count }, (_, i) => makeNode(`n${i}`, i === 0 || random() < 0.4 ? G : AgentRole.Worker));
+      const edges: Edge[] = [];
+      for (let from = 0; from < count; from++) {
+        const isGateway = nodes[from].data.role === G;
+        for (let to = from + 1; to < count; to++) {
+          if (random() >= (isGateway ? 0.6 : 0.3)) continue;
+          // A gateway's edges mostly carry one of three labels; some carry none (always followed).
+          const label = isGateway ? (random() < 0.15 ? "" : pick(random, ["a", "b", "c"])) : undefined;
+          edges.push(makeEdge(`n${from}`, `n${to}`, label));
+        }
+      }
+      // A few feedback edges: never inputs.
+      for (let i = 0; i < 2; i++) {
+        const from = Math.floor(random() * count);
+        const to = Math.floor(random() * count);
+        if (from !== to) edges.push({ ...makeEdge(`n${from}`, `n${to}`, "revise", "feedback"), id: `fb${i}` });
+      }
+      // Mostly a route that names a label; sometimes one that matches none ("zz": follow every branch).
+      const routes = new Map(nodes.filter((n) => n.data.role === G)
+        .map((n): [string, string] => [n.id, random() < 0.85 ? pick(random, ["a", "b", "c"]) : "zz"]));
+
+      const reference = sorted(await skippedByScheduler(nodes, edges, routes));
+      const description = `seed ${seed}: edges ${edges.map((e) => `${e.source}${e.data?.edgeKind === "feedback" ? "~" : "-"}${(e.data as { label?: string }).label ?? ""}>${e.target}`).join(" ")}; routes ${JSON.stringify([...routes])}`;
+      expect(sorted(prunedNodes(nodes, edges, routes)), description).toEqual(reference);
+      // Routes produced as the run goes: the same skips, and prunedNodes agrees with the routes that came out.
+      const produced = await skippedWithProducedRoutes(nodes, edges, routes);
+      expect(sorted(produced.skipped), description).toEqual(reference);
+      expect(sorted(prunedNodes(nodes, edges, produced.produced)), description).toEqual(reference);
+
+      if (reference.length > 0) withPruning++;
+      if (reference.some((id) => !edges.some((e) => e.target === id && routes.has(e.source) && !reference.includes(e.source)))) deeperThanOneHop++;
+    }
+    // The generator must actually exercise pruning, and pruning that spreads.
+    expect(withPruning).toBeGreaterThan(80);
+    expect(deeperThanOneHop).toBeGreaterThan(10);
   });
 });

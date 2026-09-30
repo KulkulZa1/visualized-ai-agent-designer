@@ -1,7 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { Edge } from "@xyflow/react";
 import {
-  definitionHash, fingerprint, reusableNodes, runRecordPath, savedNodeId, type NodeRecord, type RunRecord,
+  definitionHash, fingerprint, hookFingerprint, reusableNodes, runRecordPath, savedHookScripts, savedNodeId, sha256Hex,
+  type NodeRecord, type RunRecord,
 } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole, type AgentNodeData } from "@/types/agent";
@@ -20,6 +22,91 @@ describe("fingerprint", () => {
     expect(fingerprint("abc")).toBe(fingerprint("abc"));
     expect(fingerprint("abc")).not.toBe(fingerprint("abd"));
     expect(fingerprint("")).toMatch(/^[0-9a-f]{14}$/);
+  });
+});
+
+describe("sha256Hex", () => {
+  it("is the SHA-256 of the text, in hex", async () => {
+    expect(await sha256Hex("")).toBe("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    expect(await sha256Hex("abc")).toBe("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    // The text's UTF-8 bytes (0xC3 0xA9 for "é"), not UTF-16.
+    expect(await sha256Hex("é")).toBe("4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c");
+  });
+
+  it("differs for texts that differ by one character", async () => {
+    expect(await sha256Hex("echo hi\n")).not.toBe(await sha256Hex("echo hi"));
+  });
+});
+
+describe("hookFingerprint", () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  it("is the SHA-256 of the JSON of the script's text and the env's names and values, sorted by name", async () => {
+    expect(await hookFingerprint("echo hi\n", { B: "2", A: "1" })).toBe(sha('["echo hi\\n",[["A","1"],["B","2"]]]'));
+  });
+
+  it("counts an empty env, so that adding a variable always changes it", async () => {
+    const bare = await hookFingerprint("echo hi\n", undefined);
+
+    expect(bare).toBe(sha('["echo hi\\n",[]]'));
+    expect(await hookFingerprint("echo hi\n", {})).toBe(bare);
+    expect(await hookFingerprint("echo hi\n", { BASH_ENV: "/tmp/x" })).not.toBe(bare);
+  });
+
+  it("does not depend on the order the env is written in, and does on each of its names and values", async () => {
+    const base = await hookFingerprint("echo hi\n", { A: "1", B: "2" });
+
+    expect(await hookFingerprint("echo hi\n", { B: "2", A: "1" })).toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1", B: "3" })).not.toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1", C: "2" })).not.toBe(base);
+    expect(await hookFingerprint("echo hi\n", { A: "1" })).not.toBe(base);
+  });
+
+  it("differs for another script, and from the script's plain SHA-256", async () => {
+    expect(await hookFingerprint("echo hi", undefined)).not.toBe(await hookFingerprint("echo hi\n", undefined));
+    expect(await hookFingerprint("echo hi\n", undefined)).not.toBe(await sha256Hex("echo hi\n"));
+  });
+
+  it("rejects where Web Crypto is missing: nothing weaker stands in for it", async () => {
+    vi.stubGlobal("crypto", undefined);
+    try {
+      await expect(hookFingerprint("echo hi\n", undefined)).rejects.toThrow("Web Crypto");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("savedHookScripts", () => {
+  const withScripts = (hookScripts: unknown) => ({ hookScripts }) as unknown as RunRecord;
+  const SHA = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+  it("is undefined for no record and for a record from before the field, so that attempt takes the baselines itself", () => {
+    expect(savedHookScripts(undefined)).toBeUndefined();
+    expect(savedHookScripts({} as RunRecord)).toBeUndefined();
+  });
+
+  it("keeps what the record has, fingerprints and nulls, and an empty map is still 'there'", () => {
+    expect(savedHookScripts(withScripts({ "agent-0": SHA, "agent-1": null }))).toEqual({ "agent-0": SHA, "agent-1": null });
+    expect(savedHookScripts(withScripts({}))).toEqual({});
+  });
+
+  it("counts a field that is there but not a map as empty, not as absent: nothing new is trusted on its strength", () => {
+    for (const broken of [null, "abc", 7, true, [SHA]]) {
+      expect(savedHookScripts(withScripts(broken)), JSON.stringify(broken)).toEqual({});
+    }
+  });
+
+  it("drops the entries that are neither a fingerprint nor null, and keeps the rest", () => {
+    expect(savedHookScripts(withScripts({ "agent-0": SHA, "agent-1": 7, "agent-2": {}, "agent-3": null, "agent-4": undefined })))
+      .toEqual({ "agent-0": SHA, "agent-3": null });
+  });
+
+  it("returns a copy, so what a run adds is not written back into the record it resumed from", () => {
+    const record = withScripts({ "agent-0": SHA });
+    const saved = savedHookScripts(record);
+    saved!["agent-1"] = null;
+    expect(record.hookScripts).toEqual({ "agent-0": SHA });
   });
 });
 

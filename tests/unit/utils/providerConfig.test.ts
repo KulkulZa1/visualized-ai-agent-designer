@@ -88,6 +88,62 @@ describe("providerConfig", () => {
     expect(isRemoteOllamaUrl("http://127.0.0.1:11434")).toBe(false);
   });
 
+  it("treats the IPv6 loopback as local although URL reports its host in brackets", () => {
+    expect(new URL("http://[::1]:11434").hostname).toBe("[::1]");
+    expect(isRemoteOllamaUrl("http://[::1]:11434")).toBe(false);
+    expect(isRemoteOllamaUrl("http://[::1]")).toBe(false);
+    expect(isRemoteOllamaUrl("https://[::1]:11434/api")).toBe(false);
+    expect(isRemoteOllamaUrl(" HTTP://[0:0:0:0:0:0:0:1]:11434 ")).toBe(false); // URL shortens it to [::1]
+    expect(isRemoteOllamaUrl("http://[::2]:11434")).toBe(true);
+    expect(isRemoteOllamaUrl("http://[2001:db8::1]:11434")).toBe(true);
+  });
+
+  it("treats every 127.x.x.x address as local, and only those", () => {
+    for (const url of [
+      "http://127.0.0.2:11434",
+      "http://127.1.2.3",
+      "http://127.255.255.254:11434/api",
+      "http://127.1:11434", // URL expands it to 127.0.0.1
+    ]) {
+      expect(isRemoteOllamaUrl(url), url).toBe(false);
+    }
+    for (const url of [
+      "http://128.0.0.1:11434",
+      "http://126.255.255.255",
+      "http://10.0.0.5:11434",
+      "http://127.0.0.1.example.com:11434", // a hostname that only starts like an address
+      "http://localhost.example.com:11434",
+    ]) {
+      expect(isRemoteOllamaUrl(url), url).toBe(true);
+    }
+  });
+
+  it("classifies loopback hosts the same way when the URL does not parse", () => {
+    // A port out of range makes `new URL` throw, so the host is read from the text.
+    expect(() => new URL("http://localhost:99999")).toThrow();
+    for (const url of [
+      "http://localhost:99999",
+      "http://127.0.0.1:99999",
+      "http://127.0.0.5:99999",
+      "http://[::1]:99999",
+      "http://[::1]:99999/api",
+    ]) {
+      expect(isRemoteOllamaUrl(url), url).toBe(false);
+    }
+    expect(isRemoteOllamaUrl("http://[::2]:99999")).toBe(true);
+    expect(isRemoteOllamaUrl("http://example.com:99999")).toBe(true);
+  });
+
+  it("does not ask for a remote credential on an IPv6 loopback endpoint", () => {
+    expect(hasOllamaCredentialForEndpoint({ OLLAMA_REMOTE_API_KEY: "remote-key" }, "http://[::1]:11434")).toBe(false);
+    expect(hasOllamaCredentialForEndpoint({ OLLAMA_REMOTE_API_KEY: "remote-key" }, "http://127.0.0.2:11434")).toBe(false);
+    expect(defaultProviderConfig({
+      LLM_PROVIDER: "ollama",
+      OLLAMA_BASE_URL: "http://[::1]:11434",
+      OLLAMA_REMOTE_API_KEY: "remote-key",
+    }).hasOllamaApiKey).toBe(false);
+  });
+
   it("selects Ollama Cloud override while preserving the configured model", () => {
     const selected = selectProviderForModel({
       mode: "ollama-cloud",

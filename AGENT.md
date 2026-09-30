@@ -17,7 +17,7 @@ provider/model choices, CLI/MCP access, and safety boundaries.
 
 ## Current Verified Baseline
 
-Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
+Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 `npm run tauri -- build` rows come from an earlier pass and were not re-run;
 `tauri build --debug --no-bundle` was re-run on 2026-09-25).
 
@@ -35,6 +35,17 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | `harness run` (live) | 2026-09-26: the real `harness-core` and a free keyless endpoint; an agent fixed a bug and ran an allowed `node --test`, and `--resume` reused it (see `docs/DEVELOPMENT_LOG.md`) |
 | App run in the UI (Windows) | 2026-09-26: the UI in a browser against the real `harness-core` and a free endpoint: run, command approval, Changes, run record and Stop. The UI issues it found are fixed and were re-checked the same way (see `docs/DEVELOPMENT_LOG.md`) |
 | MCP | stdio server and read/test tools tested |
+
+Linux pass, 2026-09-29, with master's #10 (the UI fixes) merged (not a Windows
+re-run: the rows above stand): `npx tsc --noEmit` passed; `npx vitest run`
+passed, 1082 tests / 70 files;
+`cargo test` passed, 116 tests (the 2 Windows-only tests are not compiled on
+Linux); `cargo test --no-default-features --features core` passed, 116 + 2 tests;
+`npx vite build` passed with no empty `vendor-react` chunk (the large
+`index`/`monacoLocal` warning remains). Not re-run in this pass: the desktop app,
+macOS, and a live `harness run` with a model. `.github/workflows/ci.yml` runs
+these checks and `harness run` against the real `harness-core` on every pull
+request and push to master.
 
 ## Tech Stack
 
@@ -54,7 +65,7 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 - Rule-based Workflow Wizard / Create from Goal, including blog automation and Harness Studio self-improvement templates.
 - Rule-based Guide Assistant. It makes no live AI calls.
 - Provider settings and adapters for OpenAI, Anthropic, Ollama local, Ollama Cloud, and OpenAI-compatible endpoints.
-- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for nodes with `fs.write`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback.
+- Agent file tools (`read_file`/`fs.read`, `list_files`, `grep`, `fs.write`, `fs.append`, and `edit_file` for nodes with `fs.write`), confined to the open workspace, called through native tool calling (Rust `chat_turn`; loop in `src/services/execution/agentLoop.ts`) with the `<tool_call>` text protocol as fallback. Writes to git internals, `.harness/hooks/`, `.harness/runs/` and `.harness/audit.log.jsonl` are refused. The check is on the path as written: links and Windows aliases (8.3 names, NTFS streams) are not covered.
 - Coding core:
   - Every file a run's agents write is in the run's change log (`changeLog.ts`). The Changes dialog shows a diff and reverts per file or all (`revertChanges.ts`, Rust `delete_workspace_file`).
   - Native tool-calling turns stream live (`chat_stream.rs`).
@@ -72,8 +83,8 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
   - It uses the same engine (`src/engine/runWorkflow.ts`) and `harness-core`: the app's Rust commands built without Tauri, over JSON lines on stdin/stdout.
   - Keys come from the environment. Agent commands run only if passed exactly with `--allow-command`.
   - Output is readable lines or `--json` events, with exit codes for CI.
-- Run records: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`. `harness run --resume <runId>` reuses the agents that finished and did not change.
-- CI: `.github/workflows/ci.yml` runs on Linux: types, the TypeScript and Rust tests (with and without Tauri), and `harness run` against the real `harness-core`. `examples/ci/harness-run.yml` is a template for other repositories.
+- Run records: every run, in the app with a workspace open and in `harness run`, is saved to `.harness/runs/<runId>/run.json`. `harness run --resume <runId>` reuses the agents that finished and did not change. The record also keeps a SHA-256 of each Hook node's script and env (`hookScripts`), never the text.
+- CI: `.github/workflows/ci.yml` runs on Linux, with read-only permissions: types, the TypeScript tests, the production frontend build, the Rust tests (with and without Tauri), and `harness run` against the real `harness-core`. `examples/ci/harness-run.yml` is a template for other repositories.
 - MCP v0 tools:
   - `project_status`
   - `list_workflows`
@@ -87,7 +98,11 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 
 ## Honest Limitations
 
-- Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (`src/services/execution/routing.ts`). Gateway routing prunes skipped branches.
+- Execution uses `runParallel()` from `src/services/execution/parallelScheduler.ts`, which runs independent branches concurrently up to `executionSettings.maxParallel`. Feedback edges are excluded from dependency calculations; instead, a verdict of REVISE (or one naming the edge's label) re-runs the path back to the reviewer, up to 2 rounds (the loop is `runWithRevisions` in `src/engine/runWorkflow.ts`; verdicts are read in `src/services/execution/routing.ts`). Gateway routing prunes skipped branches. A revision follows the gateways' current routes:
+  - It skips the nodes the current routes prune.
+  - When a gateway on the path switches route, a node it routed away from that had already run is dropped: marked skipped, and its output removed from later inputs, the run record and memory. So `harness run --json` can report a node `done` and later `skipped`; the last event, and `run_finished.agents`, count.
+  - A node the new route makes live but that is off the revision path does not run; an audit warning (a `revision` entry with `warning`) says so.
+  - A failed node is dropped only with `continueOnError`, and a failed Hook never is (it fails the run even then), so a failed run keeps its reason.
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).
 - Context snapshots are partial and not a complete durable provider request trace. Run records (`.harness/runs/`) keep each agent's status, output and the audit, not the provider requests.
@@ -97,7 +112,12 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
 - Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command: once, or for the rest of the run ("Allow for this run" grants that exact text). This goes through `commandConsentStore` + `CommandConsentDialog` and the Rust `execute_command`. Keep it that way: no other auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed. Stop kills a running command's process tree (`cancel_command`).
-- During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. Hooks marked `requireConsent` are not run automatically (the node fails and the run stops).
+- During workflow runs only Hook-role nodes run their `preHook`. Pre/post hooks on agent nodes run only manually from the Hooks tab; `postHook` never runs during runs. A Hook node fails, and the run stops, instead of running when:
+  - it is marked `requireConsent`;
+  - its script or env changed during the run (checked only for a hook without `requireConsent`). Either an agent's file tools changed the script (the change log, in any attempt of the run), or the SHA-256 of the script and of the node's `env` taken when the run first starts differs from one taken just before the hook runs. The hash also catches other spellings of the path, links, approved shell commands and an `env` (a `BASH_ENV` or `PATH`) added to the workflow file;
+  - the run is a resume and the hook has no baseline (a Hook node added, or given a script, since the first attempt). The baselines are saved in the run record and a resume never takes new ones, so that hook is refused until a new run. After a refusal a resume refuses again: start a new run, which takes the scripts as they are as its baselines. (A record saved before `hookScripts` existed has none; resuming it takes them then.)
+- Hook refusals are audited. `harness run` needs Node 20 or later (Web Crypto) when a workflow has a Hook node with a script and without `requireConsent`; otherwise the run does not start (exit 3).
+- The hook script check does not cover scripts that aren't valid UTF-8 (nor their `env`), files a script sources or imports, the gap between the check and the hook's start, or an approved `bash` command that writes anywhere in the workspace (`docs/SECURITY.md`).
 - Temperature, per-node fallback model, gateway `condition` text, prompt `{{variables}}`, and workflow-level `executionSettings.timeoutSeconds`/`retryOnFailure`/`maxRetries` are saved and labeled in the UI but not applied at runtime.
 - The VS Code extension (`vscode-extension/`) is an experimental scaffold; most commands do not work yet (command names do not match the webview).
 
@@ -119,7 +139,7 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | File | Purpose |
 |---|---|
 | `src/engine/runWorkflow.ts` | Workflow run engine (uses `runParallel`); no React, stores or Tauri |
-| `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`) and the resume rule |
+| `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`), the resume rule and the hook-script hash |
 | `src/cli/runCli.ts` | `harness run` (bundled by `npm run build:cli`) |
 | `src-tauri/src/commands/core_server.rs` | `harness-core`: the run's Rust commands over stdin/stdout (`npm run build:core`) |
 | `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
@@ -140,6 +160,8 @@ Last execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 1. Git-native runs: a worktree per run, a diff that includes command-made changes, commit/PR.
 2. Persist real per-run artifacts and full provider request traces (run records keep outputs and the audit only).
 3. Move API keys from localStorage to an OS keychain (Tauri Stronghold).
-4. Add installer smoke tests on a clean Windows user profile.
+4. Hash hook scripts in Rust, from their bytes, and verify the hash in `execute_hook`: that covers scripts that aren't UTF-8 and the gap between the check and the hook's start.
+5. Add installer smoke tests on a clean Windows user profile.
+6. Add a Windows CI job for the Windows-only Rust tests and the Tauri build (`.github/workflows/ci.yml` runs on Linux only).
 
 

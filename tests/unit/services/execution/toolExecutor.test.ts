@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   executeTool,
-  parseToolCall,
+  readToolCall,
   stripToolCall,
   buildToolInstructions,
   runnableTools,
@@ -20,24 +20,168 @@ function mockInvoke(responses: Record<string, unknown>): InvokeFn {
   }) as unknown as InvokeFn;
 }
 
-// ── parseToolCall ─────────────────────────────────────────────────────────────
+// ── readToolCall ──────────────────────────────────────────────────────────────
 
-describe("parseToolCall", () => {
-  it("parses a valid tool call", () => {
-    const text = `<tool_call>{"name":"read_file","args":{"path":"src/main.ts"}}</tool_call>`;
-    expect(parseToolCall(text)).toEqual({ name: "read_file", args: { path: "src/main.ts" } });
+const FENCE = "`".repeat(3);
+
+describe("readToolCall", () => {
+  it("reads a valid call", () => {
+    expect(readToolCall(`<tool_call>{"name":"grep","args":{"path":"a","pattern":"b"}}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "grep", args: { path: "a", pattern: "b" } } });
   });
 
-  it("returns null when no tag present", () => {
-    expect(parseToolCall("just some text")).toBeNull();
+  it("reads JSON wrapped in a ```, ```json, ```jsonc or ```javascript fence inside the tags", () => {
+    const call = { name: "read_file", args: { path: "src/main.ts" } };
+    const json = JSON.stringify(call);
+    const bodies = [
+      `${FENCE}json\n${json}\n${FENCE}`,
+      `${FENCE}\n${json}\n${FENCE}`,
+      `\n  ${FENCE}JSON\r\n${json}\r\n${FENCE}\n`,
+      `${FENCE}json ${json}${FENCE}`,
+      `${FENCE}jsonc\n${json}\n${FENCE}`,
+      `${FENCE}javascript\n${json}\n${FENCE}`,
+      `${FENCE}JavaScript\r\n${json}\r\n${FENCE}`,
+    ];
+    for (const body of bodies) {
+      expect(readToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual({ kind: "call", call });
+    }
   });
 
-  it("returns null for invalid JSON", () => {
-    expect(parseToolCall("<tool_call>not-json</tool_call>")).toBeNull();
+  it("reads JSON wrapped in a ```js, ```ts, ```typescript or ```json5 fence inside the tags", () => {
+    const call = { name: "read_file", args: { path: "src/main.ts" } };
+    const json = JSON.stringify(call);
+    const bodies = [
+      `${FENCE}js\n${json}\n${FENCE}`,
+      `${FENCE}ts\n${json}\n${FENCE}`,
+      `${FENCE}typescript\n${json}\n${FENCE}`,
+      `${FENCE}json5\n${json}\n${FENCE}`,
+      `\n  ${FENCE}JS\r\n${json}\r\n${FENCE}\n`,
+      `${FENCE}TypeScript\r\n${json}\r\n${FENCE}`,
+      `${FENCE}ts ${json}${FENCE}`,
+      `${FENCE}json5 ${json}${FENCE}`,
+    ];
+    for (const body of bodies) {
+      expect(readToolCall(`Reading.\n<tool_call>${body}</tool_call>`), body).toEqual({ kind: "call", call });
+    }
   });
 
-  it("returns null when name is missing", () => {
-    expect(parseToolCall(`<tool_call>{"args":{}}</tool_call>`)).toBeNull();
+  it("keeps a code fence inside a string argument", () => {
+    const call = { name: "fs.write", args: { path: "README.md", content: `${FENCE}js\nrun()\n${FENCE}` } };
+    expect(readToolCall(`<tool_call>${JSON.stringify(call)}</tool_call>`)).toEqual({ kind: "call", call });
+    expect(readToolCall(`<tool_call>${FENCE}json\n${JSON.stringify(call)}\n${FENCE}</tool_call>`))
+      .toEqual({ kind: "call", call });
+    expect(readToolCall(`<tool_call>${FENCE}ts\n${JSON.stringify(call)}\n${FENCE}</tool_call>`))
+      .toEqual({ kind: "call", call });
+  });
+
+  it("does not stall on a very long run of whitespace inside the block, fenced or not", () => {
+    // A regex that scans for the closing fence backtracks quadratically over the run (about
+    // 4 s at this size) once the body is fenced; an unfenced body never reaches that regex.
+    const call = { name: "fs.write", args: { path: "a.txt", content: " ".repeat(100_000) } };
+    const json = JSON.stringify(call);
+    for (const [label, body] of [["unfenced", json], ["fenced", `${FENCE}json\n${json}\n${FENCE}`]]) {
+      const started = Date.now();
+      expect(readToolCall(`<tool_call>${body}</tool_call>`), label).toEqual({ kind: "call", call });
+      expect(Date.now() - started, label).toBeLessThan(1000);
+    }
+  });
+
+  it("gives a call without args (or with null args) an empty args object", () => {
+    expect(readToolCall(`<tool_call>{"name":"list_files"}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "list_files", args: {} } });
+    expect(readToolCall(`<tool_call>{"name":"list_files","args":null}</tool_call>`))
+      .toEqual({ kind: "call", call: { name: "list_files", args: {} } });
+  });
+
+  it("finds no call in prose, even when the reply mentions the tag", () => {
+    for (const text of [
+      "just some text",
+      "Use the <tool_call> tag to call a tool.",
+      "<tool_call>not-json</tool_call>",
+      "<tool_call>call read_file with path a.ts</tool_call>",
+      `<tool_call>${FENCE}python\nprint(1)\n${FENCE}</tool_call>`,
+      `<tool_call>${FENCE}ts\nconst x = 1;\n${FENCE}</tool_call>`,
+      "<tool_call>[1, 2]</tool_call>",
+      "<tool_call></tool_call>",
+      // The tag mentioned without a closing tag: what follows it is not a call either.
+      "Wrap the call in a <tool_call>",
+      "Use <tool_call>read_file a.ts and stop.",
+      `<tool_call>${FENCE}python\nprint(1)`,
+      "<tool_call>[1, 2]",
+      // A closed mention, and a stray closing tag.
+      "Use <tool_call>x</tool_call> like so.",
+      "</tool_call> ends a call.",
+    ]) {
+      expect(readToolCall(text), text).toEqual({ kind: "none" });
+    }
+  });
+
+  it("reports a block that starts with { but is not a valid call, with a reason", () => {
+    const bad: Array<[string, RegExp]> = [
+      [`{"name":"read_file","args":{"path":"a"},}`, /./],       // trailing comma
+      [`{"name":"read_file","args":{"path":"a"}`, /./],         // cut off
+      [`{'name':'read_file'}`, /./],                             // single quotes
+      [`{"args":{}}`, /name/],
+      [`{"name":42}`, /name/],
+      [`{"name":"read_file","args":"a.ts"}`, /args/],
+      [`{"name":"read_file","args":["a.ts"]}`, /args/],
+    ];
+    for (const [json, reason] of bad) {
+      for (const body of [json, `${FENCE}json\n${json}\n${FENCE}`, `${FENCE}ts\n${json}\n${FENCE}`]) {
+        const reading = readToolCall(`<tool_call>${body}</tool_call>`);
+        expect(reading.kind, body).toBe("malformed");
+        expect(reading.kind === "malformed" && reading.reason, body).toMatch(reason);
+      }
+    }
+  });
+
+  it("reports a call cut off before </tool_call> as malformed, whatever it holds so far", () => {
+    const jsons = [
+      `{"name":"read_file","args":{"path":"a`,     // cut off inside a string
+      `{"name":"read_file","args":`,                // cut off after a key
+      `{"name":"read_file","args":{"path":"a"}}`,  // complete JSON, but the tag is never closed
+      "{",
+    ];
+    for (const json of jsons) {
+      for (const body of [
+        json,
+        `\n  ${json}`,
+        `${FENCE}json\n${json}`,
+        `${FENCE}javascript\n${json}\n${FENCE}`,
+        `${FENCE}ts\n${json}`,
+        `${FENCE}json5\n${json}\n${FENCE}`,
+      ]) {
+        for (const text of [`<tool_call>${body}`, `Reading a.\n<tool_call>${body}`]) {
+          const reading = readToolCall(text);
+          expect(reading.kind, text).toBe("malformed");
+          expect(reading.kind === "malformed" && reading.reason, text).toMatch(/cut off before <\/tool_call>/);
+        }
+      }
+    }
+  });
+
+  it("reports the cut-off call when an earlier mention of the tag is closed or unclosed", () => {
+    for (const text of [
+      `Use <tool_call>x</tool_call> like so.\n<tool_call>{"name":"read_file","args":{"path":"a`,
+      `Use the <tool_call> tag.\n<tool_call>{"name":"read_file","args":{"path":"a`,
+    ]) {
+      const reading = readToolCall(text);
+      expect(reading.kind, text).toBe("malformed");
+      expect(reading.kind === "malformed" && reading.reason, text).toMatch(/cut off before <\/tool_call>/);
+    }
+  });
+
+  it("reads the first closed call even when a later one is cut off", () => {
+    const text = `<tool_call>{"name":"list_files"}</tool_call>\n<tool_call>{"name":"read_file","args":{"path":"a`;
+    expect(readToolCall(text)).toEqual({ kind: "call", call: { name: "list_files", args: {} } });
+  });
+
+  it("does not stall on a very long run of whitespace in a call cut off inside a fence", () => {
+    // Cut off after the run, so the body has an opening fence, no closing one, and text after the spaces.
+    const text = `<tool_call>${FENCE}json\n{"name":"fs.write","args":{"path":"a.txt","content":"${" ".repeat(100_000)}tail`;
+    const started = Date.now();
+    expect(readToolCall(text).kind).toBe("malformed");
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 });
 
@@ -51,6 +195,17 @@ describe("stripToolCall", () => {
 
   it("no-ops when tag absent", () => {
     expect(stripToolCall("plain text")).toBe("plain text");
+  });
+
+  it("removes a call cut off before its closing tag, keeping the text around the rest", () => {
+    expect(stripToolCall(`Before\n<tool_call>{"name":"read_file","args":{"path":"a`)).toBe("Before");
+    expect(stripToolCall(`Before\n<tool_call>${FENCE}json\n{"name":"read_file"`)).toBe("Before");
+    expect(stripToolCall(`<tool_call>{"name":"x","args":{}}</tool_call>\nAfter\n<tool_call>{"name":"y"`)).toBe("After");
+  });
+
+  it("keeps the tag mentioned in prose", () => {
+    expect(stripToolCall("Use the <tool_call> tag.")).toBe("Use the <tool_call> tag.");
+    expect(stripToolCall("Use <tool_call>read_file a.ts")).toBe("Use <tool_call>read_file a.ts");
   });
 });
 
@@ -77,6 +232,15 @@ describe("buildToolInstructions", () => {
     const instructions = buildToolInstructions(["bash"]);
     expect(instructions).toContain("• bash:");
     expect(instructions).toContain("approve");
+  });
+
+  it("tells the model to start a program in the workspace folder by path on Windows", () => {
+    // Commands run with NoDefaultCurrentDirectoryInExePath=1, so cmd.exe finds .\build.bat but not build.bat.
+    const [bash] = toolDefinitions(["bash"]);
+    for (const text of [buildToolInstructions(["bash"]), bash.description]) {
+      expect(text).toContain("On Windows");
+      expect(text).toContain(".\\build.bat");
+    }
   });
 
   it("separates read and write sections when both present", () => {
@@ -189,6 +353,72 @@ describe("executeTool — fs.write", () => {
     );
     expect(result).toContain("[error]");
   });
+
+  it("refuses to overwrite an existing file it cannot read, and records nothing", async () => {
+    const written: string[] = [];
+    const onChange = vi.fn();
+    const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "read_workspace_file") throw new Error("IO error: stream did not contain valid UTF-8");
+      if (cmd === "write_workspace_file") { written.push(args?.content as string); return undefined; }
+      throw new Error(`Unexpected: ${cmd}`);
+    }) as unknown as InvokeFn;
+
+    const result = await executeTool(
+      { name: "fs.write", args: { path: "data.csv", content: "x" } },
+      "/workspace", invoke, ["fs.write"], onChange,
+    );
+
+    expect(result).toMatch(/^\[error\] fs\.write could not read data\.csv; nothing was written: .*UTF-8/);
+    expect(written).toEqual([]);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it.each(["(os error 2)", "(os error 3)"])(
+    "still creates a file the read reports as missing %s, recording it as new",
+    async (code) => {
+      const written: string[] = [];
+      const onChange = vi.fn();
+      const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
+        // Rust io::Error text is localized, but the "(os error N)" suffix is not.
+        if (cmd === "read_workspace_file") throw new Error(`IO error: 지정된 경로를 찾을 수 없습니다. ${code}`);
+        if (cmd === "write_workspace_file") { written.push(args?.content as string); return undefined; }
+        throw new Error(`Unexpected: ${cmd}`);
+      }) as unknown as InvokeFn;
+
+      const result = await executeTool(
+        { name: "fs.write", args: { path: "new/out.txt", content: "hello" } },
+        "/workspace", invoke, ["fs.write"], onChange,
+      );
+
+      expect(result).toContain("Written");
+      expect(written).toEqual(["hello"]);
+      expect(onChange).toHaveBeenCalledWith("new/out.txt", null, "hello");
+    },
+  );
+
+  it.each([
+    ["left out", { path: "a.txt" }],
+    ["null", { path: "a.txt", content: null }],
+  ])("returns an error and writes nothing when content is %s", async (_case, args) => {
+    const invoke = vi.fn() as unknown as InvokeFn;
+    const onChange = vi.fn();
+    for (const name of ["fs.write", "write_file"]) {
+      const result = await executeTool({ name, args }, "/workspace", invoke, ["fs.write"], onChange);
+      expect(result).toBe("[error] fs.write requires 'content'");
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("writes an empty file when content is an explicit empty string", async () => {
+    const files: Record<string, string> = { "a.txt": "old" };
+    const result = await executeTool(
+      { name: "fs.write", args: { path: "a.txt", content: "" } },
+      "/workspace", fileInvoke(files), ["fs.write"],
+    );
+    expect(result).toBe("Written: a.txt (0 chars)");
+    expect(files["a.txt"]).toBe("");
+  });
 });
 
 // ── executeTool — fs.append ───────────────────────────────────────────────────
@@ -259,6 +489,30 @@ describe("executeTool — fs.append", () => {
     );
     expect(result).toContain("Appended");
     expect(written).toBe("first line");
+  });
+
+  it.each([
+    ["left out", { path: "log.txt" }],
+    ["null", { path: "log.txt", content: null }],
+  ])("returns an error and writes nothing when content is %s", async (_case, args) => {
+    const invoke = vi.fn() as unknown as InvokeFn;
+    const onChange = vi.fn();
+    for (const name of ["fs.append", "append_file"]) {
+      const result = await executeTool({ name, args }, "/workspace", invoke, ["fs.append"], onChange);
+      expect(result).toBe("[error] fs.append requires 'content'");
+    }
+    expect(invoke).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("accepts an explicit empty string as content", async () => {
+    const files: Record<string, string> = { "log.txt": "kept\n" };
+    const result = await executeTool(
+      { name: "fs.append", args: { path: "log.txt", content: "" } },
+      "/workspace", fileInvoke(files), ["fs.append"],
+    );
+    expect(result).toBe("Appended to: log.txt (+0 chars)");
+    expect(files["log.txt"]).toBe("kept\n");
   });
 });
 
@@ -471,6 +725,32 @@ describe("executeTool — edit_file", () => {
     expect(result).toBe("[error] new.ts does not exist. Use fs.write to create it.");
   });
 
+  it.each([
+    ["left out", { path: "a.ts", old_string: "a" }],
+    ["null", { path: "a.ts", old_string: "a", new_string: null }],
+  ])("returns an error and writes nothing when new_string is %s", async (_case, args) => {
+    const files: Record<string, string> = { "a.ts": "a();\n" };
+    const invoke = fileInvoke(files);
+    const onChange = vi.fn();
+
+    const result = await executeTool({ name: "edit_file", args }, "/workspace", invoke, ["fs.write"], onChange);
+
+    expect(result).toBe("[error] edit_file requires 'new_string'");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(files["a.ts"]).toBe("a();\n");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("deletes the snippet when new_string is an explicit empty string", async () => {
+    const files: Record<string, string> = { "a.ts": "a();\nb();\n" };
+    const result = await executeTool(
+      { name: "edit_file", args: { path: "a.ts", old_string: "b();\n", new_string: "" } },
+      "/workspace", fileInvoke(files), ["fs.write"],
+    );
+    expect(result).toBe("Edited: a.ts (1 replacement)");
+    expect(files["a.ts"]).toBe("a();\n");
+  });
+
   it("is offered to nodes with fs.write, with its required arguments", () => {
     expect(runnableTools(["read_file", "fs.write"])).toEqual(["read_file", "fs.write", "edit_file"]);
     const edit = toolDefinitions(["fs.write"]).find((d) => d.name === "edit_file");
@@ -504,5 +784,122 @@ describe("executeTool — change listener", () => {
     const invoke = mockInvoke({ write_workspace_file: undefined });
     await executeTool({ name: "fs.write", args: { path: "a.ts", content: "x" } }, "/w", invoke, ["fs.write"]);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── executeTool — protected paths ─────────────────────────────────────────────
+
+/** Every way an agent can write a file; each call would succeed on an ordinary path. */
+const WRITE_CALLS: Array<[string, (path: string) => { name: string; args: Record<string, unknown> }]> = [
+  ["fs.write", (path) => ({ name: "fs.write", args: { path, content: "x" } })],
+  ["write_file", (path) => ({ name: "write_file", args: { path, content: "x" } })],
+  ["fs.append", (path) => ({ name: "fs.append", args: { path, content: "x" } })],
+  ["append_file", (path) => ({ name: "append_file", args: { path, content: "x" } })],
+  ["edit_file", (path) => ({ name: "edit_file", args: { path, old_string: "a", new_string: "b" } })],
+];
+
+const PROTECTED_PATHS = [
+  // git internals, at any depth
+  ".git/hooks/pre-commit",
+  ".git/config",
+  "vendor/x/.git/hooks/post-checkout",
+  ".git", // worktrees and submodules use a .git *file*
+  "vendor/x/.git",
+  // hook scripts and the audit log
+  ".harness/hooks/pre-run.sh",
+  ".harness/hooks/nested/guard.py",
+  ".harness/hooks",
+  ".harness/audit.log.jsonl",
+  // run records, which a resumed run trusts
+  ".harness/runs/run-1/run.json",
+  ".harness/runs",
+  // the same places, spelled another way
+  ".git\\hooks\\pre-commit",
+  "./.git/config",
+  "src/../.git/hooks/x",
+  "a/b/../../.harness/hooks/x.sh",
+  "src//./.git/config",
+  ".GIT/Config",
+  ".Harness/HOOKS/x.sh",
+  ".harness\\Audit.Log.JSONL",
+  ".Harness\\RUNS\\run-1\\run.json",
+  "  .git/config  ",
+  // Their text cannot place them under the workspace root, yet the backend accepts
+  // an absolute or ../<workspace> path that lands inside it.
+  "/home/user/ws/.harness/hooks/x.sh",
+  "C:\\ws\\.harness\\audit.log.jsonl",
+  "../ws/.harness/hooks/x.sh",
+  "src/../../ws/.harness/audit.log.jsonl",
+  "/home/user/ws/.git/config",
+  "../ws/.harness/runs/run-1/run.json",
+];
+
+const LOOKALIKE_PATHS = [
+  ".gitignore",
+  ".github/workflows/ci.yml",
+  "src/git/x.ts",
+  ".harness/hooks-old/a.sh",
+  ".harness/audit.log.jsonl.bak",
+  ".harness/runs-old/run.json",
+  ".harness/inputs/requirements.yaml",
+  "hooks/pre-commit",
+];
+
+describe("executeTool — protected paths", () => {
+  it.each(PROTECTED_PATHS)("refuses %s for every write tool: nothing read or written, no change recorded", async (path) => {
+    for (const [tool, makeCall] of WRITE_CALLS) {
+      const invoke = vi.fn(async () => { throw new Error("no file access expected"); }) as unknown as InvokeFn;
+      const onChange = vi.fn();
+
+      const result = await executeTool(makeCall(path), "/workspace", invoke, ["fs.write", "fs.append"], onChange);
+
+      expect(result, `${tool} ${path}`).toMatch(/^\[error\] .*protected/);
+      expect(result, `${tool} ${path}`).toContain(path.trim());
+      expect(result, `${tool} ${path}`).toContain("nothing was written");
+      expect(invoke, `${tool} ${path}`).not.toHaveBeenCalled();
+      expect(onChange, `${tool} ${path}`).not.toHaveBeenCalled();
+    }
+  });
+
+  it("leaves an existing protected file as it was", async () => {
+    const files: Record<string, string> = { ".git/hooks/pre-commit": "#!/bin/sh\n", ".harness/audit.log.jsonl": "{}\n" };
+    const before = { ...files };
+    const tools = ["fs.write", "fs.append"];
+    for (const path of Object.keys(files)) {
+      for (const [, makeCall] of WRITE_CALLS) {
+        await executeTool(makeCall(path), "/workspace", fileInvoke(files), tools);
+      }
+    }
+    expect(files).toEqual(before);
+  });
+
+  it.each(LOOKALIKE_PATHS)("still writes, appends to and edits %s", async (path) => {
+    const files: Record<string, string> = { [path]: "a" };
+    const changed: string[] = [];
+    const onChange = (p: string) => { changed.push(p); };
+    const invoke = fileInvoke(files);
+    const tools = ["fs.write", "fs.append"];
+
+    expect(await executeTool({ name: "fs.write", args: { path, content: "a" } }, "/w", invoke, tools, onChange))
+      .toMatch(/^Written/);
+    expect(await executeTool({ name: "fs.append", args: { path, content: "b" } }, "/w", invoke, tools, onChange))
+      .toMatch(/^Appended/);
+    expect(await executeTool({ name: "edit_file", args: { path, old_string: "ab", new_string: "c" } }, "/w", invoke, tools, onChange))
+      .toMatch(/^Edited/);
+
+    expect(files[path]).toBe("c");
+    expect(changed).toEqual([path, path, path]);
+  });
+
+  it.each([".git/config", ".harness/hooks/pre-run.sh", ".harness/audit.log.jsonl"])("still reads %s", async (path) => {
+    const invoke = mockInvoke({ read_workspace_file: "line one\nsecret" });
+    expect(await executeTool({ name: "read_file", args: { path } }, "/workspace", invoke)).toContain("line one");
+    expect(await executeTool({ name: "fs.read", args: { path } }, "/workspace", invoke)).toContain("line one");
+    expect(await executeTool({ name: "grep", args: { path, pattern: "secret" } }, "/workspace", invoke)).toContain("2: secret");
+  });
+
+  it("names the missing permission before the protected path", async () => {
+    const result = await executeTool({ name: "fs.write", args: { path: ".git/config", content: "x" } }, "/workspace", mockInvoke({}), []);
+    expect(result).toContain("not enabled");
   });
 });

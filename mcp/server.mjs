@@ -7,9 +7,10 @@
  * Tools (v0 — read + test):
  *   run_tests            Run `npx vitest run` and return pass/fail counts
  *   run_cargo_tests      Run `cargo test` and return Rust test results
- *   validate_workflow    Zod-validate a .harness.yaml file
+ *   validate_workflow    Validate a .harness.yaml/.harness.yml file: schema shape and
+ *                        that every connection refers to an existing agent
  *   project_status       Summary of workspace files, test counts, and docs
- *   list_workflows       List all .harness.yaml files under a directory
+ *   list_workflows       List all .harness.yaml and .harness.yml files under the project
  *   list_providers       Provider metadata and capability flags (no credential values)
  *   list_artifacts       Artifact file metadata under .harness/artifacts (no content)
  *   get_recent_logs      Recent .harness/audit.log.jsonl entries, secrets redacted
@@ -22,8 +23,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, existsSync, readdirSync, statSync, lstatSync, openSync, readSync, closeSync } from "node:fs";
-import { resolve, join, basename, dirname, relative, isAbsolute, normalize } from "node:path";
+import { readFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, openSync, readSync, closeSync } from "node:fs";
+import { resolve, join, basename, dirname, relative, isAbsolute, normalize, sep as pathSep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -171,7 +172,33 @@ const PROVIDER_CATALOG = [
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// [KEEP-IN-SYNC] with isRealDirectory in cli/harness.mjs.
+// True for a real folder, false for a symlink or junction (even one that leads to a folder) and
+// for anything that does not exist.
+function isRealDirectory(path) {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// True for a regular file, false for a folder, a FIFO, a device, a link, and for anything that does
+// not exist.
+function isRegularFile(path) {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// `ext` is one suffix or a list of them; pass `max = Infinity` to count without a cap.
+// Symlinks and junctions are never followed, `dir` itself included, so a link can neither lead the
+// walk outside the project nor loop it. With no cap nothing else ends `tests/a -> tests` plus
+// `tests/b -> tests` (about 2^40 visits) or `tests -> /` (the whole disk).
 function findFiles(dir, ext, max = 50) {
+  const exts = Array.isArray(ext) ? ext : [ext];
   const result = [];
   const walk = (d) => {
     if (result.length >= max) return;
@@ -180,20 +207,29 @@ function findFiles(dir, ext, max = 50) {
         if (entry.startsWith(".") || entry === "node_modules" || entry === "target") continue;
         const full = join(d, entry);
         try {
-          const stat = statSync(full);
+          // lstat, as in collectArtifactFiles: a link is neither isDirectory() nor isFile(), so it
+          // is skipped.
+          const stat = lstatSync(full);
           if (stat.isDirectory()) walk(full);
-          else if (entry.endsWith(ext)) result.push(full);
+          else if (stat.isFile() && exts.some((e) => entry.endsWith(e))) result.push(full);
         } catch {}
       }
     } catch {}
   };
-  walk(dir);
+  if (isRealDirectory(dir)) walk(dir);
   return result;
 }
 
+// [KEEP-IN-SYNC] with isInsideDir in cli/harness.mjs.
+function isInsideDir(rootPath, absPath) {
+  const rel = relative(rootPath, absPath);
+  // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
+  // ConfigMap mount has one) is inside. An absolute rel is another drive on Windows.
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + pathSep) && !isAbsolute(rel));
+}
+
 function isInsideProject(absPath) {
-  const rel = relative(PROJECT_ROOT, absPath);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return isInsideDir(PROJECT_ROOT, absPath);
 }
 
 function resolveSafePath(inputPath) {
@@ -218,10 +254,111 @@ function resolveWorkspacePath(inputPath) {
   return resolveSafePath(inputPath);
 }
 
+// [KEEP-IN-SYNC] with readFileInsideWorkspace in cli/harness.mjs (the containment rule: the CLI has
+// no project root to check, and reads a regular file only).
+// Resolves `target`, a file or folder under `workspace` (the audit log, the artifacts folder), for
+// reading: { path } (its real path), { missing: true } when there is nothing to read (a link that
+// dangles or loops included), or { error } when it leads out of the workspace through a symlink or
+// junction, on it or on any folder above it. Like resolveWorkflowFile this checks the REAL path and
+// never names where a link goes. The real path must also be inside the project: a workspace folder
+// that is itself a link could otherwise lead anywhere.
+function resolveInsideWorkspace(workspace, target, what) {
+  let real;
+  let realWorkspace;
+  try {
+    real = realpathSync(target);
+    realWorkspace = realpathSync(workspace);
+  } catch {
+    return { missing: true };
+  }
+  if (!isInsideDir(realWorkspace, real) || !isInsideDir(realpathSync(PROJECT_ROOT), real)) {
+    return { error: `Path rejected: the ${what} resolves outside the workspace (symlink or junction).` };
+  }
+  return { path: real };
+}
+
 function clampLimit(value, fallback, max) {
-  const num = Number(value);
+  // Only a number or a numeric string is a limit. Number() maps null, "", false and [] to 0,
+  // which would clamp to 1 instead of falling back to the default.
+  const num = typeof value === "number" ? value
+    : typeof value === "string" && value.trim() !== "" ? Number(value)
+    : NaN;
   if (!Number.isFinite(num)) return fallback;
   return Math.max(1, Math.min(max, Math.floor(num)));
+}
+
+const WORKFLOW_FILE_ERROR = "Only .harness.yaml or .harness.yml workflow files can be validated.";
+
+const WORKFLOW_SUFFIXES = [".harness.yaml", ".harness.yml"];
+
+function isWorkflowFilePath(path) {
+  return WORKFLOW_SUFFIXES.some((suffix) => path.endsWith(suffix));
+}
+
+// Resolves a workflow path for reading: { path } (the real path) or { error }. Only workflow
+// files inside the project qualify. The file type is checked on the path as given, before the
+// disk is touched, so a refusal reveals nothing about other files; then containment and file
+// type are checked again on the REAL path, so a symlink or junction can neither lead outside the
+// project nor dress up another file as a workflow.
+function resolveWorkflowFile(inputPath) {
+  let abs;
+  try {
+    abs = resolveSafePath(inputPath);
+  } catch (e) {
+    return { error: `Path rejected: ${e.message}` };
+  }
+  if (!isWorkflowFilePath(abs)) return { error: WORKFLOW_FILE_ERROR };
+
+  let real;
+  try {
+    real = realpathSync(abs);
+  } catch (e) {
+    const missing = e?.code === "ENOENT" || e?.code === "ENOTDIR";
+    return { error: missing ? `File not found: ${abs}` : `Cannot resolve path (${e?.code ?? "error"}): ${abs}` };
+  }
+  if (!isInsideDir(realpathSync(PROJECT_ROOT), real)) {
+    // The link target is not named: it is outside the project, so it is none of the caller's business.
+    return { error: "Path rejected: Path resolves outside the Harness Studio project (symlink or junction)." };
+  }
+  if (!isWorkflowFilePath(real)) return { error: WORKFLOW_FILE_ERROR };
+  return { path: real };
+}
+
+// Builds the message from fixed text, the library's error code and the position only. The yaml
+// library's own message is never used: it embeds the offending source line and the one before it,
+// and some messages (block scalar headers, aliases, escapes) interpolate file text as well. Errors
+// that are not parse errors (e.g. an unresolved alias) carry no position and get no detail.
+function describeYamlError(e) {
+  const pos = Array.isArray(e?.linePos) ? e.linePos[0] : undefined;
+  // Codes are fixed upper-case names, some with digits (KEY_OVER_1024_CHARS); anything else is dropped.
+  const code = typeof e?.code === "string" && /^[A-Z][A-Z0-9_]*$/.test(e.code) ? ` (${e.code})` : "";
+  return Number.isInteger(pos?.line) && Number.isInteger(pos?.col)
+    ? `YAML parse error${code} at line ${pos.line}, column ${pos.col}.`
+    : "YAML parse error: the file is not valid YAML.";
+}
+
+// [KEEP-IN-SYNC] with findDanglingConnections in cli/harness.mjs.
+// A saved workflow identifies its agents by list position ("agent-<i>"), the rule the app's
+// loadWorkflow and generators use, so every connection endpoint must be one of those ids.
+function findDanglingConnections(workflow) {
+  const count = workflow.agents.length;
+  const known = new Set(workflow.agents.map((_, i) => `agent-${i}`));
+  const validIds = count === 0 ? "the workflow has no agents"
+    : count === 1 ? "valid id: agent-0"
+    : `valid ids: agent-0 to agent-${count - 1}`;
+  const quote = (id) => {
+    const text = JSON.stringify(id);
+    return text.length > 66 ? `${text.slice(0, 65)}…"` : text;
+  };
+  const issues = [];
+  workflow.connections.forEach((connection, index) => {
+    for (const key of ["sourceAgentId", "targetAgentId"]) {
+      if (!known.has(connection[key])) {
+        issues.push({ path: `connections.${index}.${key}`, message: `Unknown agent ${quote(connection[key])} (${validIds})` });
+      }
+    }
+  });
+  return issues;
 }
 
 function toProjectRelativePath(absPath, workspace) {
@@ -468,45 +605,51 @@ const TOOLS = {
   },
 
   validate_workflow: {
-    description: "Validate a .harness.yaml file against the workflow schema.",
+    description: "Validate a .harness.yaml or .harness.yml file inside the project against the workflow schema, including that every connection refers to an existing agent (agent-0, agent-1, ...).",
     inputSchema: {
       type: "object",
       required: ["path"],
       properties: {
-        path: { type: "string", description: "Path to the .harness.yaml file" },
+        path: { type: "string", description: "Path to the .harness.yaml or .harness.yml file, inside the project root" },
       },
     },
     async run({ path: filePath }) {
-      let abs;
+      const file = resolveWorkflowFile(filePath);
+      if (file.error) return { valid: false, error: file.error };
+
+      let text;
       try {
-        abs = resolveSafePath(filePath);
+        if (!statSync(file.path).isFile()) return { valid: false, error: "Path is not a regular file." };
+        text = readFileSync(file.path, "utf-8");
       } catch (e) {
-        return { valid: false, error: `Path rejected: ${e.message}` };
-      }
-      if (!existsSync(abs)) {
-        return { valid: false, error: `File not found: ${abs}` };
+        return { valid: false, error: `Cannot read file (${e?.code ?? "error"}).` };
       }
       let raw;
       try {
-        raw = parseYaml(readFileSync(abs, "utf-8"));
+        // logLevel "error": the library prints its warnings (e.g. an unresolved tag) to stderr,
+        // quoting the offending source line. Parse errors still throw.
+        raw = parseYaml(text, { logLevel: "error" });
       } catch (e) {
-        return { valid: false, error: `YAML parse error: ${e.message}` };
+        return { valid: false, error: describeYamlError(e) };
       }
       const result = workflowSchema.safeParse(raw);
-      if (result.success) {
-        return {
-          valid: true,
-          name: result.data.meta.name,
-          version: result.data.meta.version,
-          agents: result.data.agents.length,
-          connections: result.data.connections.length,
-        };
+      if (!result.success) {
+        const issues = result.error.issues.map((i) => ({
+          path: i.path.join(".") || "(root)",
+          message: i.message,
+        }));
+        return { valid: false, issues };
       }
-      const issues = result.error.issues.map((i) => ({
-        path: i.path.join(".") || "(root)",
-        message: i.message,
-      }));
-      return { valid: false, issues };
+      // The schema only checks shape: a connection to an agent that does not exist still parses.
+      const dangling = findDanglingConnections(result.data);
+      if (dangling.length > 0) return { valid: false, issues: dangling };
+      return {
+        valid: true,
+        name: result.data.meta.name,
+        version: result.data.meta.version,
+        agents: result.data.agents.length,
+        connections: result.data.connections.length,
+      };
     },
   },
 
@@ -514,8 +657,9 @@ const TOOLS = {
     description: "Return a summary of project health: workflows, test state, docs.",
     inputSchema: { type: "object", properties: {} },
     async run() {
-      const workflows = findFiles(PROJECT_ROOT, ".harness.yaml");
-      const testFiles = findFiles(join(PROJECT_ROOT, "tests"), ".test.ts");
+      const workflows = findFiles(PROJECT_ROOT, WORKFLOW_SUFFIXES);
+      // Every test file, so no 50-entry cap; .test.tsx counts too.
+      const testFiles = findFiles(join(PROJECT_ROOT, "tests"), [".test.ts", ".test.tsx"], Infinity);
       const hasAgent  = existsSync(join(PROJECT_ROOT, "AGENT.md"));
       const hasTodo   = existsSync(join(PROJECT_ROOT, "docs", "TODO.md"));
 
@@ -546,10 +690,10 @@ const TOOLS = {
   },
 
   list_workflows: {
-    description: "List all .harness.yaml files found under the project.",
+    description: "List all .harness.yaml and .harness.yml files found under the project.",
     inputSchema: { type: "object", properties: {} },
     async run() {
-      const files = findFiles(PROJECT_ROOT, ".harness.yaml");
+      const files = findFiles(PROJECT_ROOT, WORKFLOW_SUFFIXES);
       const sep = process.platform === "win32" ? "\\" : "/";
       return {
         count: files.length,
@@ -592,6 +736,9 @@ const TOOLS = {
       if (!existsSync(workspacePath)) {
         return { count: 0, artifacts: [], error: `Workspace not found: ${workspacePath}` };
       }
+      // A link (on .harness/artifacts or above) that leads out of the workspace is refused, not listed.
+      const artifactsRoot = resolveInsideWorkspace(workspacePath, join(workspacePath, ".harness", "artifacts"), "artifacts folder");
+      if (artifactsRoot.error) return { count: 0, artifacts: [], error: artifactsRoot.error };
 
       const cappedLimit = clampLimit(limit, 100, 500);
       // Collect one extra so "truncated" is true only when more artifacts exist than returned.
@@ -627,8 +774,11 @@ const TOOLS = {
         return { count: 0, entries: [], error: `Workspace not found: ${workspacePath}` };
       }
 
-      const logPath = join(workspacePath, ".harness", "audit.log.jsonl");
-      if (!existsSync(logPath)) {
+      // Read through the real path, and only if it is inside the workspace: a link (on the log, on
+      // .harness or above) must not make this return another file's content.
+      const log = resolveInsideWorkspace(workspacePath, join(workspacePath, ".harness", "audit.log.jsonl"), "audit log");
+      if (log.error) return { count: 0, entries: [], error: log.error };
+      if (log.missing) {
         return {
           workspace: workspacePath,
           count: 0,
@@ -637,11 +787,18 @@ const TOOLS = {
           note: "No audit log exists for this workspace.",
         };
       }
+      // Only a regular file is read: opening a FIFO that has no writer blocks this single-threaded
+      // server for good. log.path is the real path, so this is the type of what the log resolves to
+      // (a link to a regular file inside the workspace still reads). The reply is fixed text: it
+      // names no path.
+      if (!isRegularFile(log.path)) {
+        return { count: 0, entries: [], error: "Path rejected: the audit log is not a regular file." };
+      }
 
       const cappedLimit = clampLimit(limit, 20, 100);
       const entries = [];
       let invalidLines = 0;
-      const lines = readLogTail(logPath).split(/\r?\n/).filter(Boolean);
+      const lines = readLogTail(log.path).split(/\r?\n/).filter(Boolean);
       for (const line of lines) {
         let parsed = null;
         try {

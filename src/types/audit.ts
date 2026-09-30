@@ -6,7 +6,8 @@ export type AuditAction =
   | "workflow_saved"
   | "workflow_loaded"
   | "workspace_opened"
-  // A run's events. Only commands and hooks are also saved to .harness/audit.log.jsonl.
+  // A run's events. Only commands, hooks and a run that failed as a whole (run_failed) are also
+  // saved to .harness/audit.log.jsonl.
   | "provider_check"
   | "provider_fallback"
   | "agent_started"
@@ -20,7 +21,8 @@ export type AuditAction =
   | "compaction"
   | "gateway_route"
   | "memory_write"
-  | "run_record";
+  | "run_record"
+  | "run_failed";
 
 export interface AuditEntry {
   id: string;

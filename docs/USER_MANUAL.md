@@ -36,7 +36,7 @@ run the workflow against configured providers.
 - An agent with the `subagent_dispatch` tool can start helper agents while it runs: each gets a fresh context, a subset of the agent's tools and the same model, and reports back. Helpers cannot start helpers; at most 5 per node run, 3 at a time. The node's activity panel lists each helper with its status, task, tools, time and report (or error); a helper still working when you press Stop shows as stopped, and so does the node itself; starts and tool calls are also in the audit log.
 - During runs only Hook-role nodes run their pre-hook. Hooks on agent nodes run only when you click **Run hook** in the Hooks tab, and a hook marked "require consent" is not run automatically (the node fails and the run stops).
 - Temperature, per-node fallback model, gateway condition text, prompt `{{variables}}`, and workflow-level timeout/retry settings are saved but not applied at runtime yet.
-- CLI is read-only.
+- The CLI's `project`, `workflow` and `provider` commands are read-only. `harness run` runs a workflow without the app (see [HEADLESS.md](HEADLESS.md)).
 - MCP is read/test-only.
 
 ## Main UI Areas
@@ -81,8 +81,10 @@ npm run harness -- provider list --json
 npm run harness -- workflow validate examples\purchasing-decision.harness.yaml
 ```
 
-CLI v0 does not mutate files, call providers, execute workflows, run hooks, or
-print secrets.
+These three commands do not mutate files, call providers, execute workflows, run
+hooks, or print secrets. `harness run` does execute workflows: it makes provider
+calls and runs only the agent commands you pass with `--allow-command`
+([HEADLESS.md](HEADLESS.md)).
 
 ## MCP
 

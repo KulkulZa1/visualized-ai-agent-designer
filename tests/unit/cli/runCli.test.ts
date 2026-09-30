@@ -10,6 +10,8 @@ describe("exitCode", () => {
   it("is 0 when done, 1 when an agent failed, 130 when stopped and 3 when the run could not start", () => {
     expect(exitCode(finished("done"), false)).toBe(0);
     expect(exitCode(finished("error"), false)).toBe(1);
+    // A run that failed as a whole (a cycle) is a failed run too, with the reason in its error.
+    expect(exitCode({ ...finished("error"), error: "Run failed: No runnable nodes remain." }, false)).toBe(1);
     expect(exitCode(finished("cancelled"), false)).toBe(130);
     expect(exitCode({ started: false, error: "Ollama is not running" }, false)).toBe(3);
     expect(exitCode(finished("error"), true)).toBe(3); // harness-core stopped during the run

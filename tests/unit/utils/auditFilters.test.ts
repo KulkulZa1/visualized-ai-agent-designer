@@ -71,24 +71,25 @@ describe("auditFilters", () => {
       { ...entry("6", "provider_fallback", "A", true, "Billing error — fell back to Ollama (qwen2.5-coder:7b)"),
         warning: true },
       entry("7", "agent_finished", "A", true, "✓ Coder — 689 est. tokens (1 tool call)"),
+      entry("8", "run_failed", "system", false, "Run failed: No runnable nodes remain. Workflow may contain a cycle: A, B"),
     ];
-    // Errors (5) show under every kind.
+    // Errors (5, and 8: a run that failed as a whole) show under every kind.
     const ids = (kind: AuditFilterKind) => filterAuditEntries(run, { kind, agentId: "all" }).map((e) => e.id);
 
     it("tool shows tool calls and commands", () => {
-      expect(ids("tool")).toEqual(["2", "3", "5"]);
+      expect(ids("tool")).toEqual(["2", "3", "5", "8"]);
     });
 
     it("consent shows commands, which all need approval, and hooks waiting for consent", () => {
-      expect(ids("consent")).toEqual(["3", "5"]);
+      expect(ids("consent")).toEqual(["3", "5", "8"]);
     });
 
     it("warn shows non-fatal problems", () => {
-      expect(ids("warn")).toEqual(["5", "6"]);
+      expect(ids("warn")).toEqual(["5", "6", "8"]);
     });
 
-    it("error shows failures only", () => {
-      expect(ids("error")).toEqual(["5"]);
+    it("error shows failures only, a run that failed as a whole included", () => {
+      expect(ids("error")).toEqual(["5", "8"]);
     });
   });
 

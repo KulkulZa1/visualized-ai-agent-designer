@@ -1,7 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, resolve, join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const root = resolve(__dirname, "../../..");
 const serverPath = join(root, "mcp", "server.mjs");
@@ -16,16 +17,18 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
-function callMcp(requests: unknown[], env: Record<string, string> = {}) {
-  return callMcpRaw(requests.map((request) => JSON.stringify(request)).join("\n") + "\n", env);
+// `server` defaults to the real server; a test can pass a copy placed in a scratch project.
+// `timeoutMs` kills a server that has not finished by then (it has no exit status afterwards).
+function callMcp(requests: unknown[], env: Record<string, string> = {}, server = serverPath, timeoutMs = 90_000) {
+  return callMcpRaw(requests.map((request) => JSON.stringify(request)).join("\n") + "\n", env, server, timeoutMs);
 }
 
-function callMcpRaw(input: string, env: Record<string, string> = {}) {
-  const result = spawnSync(process.execPath, [serverPath], {
+function callMcpRaw(input: string, env: Record<string, string> = {}, server = serverPath, timeoutMs = 90_000) {
+  const result = spawnSync(process.execPath, [server], {
     cwd: root,
     encoding: "utf8",
     input,
-    timeout: 90_000,
+    timeout: timeoutMs,
     env: {
       ...process.env,
       OPENAI_API_KEY: "",
@@ -61,8 +64,8 @@ function toolCall(id: number, name: string, args: unknown) {
   return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } };
 }
 
-function callTool(name: string, args: unknown, env: Record<string, string> = {}) {
-  return callMcp([toolCall(1, name, args)], env);
+function callTool(name: string, args: unknown, env: Record<string, string> = {}, server = serverPath, timeoutMs = 90_000) {
+  return callMcp([toolCall(1, name, args)], env, server, timeoutMs);
 }
 
 // Puts fake executables (e.g. npx, cargo) first on PATH; each one runs `script` with this Node.
@@ -654,5 +657,724 @@ describe("Harness Studio MCP stdio server", () => {
     expect(result.responses[0].result?.isError).toBe(true);
     expect(result.responses[0].result?.content?.[0].type).toBe("text");
     expect(result.responses[0].result?.content?.[0].text).toContain("Tool error");
+  });
+});
+
+// ── validate_workflow, project_status and limit handling ─────────────────────────
+
+// Folders made by these helpers are removed after every test.
+const trackedDirs: string[] = [];
+afterEach(() => {
+  for (const dir of trackedDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function trackedWorkspace() {
+  const dir = makeWorkspace();
+  trackedDirs.push(dir);
+  return dir;
+}
+
+// A folder outside the project, for symlinks that try to escape it.
+function trackedOutsideDir() {
+  const dir = mkdtempSync(join(tmpdir(), "mcp-outside-"));
+  trackedDirs.push(dir);
+  return dir;
+}
+
+// True where mkfifo can make a named pipe in a workspace (not on Windows). Tests that need one are
+// skipped elsewhere.
+const canMakeFifo = (() => {
+  if (process.platform === "win32") return false;
+  const dir = makeWorkspace();
+  try {
+    return spawnSync("mkfifo", [join(dir, "pipe")]).status === 0;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
+// A named pipe with nothing writing to it: opening it for reading blocks until something opens it
+// for writing.
+function makeFifo(path: string) {
+  expect(spawnSync("mkfifo", [path]).status).toBe(0);
+}
+
+// A copy of the server in a scratch project inside outputs/ (yaml and zod still resolve from
+// the repo's node_modules): the server's project root is the folder above its own file, so this
+// lets a test decide which files exist in the project, under tests/ or anywhere else.
+async function makeSandboxProject() {
+  const { default: source } = await import("../../../mcp/server.mjs?raw");
+  const dir = trackedWorkspace();
+  mkdirSync(join(dir, "mcp"));
+  const server = join(dir, "mcp", "server.mjs");
+  writeFileSync(server, source);
+  return { dir, server };
+}
+
+// A valid workflow with `agentCount` agents (saved ids agent-0, agent-1, ...) and the given
+// [source, target] connections.
+function workflowYaml(agentCount: number, connections: Array<[string, string]> = []) {
+  const agent = (i: number) => [
+    `  - name: Agent ${i}`,
+    "    role: worker",
+    "    model: test-model",
+    "    temperature: 0.5",
+    "    maxTokens: 1024",
+    "    maxSteps: 5",
+    "    timeoutSeconds: 60",
+    "    promptSource: { type: inline, content: Do the work. }",
+    "    tools: []",
+    "    memoryRead: []",
+    "    memoryWrite: []",
+    "    tokens: { used: 0, budget: 2000 }",
+    "    status: idle",
+  ].join("\n");
+  return [
+    "meta:",
+    "  name: Fixture",
+    '  version: "1.0.0"',
+    "  description: fixture",
+    '  projectRoot: ""',
+    '  createdAt: "2026-01-01T00:00:00Z"',
+    '  updatedAt: "2026-01-01T00:00:00Z"',
+    agentCount > 0 ? "agents:" : "agents: []",
+    ...Array.from({ length: agentCount }, (_, i) => agent(i)),
+    connections.length > 0 ? "connections:" : "connections: []",
+    ...connections.map(([source, target], i) =>
+      `  - { id: c-${i}, sourceAgentId: ${JSON.stringify(source)}, targetAgentId: ${JSON.stringify(target)} }`),
+    "executionSettings: { maxParallel: 1, timeoutSeconds: 600, retryOnFailure: false, maxRetries: 0 }",
+    "nodePositions: {}",
+    "",
+  ].join("\n");
+}
+
+// Runs validate_workflow; `stdout` is everything the server sent, for leak checks.
+function validateWorkflow(path: string) {
+  const result = callTool("validate_workflow", { path });
+  expect(result.status).toBe(0);
+  return { stdout: result.stdout, parsed: contentJson(result.responses[0]) };
+}
+
+// Writes `yaml` to `name` in a fresh in-project folder and validates it by absolute path.
+function validateWorkflowText(name: string, yaml: string) {
+  const file = join(trackedWorkspace(), name);
+  writeFileSync(file, yaml);
+  return validateWorkflow(file);
+}
+
+interface WorkflowIssues {
+  valid?: boolean;
+  error?: string;
+  issues?: Array<{ path: string; message: string }>;
+}
+
+describe("MCP validate_workflow: connection references", () => {
+  it("accepts connections between existing agents, including the last one", () => {
+    const { parsed } = validateWorkflowText("ok.harness.yaml", workflowYaml(3, [["agent-0", "agent-1"], ["agent-2", "agent-0"]]));
+
+    expect(parsed).toMatchObject({ valid: true, agents: 3, connections: 2 });
+  });
+
+  const dangling: Array<[string, Array<[string, string]>, string[]]> = [
+    ["a target that does not exist", [["agent-0", "agent-9"]], ["connections.0.targetAgentId"]],
+    ["a source that does not exist", [["ghost", "agent-1"]], ["connections.0.sourceAgentId"]],
+    ["the first index past the last agent", [["agent-0", "agent-2"]], ["connections.0.targetAgentId"]],
+    ["a non-canonical id", [["agent-01", "agent-1"]], ["connections.0.sourceAgentId"]],
+    ["both ends of a later connection", [["agent-0", "agent-1"], ["x", "y"]], ["connections.1.sourceAgentId", "connections.1.targetAgentId"]],
+  ];
+
+  it.each(dangling)("reports %s as invalid", (_label, connections, paths) => {
+    const { parsed } = validateWorkflowText("dangling.harness.yaml", workflowYaml(2, connections));
+    const { valid, issues } = parsed as WorkflowIssues;
+
+    expect(valid).toBe(false);
+    expect(issues?.map((issue) => issue.path)).toEqual(paths);
+    for (const issue of issues ?? []) {
+      expect(issue.message).toContain("Unknown agent");
+      expect(issue.message).toContain("agent-0 to agent-1");
+    }
+  });
+
+  it("names the offending id in the message", () => {
+    const { parsed } = validateWorkflowText("dangling.harness.yaml", workflowYaml(2, [["agent-0", "agent-7"]]));
+
+    expect((parsed as WorkflowIssues).issues?.[0].message).toContain('"agent-7"');
+  });
+
+  it("reports both ends when the workflow has no agents at all", () => {
+    const { parsed } = validateWorkflowText("no-agents.harness.yaml", workflowYaml(0, [["agent-0", "agent-1"]]));
+    const { valid, issues } = parsed as WorkflowIssues;
+
+    expect(valid).toBe(false);
+    expect(issues?.map((issue) => issue.path)).toEqual(["connections.0.sourceAgentId", "connections.0.targetAgentId"]);
+    expect(issues?.[0].message).toContain("no agents");
+  });
+
+  it("still reports schema errors when the shape is wrong", () => {
+    const yaml = workflowYaml(2, [["agent-0", "agent-1"]]).replace("role: worker", "role: superagent");
+    const { parsed } = validateWorkflowText("bad-role.harness.yaml", yaml);
+    const { valid, issues } = parsed as WorkflowIssues;
+
+    expect(valid).toBe(false);
+    expect(issues?.map((issue) => issue.path)).toContain("agents.0.role");
+  });
+});
+
+describe("MCP validate_workflow: which files it reads", () => {
+  // Not valid YAML: a parse error message would quote both lines (this shape leaked a line of
+  // .env.example). Nothing of this may ever come back.
+  const leakyYaml = "first_line_marker: PREVMARKER\nfirst_line_marker: SECRETMARKER\n";
+  const leakMarkers = ["PREVMARKER", "SECRETMARKER", "first_line_marker"];
+
+  function expectNoLeak(stdout: string) {
+    for (const marker of leakMarkers) expect(stdout).not.toContain(marker);
+  }
+
+  function expectWorkflowFileRefusal(parsed: Record<string, unknown>) {
+    expect(Object.keys(parsed).sort()).toEqual(["error", "valid"]);
+    expect(parsed.valid).toBe(false);
+    expect(String(parsed.error)).toMatch(/\.harness\.yaml or \.harness\.yml/);
+  }
+
+  it.each(["secrets.env", "notes.txt", "workflow.yaml", "harness.yaml", "wf.harness.yaml.bak", "wf.harness.json"])(
+    "refuses %s without reading it",
+    (name) => {
+      const { stdout, parsed } = validateWorkflowText(name, leakyYaml);
+
+      expectWorkflowFileRefusal(parsed);
+      expectNoLeak(stdout);
+    },
+  );
+
+  it("refuses a workflow-shaped file that lacks the .harness.yaml/.yml name", () => {
+    const { parsed } = validateWorkflowText("workflow.yaml", workflowYaml(2, [["agent-0", "agent-1"]]));
+
+    expectWorkflowFileRefusal(parsed);
+  });
+
+  it.each([".env.example", "package.json", "README.md"])("refuses the project file %s", (path) => {
+    const { parsed } = validateWorkflow(path);
+
+    expectWorkflowFileRefusal(parsed);
+  });
+
+  it("checks the file name before the disk, so a refusal does not say whether a file exists", () => {
+    const { parsed } = validateWorkflow("outputs/no-such-file.txt");
+
+    expectWorkflowFileRefusal(parsed);
+  });
+
+  it("accepts .harness.yml as well as .harness.yaml", () => {
+    const { parsed } = validateWorkflowText("wf.harness.yml", workflowYaml(2, [["agent-0", "agent-1"]]));
+
+    expect(parsed).toMatchObject({ valid: true, agents: 2, connections: 1 });
+  });
+
+  it("reports a missing workflow file", () => {
+    const { parsed } = validateWorkflow(join(trackedWorkspace(), "missing.harness.yaml"));
+
+    expect(parsed.valid).toBe(false);
+    expect(String(parsed.error)).toContain("File not found");
+  });
+
+  it("refuses a folder that is named like a workflow", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, "folder.harness.yaml"));
+
+    const { parsed } = validateWorkflow(join(workspace, "folder.harness.yaml"));
+
+    expect(parsed.valid).toBe(false);
+    expect(String(parsed.error)).toContain("not a regular file");
+  });
+
+  it("refuses a symlinked folder that leads outside the project", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    writeFileSync(join(outside, "outside.harness.yaml"), workflowYaml(2, [["agent-0", "agent-1"]]));
+    // "junction" needs no privileges on Windows; other platforms create a directory symlink.
+    symlinkSync(outside, join(workspace, "linked"), "junction");
+
+    const { parsed } = validateWorkflow(join(workspace, "linked", "outside.harness.yaml"));
+
+    expect(parsed.valid).toBe(false);
+    expect(String(parsed.error)).toContain("Path rejected");
+    expect(String(parsed.error)).not.toContain(outside);
+    expect(parsed).not.toHaveProperty("name");
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a workflow symlink that leads outside the project", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    writeFileSync(join(outside, "target.harness.yaml"), workflowYaml(2, [["agent-0", "agent-1"]]));
+    symlinkSync(join(outside, "target.harness.yaml"), join(workspace, "escape.harness.yaml"));
+
+    const { parsed } = validateWorkflow(join(workspace, "escape.harness.yaml"));
+
+    expect(parsed.valid).toBe(false);
+    expect(String(parsed.error)).toContain("Path rejected");
+    expect(String(parsed.error)).not.toContain(outside);
+    expect(parsed).not.toHaveProperty("name");
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a workflow-named symlink to a non-workflow file inside the project", () => {
+    const workspace = trackedWorkspace();
+    writeFileSync(join(workspace, "secrets.env"), leakyYaml);
+    symlinkSync(join(workspace, "secrets.env"), join(workspace, "disguised.harness.yaml"));
+
+    const { stdout, parsed } = validateWorkflow(join(workspace, "disguised.harness.yaml"));
+
+    expectWorkflowFileRefusal(parsed);
+    expectNoLeak(stdout);
+  });
+
+  it("still validates through a symlink that stays inside the project", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, "real"));
+    writeFileSync(join(workspace, "real", "wf.harness.yaml"), workflowYaml(2, [["agent-0", "agent-1"]]));
+    symlinkSync(join(workspace, "real"), join(workspace, "linked"), "junction");
+
+    const { parsed } = validateWorkflow(join(workspace, "linked", "wf.harness.yaml"));
+
+    expect(parsed).toMatchObject({ valid: true, agents: 2, connections: 1 });
+  });
+
+  it("validates a workflow in a project folder named ..data, as in a Kubernetes ConfigMap mount: not a way out", async () => {
+    const { dir, server } = await makeSandboxProject();
+    // Relative to the project root the path starts with "..data", which is not "..".
+    mkdirSync(join(dir, "..data"));
+    writeFileSync(join(dir, "..data", "wf.harness.yaml"), workflowYaml(2, [["agent-0", "agent-1"]]));
+
+    const result = callTool("validate_workflow", { path: join(dir, "..data", "wf.harness.yaml") }, {}, server);
+
+    expect(result.status).toBe(0);
+    expect(contentJson(result.responses[0])).toMatchObject({ valid: true, agents: 2, connections: 1 });
+  });
+});
+
+describe("MCP validate_workflow: YAML errors carry no file content", () => {
+  // [label, file content, secret fragments that must never come back]
+  const cases: Array<[string, string, string[]]> = [
+    [
+      "a duplicate key (the library quotes this line and the one before it)",
+      "first_line_marker: PREVMARKER\nfirst_line_marker: SECRETMARKER\n",
+      ["PREVMARKER", "SECRETMARKER", "first_line_marker"],
+    ],
+    ["a block scalar header (the library message interpolates it)", "a: |SECRETHEADER\n  text\n", ["SECRETHEADER"]],
+    ["a bad escape sequence", 'a: "bad \\qSECRETESC"\n', ["SECRETESC"]],
+    ["an unresolved alias (not a YAMLParseError, no position)", "a: *SECRETALIAS\n", ["SECRETALIAS"]],
+    ["an over-long key (its error code contains digits)", `${"longkey".repeat(160)}: 1\n`, ["longkeylongkey"]],
+  ];
+
+  it.each(cases)("returns only a short message for %s", (_label, yaml, secrets) => {
+    const { stdout, parsed } = validateWorkflowText("broken.harness.yaml", yaml);
+
+    expect(parsed.valid).toBe(false);
+    expect(Object.keys(parsed).sort()).toEqual(["error", "valid"]);
+    expect(String(parsed.error)).toMatch(/^YAML parse error/);
+    expect(String(parsed.error).length).toBeLessThan(80);
+    expect(String(parsed.error)).not.toContain("\n");
+    for (const secret of secrets) expect(stdout).not.toContain(secret);
+  });
+
+  it("gives the line and column of a parse error", () => {
+    const { parsed } = validateWorkflowText("broken.harness.yaml", "first_line_marker: PREVMARKER\nfirst_line_marker: SECRETMARKER\n");
+
+    expect(parsed.error).toMatch(/^YAML parse error \([A-Z_]+\) at line 2, column 1\.$/);
+  });
+
+  it("keeps an error code that contains digits", () => {
+    const { parsed } = validateWorkflowText("broken.harness.yaml", `${"longkey".repeat(160)}: 1\n`);
+
+    expect(parsed.error).toBe("YAML parse error (KEY_OVER_1024_CHARS) at line 1, column 1.");
+  });
+
+  it("keeps the yaml library's warnings, which quote the offending line, off stderr", () => {
+    // An unresolved tag is only a warning: parsing goes on, and the library prints the source
+    // line to stderr with process.emitWarning.
+    const file = join(trackedWorkspace(), "warns.harness.yaml");
+    writeFileSync(file, "meta: !TAGMARKER VALUEMARKER\n");
+
+    const result = callTool("validate_workflow", { path: file });
+
+    expect(result.status).toBe(0);
+    expect(contentJson(result.responses[0]).valid).toBe(false);
+    for (const marker of ["TAGMARKER", "VALUEMARKER"]) {
+      expect(result.stdout).not.toContain(marker);
+      expect(result.stderr).not.toContain(marker);
+    }
+  });
+});
+
+describe("MCP project_status test file count", () => {
+  it("counts every .test.ts and .test.tsx file under tests/, however many there are", async () => {
+    const { dir, server } = await makeSandboxProject();
+    const populate = (folder: string, suffix: string, count: number) => {
+      mkdirSync(join(dir, folder), { recursive: true });
+      for (let i = 0; i < count; i++) writeFileSync(join(dir, folder, `case-${i}${suffix}`), "");
+    };
+    // Two folders of 51: the old 50-entry cap stopped walking after the first one.
+    populate("tests/unit/a", ".test.ts", 51);
+    populate("tests/unit/b", ".test.ts", 51);
+    populate("tests/unit/c", ".test.tsx", 3);
+    populate("tests/unit/c", ".ts", 2); // helpers are not tests
+    populate("tests/unit/c", ".test.js", 2);
+    // Fake npx: the real tsc would run in the scratch project.
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+
+    const parsed = contentJson(callTool("project_status", {}, env, server).responses[0]);
+
+    expect(parsed.testFileCount).toBe(51 + 51 + 3);
+  });
+
+  it("does not follow symlinks under tests/, so a link loop cannot freeze the server", async () => {
+    const { dir, server } = await makeSandboxProject();
+    mkdirSync(join(dir, "tests", "unit"), { recursive: true });
+    writeFileSync(join(dir, "tests", "unit", "a.test.ts"), "");
+    writeFileSync(join(dir, "tests", "b.test.tsx"), "");
+    // Two links back to tests/ itself: a walk that follows them visits about 2^40 folders (the
+    // system stops resolving a path after 40 links), which is as good as endless.
+    symlinkSync(join(dir, "tests"), join(dir, "tests", "loop1"), "junction");
+    symlinkSync(join(dir, "tests"), join(dir, "tests", "loop2"), "junction");
+    // Fake npx: the real tsc would run in the scratch project.
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+
+    // A walk that ends takes well under a second. A server stuck in the loop is killed by the
+    // timeout instead, and then has no exit status and has sent nothing.
+    const result = callTool("project_status", {}, env, server, 20_000);
+
+    expect(result.status).toBe(0);
+    expect(contentJson(result.responses[0]).testFileCount).toBe(2);
+  });
+
+  it("counts no test file behind a symlinked folder, whether the link leads out of the project or not", async () => {
+    const { dir, server } = await makeSandboxProject();
+    mkdirSync(join(dir, "tests", "unit"), { recursive: true });
+    writeFileSync(join(dir, "tests", "unit", "a.test.ts"), "");
+    const outside = trackedOutsideDir();
+    writeFileSync(join(outside, "outside.test.ts"), "");
+    symlinkSync(outside, join(dir, "tests", "outside"), "junction");
+    symlinkSync(join(dir, "tests", "unit"), join(dir, "tests", "alias"), "junction");
+    // A linked folder is not a test file either, whatever it is called.
+    symlinkSync(join(dir, "tests", "unit"), join(dir, "tests", "named.test.ts"), "junction");
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+
+    const parsed = contentJson(callTool("project_status", {}, env, server).responses[0]);
+
+    expect(parsed.testFileCount).toBe(1);
+  });
+
+  it("does not walk a tests/ folder that is itself a symlink", async () => {
+    const { dir, server } = await makeSandboxProject();
+    const outside = trackedOutsideDir();
+    writeFileSync(join(outside, "outside.test.ts"), "");
+    // `tests -> /` would walk the whole disk, with no cap to stop it.
+    symlinkSync(outside, join(dir, "tests"), "junction");
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+
+    const parsed = contentJson(callTool("project_status", {}, env, server).responses[0]);
+
+    expect(parsed.testFileCount).toBe(0);
+  });
+
+  it.skipIf(process.platform === "win32")("does not count a symlink to a test file, as list_artifacts does not list one", async () => {
+    const { dir, server } = await makeSandboxProject();
+    mkdirSync(join(dir, "tests"), { recursive: true });
+    writeFileSync(join(dir, "tests", "real.test.ts"), "");
+    symlinkSync(join(dir, "tests", "real.test.ts"), join(dir, "tests", "linked.test.ts"));
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+
+    const parsed = contentJson(callTool("project_status", {}, env, server).responses[0]);
+
+    expect(parsed.testFileCount).toBe(1);
+  });
+});
+
+describe("MCP workflow lists", () => {
+  // Both tools list workflows; project_status shows only the file names. The timeout kills a
+  // server that is stuck walking: it then has no exit status.
+  function listWorkflows(server: string) {
+    // Fake npx: the real tsc would run in the scratch project.
+    const env = fakeBinEnv(trackedWorkspace(), ["npx"], "process.exitCode = 0;");
+    const result = callMcp([toolCall(1, "list_workflows", {}), toolCall(2, "project_status", {})], env, server, 20_000);
+    expect(result.status).toBe(0);
+    const list = contentJson(result.responses[0]) as { count: number; workflows: Array<{ path: string; name: string }> };
+    const status = contentJson(result.responses[1]) as { workflowCount: number; workflows: string[] };
+    return {
+      paths: list.workflows.map((workflow) => workflow.path.replace(/\\/g, "/")).sort(),
+      listCount: list.count,
+      statusNames: [...status.workflows].sort(),
+      statusCount: status.workflowCount,
+    };
+  }
+
+  it("lists .harness.yml files as well as .harness.yaml files", async () => {
+    const { dir, server } = await makeSandboxProject();
+    mkdirSync(join(dir, "examples"));
+    writeFileSync(join(dir, "top.harness.yaml"), "");
+    writeFileSync(join(dir, "examples", "nested.harness.yml"), "");
+    // Neither of these ends in .harness.yaml or .harness.yml.
+    writeFileSync(join(dir, "examples", "old.harness.yml.bak"), "");
+    writeFileSync(join(dir, "workflow.yml"), "");
+
+    const found = listWorkflows(server);
+
+    expect(found.paths).toEqual(["examples/nested.harness.yml", "top.harness.yaml"]);
+    expect(found.listCount).toBe(2);
+    expect(found.statusNames).toEqual(["nested.harness.yml", "top.harness.yaml"]);
+    expect(found.statusCount).toBe(2);
+  });
+
+  it("does not follow symlinked folders, so a link loop cannot freeze either tool", async () => {
+    const { dir, server } = await makeSandboxProject();
+    mkdirSync(join(dir, "flows"));
+    writeFileSync(join(dir, "flows", "real.harness.yaml"), "");
+    // A folder with no workflow in it and two links back to itself. The walk stops after 50
+    // workflows, but a loop like this never yields one, so nothing else would end it.
+    mkdirSync(join(dir, "void"));
+    symlinkSync(join(dir, "void"), join(dir, "void", "loop1"), "junction");
+    symlinkSync(join(dir, "void"), join(dir, "void", "loop2"), "junction");
+    // Links to folders that hold workflows are not followed either.
+    const outside = trackedOutsideDir();
+    writeFileSync(join(outside, "outside.harness.yaml"), "");
+    symlinkSync(outside, join(dir, "outside"), "junction");
+    symlinkSync(join(dir, "flows"), join(dir, "alias"), "junction");
+
+    const found = listWorkflows(server);
+
+    expect(found.paths).toEqual(["flows/real.harness.yaml"]);
+    expect(found.statusNames).toEqual(["real.harness.yaml"]);
+  });
+});
+
+describe("MCP get_recent_logs and list_artifacts: links out of the workspace", () => {
+  // What a link leads to, and must never come back in a reply.
+  const logMarker = "OUTSIDELOGMARKER";
+  const artifactMarker = "OUTSIDEARTIFACTMARKER";
+  const logLine = (id: string) => JSON.stringify({ id, timestamp: "2026-06-28T01:00:00.000Z" }) + "\n";
+
+  // The contents of a .harness folder: an audit log and one artifact.
+  function fillHarnessFolder(folder: string) {
+    mkdirSync(join(folder, "artifacts", "agent-a"), { recursive: true });
+    writeFileSync(join(folder, "audit.log.jsonl"), logLine(logMarker));
+    writeFileSync(join(folder, "artifacts", "agent-a", `${artifactMarker}.md`), "x");
+  }
+
+  // The tool's usual error result: no entries, and a message that names the problem only.
+  function expectRefused(response: JsonRpcResponse, empty: "entries" | "artifacts") {
+    expect(response.result?.isError).toBeUndefined();
+    const parsed = contentJson(response);
+    expect(parsed).toMatchObject({ count: 0, [empty]: [] });
+    expect(String(parsed.error)).toMatch(/^Path rejected: the (audit log|artifacts folder) resolves outside the workspace \(symlink or junction\)\.$/);
+  }
+
+  function expectNothingOf(stdout: string, outside: string) {
+    expect(stdout).not.toContain(logMarker);
+    expect(stdout).not.toContain(artifactMarker);
+    expect(stdout).not.toContain(outside);
+  }
+
+  it.skipIf(process.platform === "win32")("refuses an audit log that is a symlink to a file outside the project", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    // A JSON Lines file: its lines would come back as log entries if the link were followed.
+    writeFileSync(join(outside, "other.jsonl"), logLine(logMarker));
+    mkdirSync(join(workspace, ".harness"));
+    symlinkSync(join(outside, "other.jsonl"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace });
+
+    expect(result.status).toBe(0);
+    expectRefused(result.responses[0], "entries");
+    expectNothingOf(result.stdout, outside);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses an audit log that is a symlink to a file inside the project but outside the workspace", () => {
+    const workspace = trackedWorkspace();
+    const elsewhere = trackedWorkspace();
+    writeFileSync(join(elsewhere, "other.jsonl"), logLine(logMarker));
+    mkdirSync(join(workspace, ".harness"));
+    symlinkSync(join(elsewhere, "other.jsonl"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace });
+
+    expectRefused(result.responses[0], "entries");
+    expectNothingOf(result.stdout, elsewhere);
+  });
+
+  it.skipIf(process.platform === "win32")("still reads an audit log that is a symlink to a file inside the workspace", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness"));
+    writeFileSync(join(workspace, ".harness", "real.jsonl"), logLine("inside"));
+    symlinkSync(join(workspace, ".harness", "real.jsonl"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const parsed = contentJson(callTool("get_recent_logs", { workspace }).responses[0]) as {
+      error?: string;
+      entries?: Array<{ id: string }>;
+    };
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.entries?.map((entry) => entry.id)).toEqual(["inside"]);
+  });
+
+  // The link is refused for leading outside, before anything asks what it leads to: the reply must
+  // not tell a caller that an outside file is a FIFO. (A server that opened it would hang, and the
+  // timeout would kill it.)
+  it.skipIf(!canMakeFifo)("refuses an audit log that is a symlink to a FIFO outside the project as leading outside", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    makeFifo(join(outside, "pipe"));
+    mkdirSync(join(workspace, ".harness"));
+    symlinkSync(join(outside, "pipe"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectRefused(result.responses[0], "entries");
+    expectNothingOf(result.stdout, outside);
+  });
+
+  it("refuses an artifacts folder that is a symlink to a folder outside the project", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    mkdirSync(join(outside, "agent-a"));
+    writeFileSync(join(outside, "agent-a", `${artifactMarker}.md`), "x");
+    mkdirSync(join(workspace, ".harness"));
+    // "junction" needs no privileges on Windows; other platforms create a directory symlink.
+    symlinkSync(outside, join(workspace, ".harness", "artifacts"), "junction");
+
+    const result = callTool("list_artifacts", { workspace });
+
+    expect(result.status).toBe(0);
+    expectRefused(result.responses[0], "artifacts");
+    expectNothingOf(result.stdout, outside);
+  });
+
+  it("still lists an artifacts folder that is a symlink to a folder inside the workspace", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness", "store", "agent-a"), { recursive: true });
+    writeFileSync(join(workspace, ".harness", "store", "agent-a", "report.md"), "r");
+    symlinkSync(join(workspace, ".harness", "store"), join(workspace, ".harness", "artifacts"), "junction");
+
+    const parsed = contentJson(callTool("list_artifacts", { workspace }).responses[0]) as {
+      error?: string;
+      artifacts?: Array<{ path: string }>;
+    };
+
+    expect(parsed.error).toBeUndefined();
+    expect(parsed.artifacts?.map((artifact) => artifact.path)).toEqual([".harness/artifacts/agent-a/report.md"]);
+  });
+
+  it("refuses both when .harness itself is a symlink to a folder outside the project", () => {
+    const workspace = trackedWorkspace();
+    const outside = trackedOutsideDir();
+    fillHarnessFolder(outside);
+    symlinkSync(outside, join(workspace, ".harness"), "junction");
+
+    const result = callMcp([toolCall(1, "get_recent_logs", { workspace }), toolCall(2, "list_artifacts", { workspace })]);
+
+    expectRefused(result.responses[0], "entries");
+    expectRefused(result.responses[1], "artifacts");
+    expectNothingOf(result.stdout, outside);
+  });
+
+  it("refuses both when the workspace folder is a symlink to a folder outside the project", () => {
+    const outside = trackedOutsideDir();
+    fillHarnessFolder(join(outside, ".harness"));
+    // The link itself is inside the project, so the path check on the name alone passes.
+    const workspace = join(trackedWorkspace(), "linked");
+    symlinkSync(outside, workspace, "junction");
+
+    const result = callMcp([toolCall(1, "get_recent_logs", { workspace }), toolCall(2, "list_artifacts", { workspace })]);
+
+    expectRefused(result.responses[0], "entries");
+    expectRefused(result.responses[1], "artifacts");
+    expectNothingOf(result.stdout, outside);
+  });
+});
+
+describe("MCP get_recent_logs: an audit log that is not a regular file", () => {
+  // The refusal for a log the tool will not open: no entries, and fixed text that names no path.
+  function expectNotRegular(response: JsonRpcResponse) {
+    expect(response.result?.isError).toBeUndefined();
+    expect(contentJson(response)).toEqual({
+      count: 0,
+      entries: [],
+      error: "Path rejected: the audit log is not a regular file.",
+    });
+  }
+
+  it("refuses an audit log that is a folder", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness", "audit.log.jsonl"), { recursive: true });
+
+    const result = callTool("get_recent_logs", { workspace });
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
+  });
+
+  // A FIFO that has no writer blocks whoever opens it to read, and the server is single-threaded.
+  // A server that reads it never answers: the timeout kills it, and it then has no exit status and
+  // has sent nothing.
+  it.skipIf(!canMakeFifo)("returns at once for an audit log that is a FIFO", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness"));
+    makeFifo(join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
+  });
+
+  it.skipIf(!canMakeFifo)("returns at once for an audit log that is a symlink to a FIFO inside the workspace", () => {
+    const workspace = trackedWorkspace();
+    mkdirSync(join(workspace, ".harness"));
+    makeFifo(join(workspace, ".harness", "pipe"));
+    symlinkSync(join(workspace, ".harness", "pipe"), join(workspace, ".harness", "audit.log.jsonl"));
+
+    const result = callTool("get_recent_logs", { workspace }, {}, serverPath, 20_000);
+
+    expect(result.status).toBe(0);
+    expectNotRegular(result.responses[0]);
+  });
+});
+
+describe("MCP limit handling", () => {
+  // Three artifacts and three log entries, so the default limit (100 / 20) shows all of them
+  // and a limit clamped to 1 shows one.
+  function seedWorkspace() {
+    const workspace = trackedWorkspace();
+    const artifactDir = join(workspace, ".harness", "artifacts", "agent-a");
+    mkdirSync(artifactDir, { recursive: true });
+    for (const name of ["a.md", "b.md", "c.md"]) writeFileSync(join(artifactDir, name), name);
+    writeAuditLog(workspace, [1, 2, 3].map((n) => JSON.stringify({ id: `e${n}`, timestamp: `2026-06-28T0${n}:00:00.000Z` })));
+    return workspace;
+  }
+
+  function counts(workspace: string, limit: unknown) {
+    const artifacts = contentJson(callTool("list_artifacts", { workspace, limit }).responses[0]);
+    const logs = contentJson(callTool("get_recent_logs", { workspace, limit }).responses[0]);
+    return { artifacts: artifacts.count, logs: logs.count };
+  }
+
+  it.each([
+    ["null", null],
+    ["an empty string", ""],
+    ["false", false],
+    ["an empty array", []],
+    ["a non-numeric string", "abc"],
+  ])("uses the default limit when limit is %s", (_label, limit) => {
+    expect(counts(seedWorkspace(), limit)).toEqual({ artifacts: 3, logs: 3 });
+  });
+
+  it.each([
+    [2, 2],
+    ["2", 2],
+    [2.9, 2],
+    [0, 1],
+    [-5, 1],
+  ])("clamps limit %j to %i", (limit, expected) => {
+    expect(counts(seedWorkspace(), limit)).toEqual({ artifacts: expected, logs: expected });
   });
 });

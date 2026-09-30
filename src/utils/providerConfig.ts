@@ -63,15 +63,23 @@ export function isOllamaCloudUrl(baseUrl: string | undefined | null): boolean {
   return host === "ollama.com" || host.endsWith(".ollama.com");
 }
 
+/** True for a host that means this machine: localhost, 0.0.0.0, ::1 or any 127.x.x.x address. */
+function isLocalHost(host: string): boolean {
+  // `new URL(...).hostname` keeps the brackets of an IPv6 literal: "[::1]".
+  const bare = host.toLowerCase().replace(/^\[(.*)\]$/, "$1");
+  return bare === "localhost" || bare === "0.0.0.0" || bare === "::1" || /^127(?:\.\d{1,3}){3}$/.test(bare);
+}
+
 export function isRemoteOllamaUrl(baseUrl: string | undefined | null): boolean {
   const value = baseUrl?.trim() ?? "";
   if (!/^https?:\/\//i.test(value)) return false;
   try {
-    const host = new URL(value).hostname.toLowerCase();
-    return !["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host);
+    return !isLocalHost(new URL(value).hostname);
   } catch {
-    const host = value.toLowerCase().replace(/^https?:\/\//, "").split(/[/:?#]/, 1)[0];
-    return Boolean(host && !["localhost", "127.0.0.1", "::1", "0.0.0.0"].includes(host));
+    // The text does not parse as a URL (e.g. a port out of range): read the host from it,
+    // keeping a bracketed IPv6 literal whole.
+    const host = /^(\[[^\]]*\]|[^/:?#]*)/.exec(value.replace(/^https?:\/\//i, ""))?.[1] ?? "";
+    return Boolean(host) && !isLocalHost(host);
   }
 }
 

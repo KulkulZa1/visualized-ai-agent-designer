@@ -10,6 +10,8 @@
  *   fs.write / write_file   — overwrite a file
  *   fs.append / append_file — append to a file
  *   edit_file               — replace an exact snippet (comes with fs.write)
+ *   None of them writes a protected path (a ".git" folder or file at any depth,
+ *   ".harness/hooks", ".harness/runs", the audit log); reads are not restricted.
  *
  * Execute tool (requires "bash" in node's allowedTools):
  *   bash / run_command — run a shell command line in the workspace. It runs only
@@ -94,7 +96,8 @@ const WRITE_EXEC_TOOL_DEFS: Record<string, ToolDef> = {
     description:
       "Run one command line in the workspace folder (cmd.exe on Windows, sh elsewhere) and get its exit code " +
       "and output, e.g. to run the tests. The user must approve each command before it runs; a denied " +
-      "command is not run. It gets no input and stops at your time limit.",
+      "command is not run. It gets no input and stops at your time limit. On Windows a bare name such as " +
+      "build.bat is not looked up in the workspace folder: run it as .\\build.bat.",
     args: { command: "The command line, e.g. npm test" },
   },
 };
@@ -258,21 +261,66 @@ function argText(value: unknown): string {
   return typeof value === "object" ? JSON.stringify(value, null, 2) : String(value);
 }
 
-export function parseToolCall(text: string): ToolCall | null {
-  const match = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
-  if (!match) return null;
-  try {
-    const parsed = JSON.parse(match[1].trim());
-    if (typeof parsed.name !== "string") return null;
-    return { name: parsed.name, args: parsed.args ?? {} };
-  } catch {
-    return null;
-  }
+/** What a reply holds for the text protocol.
+ *  none: no <tool_call> block, or one whose body does not start with "{" (the
+ *        tag mentioned in prose).
+ *  malformed: a block that looks like a call ("{…") but is not a valid one, or
+ *        that is cut off before its closing tag (a reply that hit Max tokens). */
+export type ToolCallReading =
+  | { kind: "none" }
+  | { kind: "call"; call: ToolCall }
+  | { kind: "malformed"; reason: string };
+
+/** Models often wrap the JSON inside the tags in a ``` fence, tagged json, jsonc, json5,
+ *  javascript, js, typescript or ts, or not. (No regex that scans for the closing fence: on
+ *  a long run of spaces it backtracks for seconds.) */
+function unfence(body: string): string {
+  let text = body.trim();
+  if (text.startsWith("```")) text = text.replace(/^```(?:json[c5]?|javascript|js|typescript|ts)?/i, "");
+  if (text.endsWith("```")) text = text.slice(0, -3);
+  return text.trim();
 }
 
-/** Strip the tool_call tag from text, returning just the surrounding content. */
+/** Where a call was cut off before its closing tag, or -1: the last "<tool_call>", when
+ *  no "</tool_call>" follows it and its body starts with "{". A reply that stops in the
+ *  middle of a call ends like this. The tag mentioned in prose (a body that does not
+ *  start with "{") is not one. */
+function cutOffCallAt(text: string): number {
+  const at = text.lastIndexOf("<tool_call>");
+  if (at < 0) return -1;
+  const body = text.slice(at + "<tool_call>".length);
+  return !body.includes("</tool_call>") && unfence(body).startsWith("{") ? at : -1;
+}
+
+export function readToolCall(text: string): ToolCallReading {
+  const match = text.match(/<tool_call>([\s\S]*?)<\/tool_call>/);
+  const body = match ? unfence(match[1]) : "";
+  if (!body.startsWith("{")) {
+    // No closed call. A reply cut off in the middle of one is no answer either.
+    return cutOffCallAt(text) < 0
+      ? { kind: "none" }
+      : { kind: "malformed", reason: "the call was cut off before </tool_call>" };
+  }
+  let parsed: { name?: unknown; args?: unknown };
+  try {
+    parsed = JSON.parse(body);
+  } catch (e) {
+    return { kind: "malformed", reason: e instanceof Error ? e.message : String(e) };
+  }
+  if (typeof parsed.name !== "string") return { kind: "malformed", reason: 'it has no "name" string' };
+  const { args } = parsed;
+  if (args !== undefined && args !== null && (typeof args !== "object" || Array.isArray(args))) {
+    return { kind: "malformed", reason: '"args" must be a JSON object' };
+  }
+  return { kind: "call", call: { name: parsed.name, args: (args ?? {}) as Record<string, unknown> } };
+}
+
+/** Strip the tool_call tag from text, returning just the surrounding content. A call
+ *  cut off before its closing tag goes too (readToolCall counts it as a broken call). */
 export function stripToolCall(text: string): string {
-  return text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "").trim();
+  const closed = text.replace(/<tool_call>[\s\S]*?<\/tool_call>/g, "");
+  const cutOff = cutOffCallAt(closed);
+  return (cutOff < 0 ? closed : closed.slice(0, cutOff)).trim();
 }
 
 // ── Permission helpers ────────────────────────────────────────────────────────
@@ -304,17 +352,56 @@ export function isNotFound(error: unknown): boolean {
   return /\(os error [23]\)/.test(String(error));
 }
 
+// ── Protected paths ───────────────────────────────────────────────────────────
+
+/**
+ * Paths an agent may read but never write: a ".git" folder or file at any depth
+ * (a changed hook or config runs code the next time git runs), ".harness/hooks"
+ * and everything under it, ".harness/runs" and everything under it (a resumed run
+ * trusts its saved record, the hook-script hashes included), and
+ * ".harness/audit.log.jsonl". Judged on the path's text, not on the disk: "\"
+ * counts as "/", "." and ".." segments are resolved, case is ignored, and a
+ * symlink is not followed.
+ */
+function isProtectedPath(path: string): boolean {
+  const text = path.trim().replace(/\\/g, "/");
+  // An absolute path, or one that climbs above the workspace root, cannot be placed
+  // under the root by its text, yet the backend accepts it while it lands inside the
+  // workspace. Then ".harness" is matched at any depth instead of at the root only.
+  let atRoot = !/^\/|^[a-z]:/i.test(text);
+  const parts: string[] = [];
+  for (const part of text.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part !== "..") parts.push(part.toLowerCase());
+    else if (parts.length > 0) parts.pop();
+    else atRoot = false;
+  }
+  return parts.some((part, i) =>
+    part === ".git" ||
+    (part === ".harness" && (i === 0 || !atRoot) &&
+      // runs: a resumed run trusts its saved record (hook script hashes included).
+      (parts[i + 1] === "hooks" || parts[i + 1] === "runs" ||
+        (parts[i + 1] === "audit.log.jsonl" && i + 2 === parts.length))));
+}
+
+function protectedPathError(tool: string, path: string): string {
+  return `[error] ${tool} refused: ${path.trim()} is a protected path ` +
+    "(git internals, .harness/hooks, .harness/runs and the audit log); nothing was written.";
+}
+
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
 /** Told about every file an agent changes: its content before (null if new) and after. */
 export type FileChangeListener = (path: string, before: string | null, after: string) => void;
 
-/** The file's content, null if it does not exist, undefined if it cannot be read. */
-async function readBefore(invokeFn: InvokeFn, workspacePath: string, path: string): Promise<string | null | undefined> {
+/** The file's content, null if it does not exist yet. Any other failure is thrown:
+ *  a file that cannot be read must not pass for a new one. */
+async function readBefore(invokeFn: InvokeFn, workspacePath: string, path: string): Promise<string | null> {
   try {
     return await invokeFn<string>("read_workspace_file", { workspacePath, relativePath: path });
   } catch (e) {
-    return isNotFound(e) ? null : undefined;
+    if (isNotFound(e)) return null;
+    throw e;
   }
 }
 
@@ -402,9 +489,21 @@ export async function executeTool(
     if (name === "fs.write" || name === "write_file") {
       const path = argText(args.path);
       if (!path) return "[error] fs.write requires a 'path' argument.";
+      if (isProtectedPath(path)) return protectedPathError("fs.write", path);
+      // Left out is not empty: only an explicit "" writes an empty file.
+      if (args.content === undefined || args.content === null) return "[error] fs.write requires 'content'";
       const content = argText(args.content);
-      // The old content is only read when someone records changes.
-      const before = onChange ? await readBefore(invokeFn, workspacePath, path.trim()) : undefined;
+      // The old content is only read when someone records changes. Only a missing file
+      // is new: a file that exists but cannot be read (say, not UTF-8) must not be
+      // replaced, or the change log would never know.
+      let before: string | null | undefined;
+      if (onChange) {
+        try {
+          before = await readBefore(invokeFn, workspacePath, path.trim());
+        } catch (e) {
+          return `[error] fs.write could not read ${path}; nothing was written: ${String(e)}`;
+        }
+      }
       await invokeFn<void>("write_workspace_file", {
         workspacePath,
         relativePath: path.trim(),
@@ -417,6 +516,8 @@ export async function executeTool(
     if (name === "fs.append" || name === "append_file") {
       const path = argText(args.path);
       if (!path) return "[error] fs.append requires a 'path' argument.";
+      if (isProtectedPath(path)) return protectedPathError("fs.append", path);
+      if (args.content === undefined || args.content === null) return "[error] fs.append requires 'content'";
       const toAppend = argText(args.content);
       // Only a missing file counts as empty. Any other read failure (e.g. a
       // non-UTF-8 file) must not turn the append into an overwrite. Rust io
@@ -447,6 +548,8 @@ export async function executeTool(
     if (name === "edit_file") {
       const path = argText(args.path).trim();
       if (!path) return "[error] edit_file requires a 'path' argument.";
+      if (isProtectedPath(path)) return protectedPathError("edit_file", path);
+      if (args.new_string === undefined || args.new_string === null) return "[error] edit_file requires 'new_string'";
       let before: string;
       try {
         before = await invokeFn<string>("read_workspace_file", { workspacePath, relativePath: path });

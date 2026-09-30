@@ -8,10 +8,15 @@
 
 export class MemoryService {
   private store = new Map<string, string>();
+  /** The writes that stand, oldest first, with who made each: forget() takes one writer's back. */
+  private writes: Array<{ key: string; value: string; writer: string }> = [];
 
-  /** Write a value under a key (overwrites previous). */
-  write(key: string, value: string): void {
-    this.store.set(key, value.trim());
+  /** Write a value under a key (overwrites previous). `writer` names who wrote it, for forget(). */
+  write(key: string, value: string, writer = ""): void {
+    const stored = value.trim();
+    this.writes = this.writes.filter((w) => w.key !== key || w.writer !== writer);
+    this.writes.push({ key, value: stored, writer });
+    this.store.set(key, stored);
   }
 
   /** Read a key, returns null if not set. */
@@ -33,10 +38,18 @@ export class MemoryService {
   }
 
   /** Store all memoryWrite keys with the agent's output. */
-  writeAll(keys: string[], value: string): void {
+  writeAll(keys: string[], value: string, writer = ""): void {
     for (const key of keys) {
-      this.write(key, value);
+      this.write(key, value, writer);
     }
+  }
+
+  /** Take back everything `writer` wrote, as if it never had: a key it overwrote goes back to
+   *  what the writer before it left, or is gone if there was none. */
+  forget(writer: string): void {
+    if (!this.writes.some((w) => w.writer === writer)) return;
+    this.writes = this.writes.filter((w) => w.writer !== writer);
+    this.store = new Map(this.writes.map((w): [string, string] => [w.key, w.value]));
   }
 
   /** Full dump for debugging. */

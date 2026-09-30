@@ -56,7 +56,12 @@ function edgeLabel(e: Edge): string {
  * An edge is not taken when:
  * - Its source is a gateway that has set a route
  * - The edge has a non-empty label
- * - The label does not contain (or is not contained by) the chosen route
+ * - The label does not match the chosen route
+ *
+ * Route and labels are compared trimmed and case-insensitively. A label that
+ * equals the route wins outright, so "valid" does not also take an "invalid"
+ * branch. Only when no label equals the route does a label that contains (or is
+ * contained by) the route match, e.g. "approved" for "approved-with-changes".
  *
  * If the route matches none of the labels (e.g. "mixed", or an unparseable
  * reply), every branch is followed — the same as when no route was produced.
@@ -71,24 +76,67 @@ function computeSkipped(
   const gwNode = nodes.find((n) => n.id === gwId);
   if (!gwNode || gwNode.data.role !== AgentRole.Gateway) return skipped;
 
-  const route = gatewayRoutes.get(gwId);
+  const route = gatewayRoutes.get(gwId)?.trim().toLowerCase();
   if (!route) return skipped; // gateway ran but produced no routing decision → skip nothing
 
-  const taken = new Set<string>();
-  const notTaken = new Set<string>();
+  const labelled: { target: string; label: string }[] = [];
   for (const e of edges) {
     if (e.source !== gwId || !isForwardEdge(e)) continue;
     const label = edgeLabel(e);
     if (!label) continue; // unlabelled outgoing edge → always follow
-    if (label.includes(route) || route.includes(label)) taken.add(e.target);
-    else notTaken.add(e.target);
+    labelled.push({ target: e.target, label });
   }
+
+  // An exact label wins; the substring rule is only the fallback.
+  const exact = labelled.filter(({ label }) => label === route);
+  const matching = exact.length > 0
+    ? exact
+    : labelled.filter(({ label }) => label.includes(route) || route.includes(label));
+  const taken = new Set(matching.map(({ target }) => target));
   if (taken.size === 0) return skipped; // route matched no branch → follow all
 
-  for (const target of notTaken) {
+  for (const { target } of labelled) {
     if (!taken.has(target)) skipped.add(target);
   }
   return skipped;
+}
+
+/**
+ * The nodes `runParallel` skips for these gateway routes, by the same rules: a node
+ * with a forward input is pruned when every forward input is a pruned node or reaches
+ * it by an edge its gateway did not take (`allInputsDead`), so one live input is enough
+ * for a join to run. Pruning spreads down the graph until nothing more is pruned.
+ * Pure: the run loop asks again when a gateway has routed differently on a revision.
+ */
+export function prunedNodes(
+  nodes: AgentNode[],
+  edges: Edge[],
+  gatewayRoutes: Map<string, string>,
+): Set<string> {
+  // Forward inputs, built as runParallel builds its predecessors.
+  const inputs = new Map<string, string[]>(nodes.map((n): [string, string[]] => [n.id, []]));
+  for (const e of edges) {
+    if (!isForwardEdge(e) || !inputs.has(e.source) || !inputs.has(e.target)) continue;
+    inputs.get(e.target)!.push(e.source);
+  }
+  // Edges not taken, "source->target": by node pair, as runParallel keeps them.
+  const deadEdges = new Set<string>();
+  for (const n of nodes) {
+    for (const target of computeSkipped(n.id, nodes, edges, gatewayRoutes)) deadEdges.add(`${n.id}->${target}`);
+  }
+
+  const pruned = new Set<string>();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const [id, sources] of inputs) {
+      if (pruned.has(id) || sources.length === 0) continue;
+      if (sources.every((source) => pruned.has(source) || deadEdges.has(`${source}->${id}`))) {
+        pruned.add(id);
+        grew = true;
+      }
+    }
+  }
+  return pruned;
 }
 
 // ── Main scheduler ────────────────────────────────────────────────────────────

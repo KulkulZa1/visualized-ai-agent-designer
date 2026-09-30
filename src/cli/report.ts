@@ -116,6 +116,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
         changes,
         outputs: Object.fromEntries(outputs.map((o) => [o.id, o.output])),
         trace,
+        error: outcome.error,
       });
       return;
     }
@@ -125,6 +126,8 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
       const status = run.agents[n.id]?.status ?? "idle";
       out(`  ${ICON[status]} ${n.data.name}: ${status === "idle" ? "not run" : status}`);
     }
+    // The run failed as a whole (a cycle, blocked dependencies): no agent's line says why.
+    if (outcome.error) out(outcome.error);
     if (changes.length > 0) {
       out("Changed files:");
       for (const c of changes) out(`  ${c.path}${c.created ? " (new)" : ""}  +${c.added} −${c.removed}`);

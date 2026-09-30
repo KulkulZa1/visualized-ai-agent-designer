@@ -25,6 +25,7 @@ const KIND_COLOR: Record<string, string> = {
   agent_started:     "var(--accent)",
   agent_finished:    "var(--blue)",
   agent_failed:      "var(--red)",
+  run_failed:        "var(--red)",
   tool_call:         "var(--green)",
   subagent:          "var(--purple)",
   revision:          "var(--purple)",

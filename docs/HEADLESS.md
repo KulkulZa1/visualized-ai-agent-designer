@@ -22,6 +22,10 @@ npm run build:core   # src-tauri/target/release/harness-core (.exe on Windows)
 `harness-core` is built without Tauri, so it needs a Rust toolchain but none of
 Tauri's system packages (WebKit, GTK).
 
+Use Node 20 or later (`package.json` declares it). A workflow with a hook that
+runs without asking needs Web Crypto (`globalThis.crypto`), which older Node
+versions lack by default; without it the run does not start (see Hooks).
+
 ## Run
 
 ```bash
@@ -105,7 +109,46 @@ node cli/harness.mjs run fix.harness.yaml --task "Make the tests pass" \
 
 Hook nodes run their script, as in the app: `.sh` with bash, `.bat` with cmd,
 `.ps1` with PowerShell and `.py` with Python, in the workspace, with the node's
-timeout. A hook marked `requireConsent` is not run: it fails the run.
+timeout. A Hook node that fails or is refused stops the run, even with
+`--continue-on-error`.
+
+A hook marked `requireConsent` is not run. A hook without it runs with nobody
+asking, so it is also refused when its script or its `env` is not what the run
+started with:
+- an agent's file tools changed the script, in any attempt of the run; or
+- its SHA-256 differs from the one taken when the run first started. The hash is
+  of the script's text and the node's `env` (the hook runs with it as it is, and an
+  agent can edit the workflow file to add a `BASH_ENV` or `PATH`). The run hashes
+  every Hook node at its start (`requireConsent` ones too) and hashes an unasked
+  hook again just before it runs. This also catches other spellings of the path,
+  links and shell commands you allowed. A script that was there and is gone, or
+  the other way round, counts as changed.
+
+A refusal goes to `.harness/audit.log.jsonl`, and is the hook's error in the
+output, for example:
+
+```
+✗ Gate failed: Hook script .harness/hooks/gate.sh or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.
+```
+
+The Hooks tab is in the app. Here, review the script and start a new run.
+
+The hashes are the run's baselines. They are saved in the run record
+(`hookScripts`, see below) and a resume keeps them; it takes no new ones. So:
+- a script changed during an earlier attempt, or an `env` changed in the workflow
+  file since, is refused on every resume;
+- a Hook node added to the workflow file, or given a script, since the first
+  attempt has no baseline and is refused;
+- after a refusal a resume refuses again, even though the summary prints a
+  `Resume:` line: start a new run. A new run takes the scripts as they are as its
+  baselines, so review the script first.
+
+The one exception is a record saved before `hookScripts` existed: it has no
+baselines, and resuming it takes them from the scripts as they are then.
+
+The check does not cover scripts that aren't valid UTF-8 (only the change log
+does; their `env` is not checked either), files a script sources or imports, or a
+change between the check and the hook's start. See `docs/SECURITY.md`.
 
 ## Output
 
@@ -139,21 +182,27 @@ With `--json`, stdout has one JSON object per line and nothing else:
 | `run_started` | `runId`, `workflow` |
 | `node_started` | `nodeId`, `agent`, `model`, `provider`, `revision` |
 | `node_finished` | `nodeId`, `agent`, `status` (`done`, `error`, `stopped`, `skipped`), `output` (the full text), `error`, `durationMs`, `revision`, `reused` |
-| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success`, and `warning: true` for a problem the run went on after (a fallback, a revision limit) |
-| `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record) |
+| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success`, and `warning: true` for a problem the run went on after (a fallback, a revision limit, a branch a gateway chose after a revision that could not run) |
+| `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record), `error` (only when the run failed as a whole rather than through an agent, for example a cycle: `Run failed: …`; an agent's own error is on its `node_finished` event) |
 
 `nodeId`s are the agents' places in the workflow file: `agent-0`, `agent-1`, …
 The provider check's `audit` events can come before `run_started`. A run that
 never started ends with `{"type":"run_finished","status":"not_started","error":…}`.
+
+`node_finished` can repeat for a node. It runs again in each revision round
+(`revision` says which), and a node that finished as `done` gets a later
+`skipped` when a revision makes a gateway route around it: its output is dropped
+from the record and from what later agents receive. The last event for a node,
+and `run_finished.agents`, hold its final status.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
 | `0` | The run finished and every agent is done |
-| `1` | An agent failed |
+| `1` | An agent failed, or the run failed as a whole rather than through an agent: the reason is in the summary and in the JSON `error` field of `run_finished` |
 | `2` | Bad usage, a missing file, an invalid workflow, or a resume that cannot be done |
-| `3` | The run could not start: `harness-core` is missing or stopped, or the provider check failed (for example, no key) |
+| `3` | The run could not start: `harness-core` is missing or stopped, the provider check failed (for example, no key), or Web Crypto is missing (a Node older than 20) and a hook would run without asking |
 | `130` | Stopped with Ctrl+C |
 
 ## Stopping
@@ -176,7 +225,10 @@ The record holds:
 - each agent's status, output, error, times, model, token estimate, revision,
   helpers and definition hash;
 - the text each agent passed on, the memory, the gateway routes, the files the
-  run changed, and the audit.
+  run changed, and the audit;
+- `hookScripts`: for each Hook node with a script, the SHA-256 (hex) of the script
+  as the run first read it and of the node's `env`, or `null` if the script could
+  not be read. Never the script's text or the `env` (see Hooks).
 
 To resume a run that failed or was stopped:
 
@@ -208,6 +260,8 @@ Done in 23.5 s · run run-1790348292064
   is an error (exit 2).
 - The provider settings are recorded, not compared. A finished agent is reused
   even if you resume with another `--provider`, `--base-url` or `--model`.
+- The hook baselines carry over and a resume takes no new ones (see Hooks). A
+  hook refused for its script or `env` is refused again on resume.
 
 A run saved by the app can be resumed with `harness run` on the same workflow
 file: the record names agents by their place in the file.
@@ -225,14 +279,21 @@ This repository's own CI (`.github/workflows/ci.yml`) runs on every push to
 master and every pull request, on Linux:
 - types and the TypeScript tests, including `harness run` end to end against a
   fake `harness-core`;
+- the production frontend build;
 - the Rust tests with Tauri and without it;
-- `harness run` against the real `harness-core`.
+- `harness run` against the real `harness-core`, with no key: it must stop at the
+  preflight (exit 3).
+
+The job has read-only permissions (`contents: read`) and uses Node 22.
 
 ## Limits
 
 - Replies do not stream in the terminal: each agent's output arrives when it is
   done.
 - Commands are not sandboxed. Only the exact commands you allow run.
+- The hook script check has gaps: scripts that aren't valid UTF-8, files a script
+  sources or imports, and a change between the check and the hook's start (see
+  Hooks).
 - There are no prebuilt binaries: build the bundle and `harness-core` from the
   repository.
 - The app has no Resume button; resume with `harness run`.

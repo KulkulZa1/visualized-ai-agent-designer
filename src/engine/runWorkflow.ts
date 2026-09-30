@@ -15,7 +15,7 @@
  * hooks/useWorkflowExecution.ts.
  */
 
-import { AgentRole, type AgentNodeData } from "@/types/agent";
+import { AgentRole, type AgentNodeData, type HookConfig } from "@/types/agent";
 import type { AuditEntry } from "@/types/audit";
 import type { AgentRun, SubAgentRecord, WorkflowRun } from "@/types/execution";
 import type { HookResult } from "@/types/hookResult";
@@ -23,7 +23,7 @@ import type { WorkflowRunConfig } from "@/types/workflowRunConfig";
 import type { CommandApproval, CommandRequest } from "@/store/commandConsentStore";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import {
-  definitionHash, RUN_RECORD_VERSION, reusableNodes, savedNodeId, type RunRecord,
+  definitionHash, hookFingerprint, RUN_RECORD_VERSION, reusableNodes, savedHookScripts, savedNodeId, type RunRecord,
 } from "@/engine/runRecord";
 import {
   DEFAULT_OLLAMA_BASE_URL,
@@ -55,7 +55,7 @@ import {
 } from "@/services/execution/toolExecutor";
 import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
 import { runCommandTool } from "@/services/execution/commandTool";
-import { recordChange } from "@/services/execution/changeLog";
+import { findChange, recordChange } from "@/services/execution/changeLog";
 import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
 import { loadProjectInstructions, usesWorkspace } from "@/services/execution/projectInstructions";
 import {
@@ -63,7 +63,7 @@ import {
   MAX_CONCURRENT_SUBAGENTS,
   SUBAGENT_TOOL,
 } from "@/services/execution/subAgents";
-import { runParallel } from "@/services/execution/parallelScheduler";
+import { prunedNodes, runParallel } from "@/services/execution/parallelScheduler";
 import {
   firedFeedbackEdges,
   MAX_REVISION_ROUNDS,
@@ -141,10 +141,12 @@ export interface RunHost {
   saveRun?: (record: RunRecord) => Promise<void>;
 }
 
-/** A run that never started (the provider preflight failed), or the finished run. */
+/** A run that never started (the provider preflight failed), or the finished run.
+ *  `error` on a finished run: it failed as a whole ("Run failed: …", a cycle or
+ *  blocked dependencies). A node's own failure is on the node, not here. */
 export type RunOutcome =
   | { started: false; error: string }
-  | { started: true; run: WorkflowRun };
+  | { started: true; run: WorkflowRun; error?: string };
 
 // ── Edge helpers ──────────────────────────────────────────────────────────────
 
@@ -296,6 +298,22 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     return { started: false, error: "Custom endpoint URL is not configured. Add it in Settings → Custom Endpoint." };
   }
 
+  // A Hook node's script path, or undefined for any other node (or with no workspace open).
+  const hookScriptPath = (n: (typeof nodes)[number]): string | undefined =>
+    workspacePath && n.data.role === AgentRole.Hook ? n.data.preHook?.path || undefined : undefined;
+  // The same for a hook that runs without asking (no requireConsent).
+  const unattendedHookPath = (n: (typeof nodes)[number]): string | undefined =>
+    n.data.preHook?.requireConsent ? undefined : hookScriptPath(n);
+  // Those hooks are checked against a SHA-256 of their script (below). Where Web Crypto is
+  // missing that cannot be done, and the check is not weakened to fit: the run does not start.
+  if (nodes.some((n) => unattendedHookPath(n)) && !globalThis.crypto?.subtle) {
+    return {
+      started: false,
+      error: "Web Crypto is not available here (harness run needs Node 20 or later), " +
+        "and hooks that run without asking need it to check their scripts.",
+    };
+  }
+
   const requiredProviders = new Set<RuntimeProvider>();
   for (const node of nodes) {
     if (!isExecutable(node.data.role)) continue;
@@ -423,7 +441,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       if (!reused.has(n.id)) return;
       agentOutputs.set(n.id, saved.outputs[savedNodeId(i)] ?? saved.nodes[savedNodeId(i)]?.output ?? "");
       for (const key of n.data.memoryWrite) {
-        if (key in saved.memory) memory.write(key, saved.memory[key]);
+        if (key in saved.memory) memory.write(key, saved.memory[key], n.id);
       }
       const route = saved.gatewayRoutes[savedNodeId(i)];
       if (route) gatewayRoutes.set(n.id, route);
@@ -443,6 +461,56 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       subAgents: saved.subAgents,
     });
     updateNodeData(nodeId, { status: "done" });
+  };
+
+  // ── Hooks, as the run first started ───────────────────────────────────────
+  // A Hook node without requireConsent runs its script unasked, so it must run the script
+  // that was set up, with the env that was set up (the backend applies preHook.env as it is:
+  // a BASH_ENV or PATH in it changes what the script runs, and an agent can edit the workflow
+  // file). An agent's file tools leave a change log, but a shell command it ran (bash), a link
+  // or another spelling of the path change the file without one. So every hook node's script
+  // and env are fingerprinted (SHA-256, hookFingerprint; the text is not kept) when the run
+  // first starts, and an unasked hook's again just before it runs: any difference refuses it.
+  // The record's hookScripts keeps the fingerprints and a resume carries them on as they
+  // are, so a change made during an earlier attempt never becomes a later attempt's
+  // baseline. Consent-required hooks have one too: editing the workflow file to drop the
+  // requirement (an agent can write that file) does not start a new baseline. Only an attempt
+  // with none to start from (a new run, or a record from before hookScripts) takes baselines;
+  // a resume adds none. So an unasked hook with no baseline (a node added to the workflow
+  // since) is refused, as is one whose script or env is not the one that was fingerprinted;
+  // the way on is the Hooks tab or a new run. The record itself is trusted: the agents' file
+  // tools cannot write it (isProtectedPath), but a shell command can.
+  // null: the script cannot be read (its env does not matter then). A failed read never fails the run.
+  const hookDigest = async (ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
+    let text: string;
+    try {
+      text = await readWorkspaceFile(ws, path);
+    } catch {
+      return null;
+    }
+    return hookFingerprint(text, env);
+  };
+  // By node key. Without Web Crypto (the check above lets a run start only when no hook runs
+  // unasked) there is nothing to take.
+  const savedScripts = savedHookScripts(input.resume);
+  const hookScripts: Record<string, string | null> = { ...savedScripts };
+  if (savedScripts === undefined && workspacePath && globalThis.crypto?.subtle) {
+    await Promise.all(nodes.map(async (n, i) => {
+      const path = hookScriptPath(n);
+      if (path) hookScripts[savedNodeId(i)] = await hookDigest(workspacePath, path, n.data.preHook?.env);
+    }));
+  }
+  /** Why a hook that runs without asking must not run now, or undefined when it may. */
+  const hookScriptRefusal = async (nodeId: string, ws: string, hook: HookConfig): Promise<string | undefined> => {
+    const key = savedNodeId(nodes.findIndex((n) => n.id === nodeId));
+    if (!Object.prototype.hasOwnProperty.call(hookScripts, key)) {
+      return `Hook script ${hook.path} has no baseline from this run's first attempt, so it is not run unasked; ` +
+        "run it from the Hooks tab or start a new run.";
+    }
+    // A script that was not there (null) and is now, or was and no longer is, counts as changed, and so does its env.
+    if (hookScripts[key] === await hookDigest(ws, hook.path, hook.env)) return undefined;
+    return `Hook script ${hook.path} or its environment was changed during this run; ` +
+      "review it, then run it from the Hooks tab or start a new run.";
   };
 
   const buildRecord = (): RunRecord => ({
@@ -475,6 +543,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     })),
     changes: run.changes ?? [],
     audit: [...auditLog],
+    hookScripts: { ...hookScripts },
   });
   // Saves go out one at a time, in order. A failure is reported once; the run goes on.
   let saving = Promise.resolve();
@@ -515,7 +584,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         .join("\n\n---\n\n");
 
       const stored = upstreamText || "(no upstream output)";
-      memory.writeAll(data.memoryWrite, stored);
+      memory.writeAll(data.memoryWrite, stored, nodeId);
       agentOutputs.set(nodeId, stored);
 
       updateAgent(nodeId, {
@@ -538,17 +607,40 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       const failHook = (message: string) => {
         hookFailed = true;
         updateAgent(nodeId, { status: "error", error: message, finishedAt: Date.now() });
-        addEntry({ id: `${nodeId}-hook-blocked-${Date.now()}`, timestamp: new Date().toISOString(),
-          action: "hook_executed", agentId: nodeId, details: message, success: false });
+        const entry = { id: `${nodeId}-hook-blocked-${Date.now()}`, timestamp: new Date().toISOString(),
+          action: "hook_executed" as const, agentId: nodeId, details: message, success: false };
+        addEntry(entry);
+        // A refusal is part of the workspace's audit log, as a hook that ran is.
+        if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
       };
       if (data.preHook?.path) {
+        // Why this hook is not run, or undefined when it may run.
+        let refusal: string | undefined;
         if (!workspacePath) {
           // Hooks run only inside the open workspace: a loaded or pasted workflow
           // must not choose the folder code executes in (meta.projectRoot).
-          failHook("Open a workspace to run hooks.");
+          refusal = "Open a workspace to run hooks.";
         } else if (data.preHook.requireConsent) {
-          failHook("Hook requires explicit manual consent. Open the Hooks tab and run it there.");
+          refusal = "Hook requires explicit manual consent. Open the Hooks tab and run it there.";
+        } else if (findChange(run.changes ?? [], data.preHook.path, workspacePath)) {
+          // Without consent a hook runs as the script that was set up. One an agent wrote
+          // earlier in this run (the change log, matched by path; a resumed run's log
+          // includes its earlier attempts) is not that script.
+          refusal = `Hook script ${data.preHook.path} was changed by an agent during this run; ` +
+            "review it, then run it from the Hooks tab or start a new run.";
         } else {
+          // What the change log cannot see: another spelling of the path, a link, a shell command.
+          refusal = await hookScriptRefusal(nodeId, workspacePath, data.preHook);
+          if (isRunCancelled()) {
+            // Stopped while the script was being read: the hook has not started, whatever the script says.
+            updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+            updateNodeData(nodeId, { status: "stopped" });
+            return;
+          }
+        }
+        if (refusal) {
+          failHook(refusal);
+        } else if (workspacePath) { // always so here: with none open, refusal says so above
           try {
             // Rust enforces the hook's timeout; this race only stops waiting on Stop.
             const hookTimeout = Math.min(data.timeoutSeconds || 30, 3600);
@@ -631,6 +723,17 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       action: "agent_started", agentId: nodeId,
       details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
     });
+
+    // Streamed text reaches the node through a throttled flush. It ends with the node's
+    // model calls, whether they finish, fail or are stopped: a call that Stop or a timeout
+    // gave up on may keep streaming, and must not touch the node afterwards.
+    let liveTimer: ReturnType<typeof setTimeout> | undefined;
+    let liveEnded = false;
+    const endLiveText = () => {
+      liveEnded = true;
+      clearTimeout(liveTimer);
+      liveTimer = undefined;
+    };
 
     try {
       const promptContent = await resolvePromptContent(data.promptSource, workspacePath, readWorkspaceFile);
@@ -725,12 +828,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       // The node's own native turns stream into its output (throttled); helpers don't.
       let liveText = "";
       let streamed = false;
-      let liveTimer: ReturnType<typeof setTimeout> | undefined;
       const showLiveText = (piece: string) => {
+        if (liveEnded) return;
         liveText += piece;
         streamed = true;
         if (!liveTimer) {
-          liveTimer = setTimeout(() => { liveTimer = undefined; updateAgent(nodeId, { output: liveText }); }, 50);
+          liveTimer = setTimeout(() => {
+            liveTimer = undefined;
+            if (!liveEnded) updateAgent(nodeId, { output: liveText });
+          }, 50);
         }
       };
       const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
@@ -830,7 +936,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           }),
         } : undefined,
       });
-      clearTimeout(liveTimer);
+      endLiveText();
       if (loop.nativeRefused) {
         noNativeTools.add(nativeKey);
         addEntry({ id: `${nodeId}-textmode-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -842,7 +948,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
       // Store output + memory
       agentOutputs.set(nodeId, finalText);
-      memory.writeAll(data.memoryWrite, finalText);
+      memory.writeAll(data.memoryWrite, finalText, nodeId);
 
       // Gateway routing
       if (data.role === AgentRole.Gateway) {
@@ -852,6 +958,10 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           addEntry({ id: `${nodeId}-route-${Date.now()}`, timestamp: new Date().toISOString(),
             action: "gateway_route", agentId: nodeId,
             details: `Gateway routed → "${route}"`, success: true });
+        } else {
+          // No route now: every branch is followed, as after a first run that names none. A route
+          // from an earlier run of this gateway (a revision re-runs it) is not kept.
+          gatewayRoutes.delete(nodeId);
         }
       }
 
@@ -883,6 +993,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       host.snapshot?.({ runId, nodeId, status: "completed", output: finalText });
 
     } catch (e) {
+      endLiveText();
       if (isRunCancelled()) {
         // Stopped while this node was working: not a failure of the node.
         updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
@@ -900,17 +1011,70 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     }
   }
 
+  // ── Nodes a gateway's routes prune ────────────────────────────────────────
+  // The scheduler skips the branch a gateway does not take. A revision can re-run a
+  // gateway, and it may route differently, so which nodes are pruned is asked again
+  // from the routes as they are now (prunedNodes). A pruned node that has already run
+  // is taken back: marked skipped, as the scheduler marks one that never ran, and what
+  // it produced is removed from everything a later node or the record reads. One that
+  // has not run yet is not run: the scheduler never hears of a route that changed.
+  /** A node the routing leaves out: skipped, and idle on the canvas. */
+  const skipNode = (nodeId: string) => {
+    const n = nodes.find((x) => x.id === nodeId);
+    updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
+    updateNodeData(nodeId, { status: "idle" });
+    addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
+      action: "agent_skipped", agentId: nodeId, details: "skipped by gateway routing", success: true });
+  };
+  const dropNode = (nodeId: string) => {
+    const n = nodes.find((x) => x.id === nodeId);
+    const name = n?.data.name ?? nodeId;
+    agentOutputs.delete(nodeId);   // what later nodes are given, and the record's outputs
+    gatewayRoutes.delete(nodeId);  // a gateway that is dropped takes its decision with it
+    memory.forget(nodeId);         // what it wrote to memory, for the nodes that read it
+    // The record and the UI show a node that did not run: no output, error, timing or helpers.
+    updateAgent(nodeId, {
+      agentId: nodeId, agentName: name, status: "skipped", output: undefined, error: undefined,
+      startedAt: undefined, finishedAt: undefined, tokenEstimate: undefined, modelUsed: undefined,
+      providerUsed: undefined, revision: undefined, subAgents: undefined,
+    });
+    updateNodeData(nodeId, { status: "idle", tokens: { used: 0, budget: n?.data.tokens.budget ?? 0 } });
+    addEntry({ id: `${nodeId}-dropped-${Date.now()}`, timestamp: new Date().toISOString(),
+      action: "revision", agentId: nodeId, success: true,
+      details: `↺ ${name} skipped: a gateway now routes around it, so its earlier result is dropped` });
+  };
+  /** The nodes the current routes prune; those of them that already ran are dropped. A node still
+   *  working when its gateway routes elsewhere is not interrupted. One that failed is dropped only
+   *  when the run goes on past failures, and a Hook is never: a failed Hook stops the run whatever
+   *  continueOnError says, and the error of the node the run is ending because of must stay where
+   *  it can be read. */
+  const dropPruned = (): Set<string> => {
+    const pruned = prunedNodes(nodes, edges, gatewayRoutes);
+    for (const id of pruned) {
+      const status = run.agents[id]?.status;
+      const keepsError = !continueOnError || nodes.find((n) => n.id === id)?.data.role === AgentRole.Hook;
+      if (status === "done" || (status === "error" && !keepsError)) dropNode(id);
+    }
+    return pruned;
+  };
+
   // ── Revision loops ─────────────────────────────────────────────────────────
   // A node whose verdict fires its feedback edges re-runs the path from each
   // target back to itself, then reviews again (at most MAX_REVISION_ROUNDS times).
   // The scheduler awaits this, so downstream nodes see the final result.
+  // Only that path re-runs, not the whole graph: a node that a gateway's new route
+  // makes live again runs only if it lies on the path. One off it (its branch does
+  // not lead back to the reviewer) stays unrun. That is the design, not an oversight.
   async function runWithRevisions(nodeId: string): Promise<void> {
     await processNode(nodeId);
     const name = nodes.find((n) => n.id === nodeId)?.data.name ?? nodeId;
     for (let round = 1; ; round++) {
       if (isRunCancelled()) return;
+      // A branch a gateway pruned never ran, or has just been dropped, and cannot be sent back.
+      const pruned = dropPruned();
       const review = agentOutputs.get(nodeId) ?? "";
-      const targets = [...new Set(firedFeedbackEdges(nodeId, review, edges).map((e) => e.target))];
+      const targets = [...new Set(firedFeedbackEdges(nodeId, review, edges).map((e) => e.target))]
+        .filter((t) => !pruned.has(t));
       if (targets.length === 0) return;
       if (round > MAX_REVISION_ROUNDS) {
         addEntry({ id: `${nodeId}-revision-limit-${Date.now()}`, timestamp: new Date().toISOString(),
@@ -928,13 +1092,32 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         const seen = new Set([target, ...edges.filter((e) => e.target === target && !isFeedbackEdge(e)).map((e) => e.source)]);
         revisionRequests.set(target, { from: name, text: review, reviewed: inputsOf(nodeId, seen).join("\n\n"), round });
       }
-      for (const id of revisionPath(targets, nodeId, edges)) {
+      const path = revisionPath(targets, nodeId, edges);
+      // Asks again which nodes are pruned. A gateway that re-ran may now route to nodes that were
+      // pruned before: those on the path run in this round; for the others it says so, since they will not.
+      let before = pruned;
+      const look = (): Set<string> => {
+        const now = dropPruned();
+        for (const id of before) {
+          if (now.has(id) || path.includes(id) || run.agents[id]?.status !== "skipped") continue;
+          addEntry({ id: `${id}-offpath-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "revision", agentId: id, success: true, warning: true,
+            details: `↺ ${nodes.find((n) => n.id === id)?.data.name ?? id}: a gateway now routes to it, ` +
+              "but it is not on the revision path, so it did not run" });
+        }
+        before = now;
+        return now;
+      };
+      for (const id of path) {
         if (isRunCancelled()) return;
+        // A gateway earlier on the path may just have routed differently.
+        if (look().has(id)) continue;
         updateAgent(id, { revision: round });
         await processNode(id);
       }
       for (const target of targets) revisionRequests.delete(target);
       if (isRunCancelled()) return;
+      if (look().has(nodeId)) return; // the new route took this reviewer's own branch away
       updateAgent(nodeId, { revision: round });
       await processNode(nodeId);
     }
@@ -945,6 +1128,9 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       // A reused node neither runs nor reviews again; a revision round that
       // targets it still runs it (revisionPath calls processNode).
       if (reused.has(nodeId)) showReused(nodeId);
+      // The scheduler queued this node before a revision changed a gateway's route, and does not
+      // know: a node the routes prune now is skipped, whatever it would do (a shell command too).
+      else if (prunedNodes(nodes, edges, gatewayRoutes).has(nodeId)) skipNode(nodeId);
       else await runWithRevisions(nodeId);
     } finally {
       await save(); // after every node settles, a failed one too
@@ -953,27 +1139,36 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
   // ── Parallel execution (replaces sequential for-loop) ────────────────────
   const maxParallel = executionSettings.maxParallel || 4;
+  // What failed nodes threw: each is already on its node and in the audit log. What
+  // else stops the run (a cycle, blocked dependencies) has no other message.
+  const nodeFailures = new Set<unknown>();
+  const runTracked = (nodeId: string) => runNode(nodeId).catch((e: unknown) => {
+    nodeFailures.add(e);
+    throw e;
+  });
   let failed = false;
+  let runError: string | undefined;
   try {
     await runParallel(
       nodes,
       edges,
-      runNode,
+      runTracked,
       {
         maxParallel,
         isCancelled: isRunCancelled,
-        onSkipped: (nodeId) => {
-          const n = nodes.find((x) => x.id === nodeId);
-          updateAgent(nodeId, { agentId: nodeId, agentName: n?.data.name ?? nodeId, status: "skipped" as const });
-          updateNodeData(nodeId, { status: "idle" });
-          addEntry({ id: `${nodeId}-skip-${Date.now()}`, timestamp: new Date().toISOString(),
-            action: "agent_skipped", agentId: nodeId, details: "skipped by gateway routing", success: true });
-        },
+        onSkipped: skipNode,
         gatewayRoutes,
       },
     );
-  } catch {
+  } catch (e) {
     failed = true;
+    if (!nodeFailures.has(e)) {
+      runError = `Run failed: ${e instanceof Error ? e.message : String(e)}`;
+      const entry = { id: `run-error-${Date.now()}`, timestamp: new Date().toISOString(),
+        action: "run_failed" as const, agentId: "system", details: runError, success: false };
+      addEntry(entry);
+      if (workspacePath) writeAuditEntry(workspacePath, entry).catch(console.error);
+    }
   }
 
   // With continueOnError the scheduler completes despite failed agents; the run
@@ -984,5 +1179,5 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   run.finishedAt = Date.now();
   await save();
   host.events.onRunFinished(status);
-  return { started: true, run };
+  return runError === undefined ? { started: true, run } : { started: true, run, error: runError };
 }

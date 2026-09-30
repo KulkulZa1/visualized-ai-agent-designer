@@ -174,6 +174,53 @@ describe("createReporter", () => {
     ]);
   });
 
+  describe("a run that failed as a whole", () => {
+    const error = "Run failed: No runnable nodes remain. Workflow may contain a cycle or blocked dependency: Coder, Reviewer";
+    // No agent ran: only the error says what happened.
+    const failed: WorkflowRun = { id: "run-1", workflowName: "W", startedAt: 0, status: "error", agents: {} };
+
+    it("prints why after the agents' lines", () => {
+      const { reporter, out, err } = capture(false);
+
+      reporter.summary({ started: true, run: failed, error }, 1000);
+
+      expect(out).toEqual([
+        "",
+        "Failed in 1.0 s · run run-1",
+        "  · Coder: not run",
+        "  · Reviewer: not run",
+        error,
+      ]);
+      expect(err).toEqual([]);
+    });
+
+    it("has the error on the run_finished event with --json", () => {
+      const { reporter, out } = capture(true);
+
+      reporter.summary({ started: true, run: failed, error }, 1000);
+
+      expect(out.map((line) => JSON.parse(line))).toEqual([{
+        type: "run_finished", runId: "run-1", status: "error", durationMs: 1000,
+        agents: { Coder: { agent: "Coder", status: "idle" }, Reviewer: { agent: "Reviewer", status: "idle" } },
+        changes: [], outputs: {}, error,
+      }]);
+    });
+
+    it("says nothing extra, and has no error field, for a run whose agents failed", () => {
+      const agentFailed: WorkflowRun = { ...failed, agents: {
+        Coder: { agentId: "Coder", agentName: "Coder", status: "error", error: "model crashed" },
+      } };
+      const human = capture(false);
+      const json = capture(true);
+
+      human.reporter.summary({ started: true, run: agentFailed }, 1000);
+      json.reporter.summary({ started: true, run: agentFailed }, 1000);
+
+      expect(human.out.some((line) => line.startsWith("Run failed"))).toBe(false);
+      expect(JSON.parse(json.out[0])).not.toHaveProperty("error");
+    });
+  });
+
   it("reports a run that did not start on stderr, or as run_finished with --json", () => {
     const human = capture(false);
     human.reporter.summary({ started: false, error: "Ollama is not running" }, 10);

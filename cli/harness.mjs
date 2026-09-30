@@ -3,7 +3,7 @@
  * harness-cli — command line for Harness Studio
  *
  * Usage:
- *   node cli/harness.mjs project status                   [--workspace <path>]
+ *   node cli/harness.mjs project status                   [--workspace <path> | --workspace=<path>]
  *   node cli/harness.mjs workflow validate <path>
  *   node cli/harness.mjs provider list                    [--json]
  *   node cli/harness.mjs run <workflow> --task "…"        (see run --help)
@@ -16,8 +16,8 @@
  * cli/dist/harness-run.mjs (npm run build:cli) and needs harness-core (npm run build:core).
  */
 
-import { readFileSync, readdirSync, statSync, existsSync } from "node:fs";
-import { join, resolve, basename } from "node:path";
+import { readFileSync, readdirSync, lstatSync, realpathSync, existsSync } from "node:fs";
+import { join, resolve, basename, relative, isAbsolute, sep as pathSep } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
@@ -194,6 +194,7 @@ const PROVIDER_CATALOG = [
 // ---------------------------------------------------------------------------
 const args    = process.argv.slice(2);
 const jsonOut = args.includes("--json");
+const WORKSPACE_FLAG_EQ = "--workspace=";
 
 function fail(msg, hint = "") {
   const out = { error: { code: "CLI_ERROR", message: msg, hint } };
@@ -227,11 +228,57 @@ function table(rows, cols) {
 }
 
 function findWorkspace() {
-  const wIdx = args.indexOf("--workspace");
-  if (wIdx !== -1 && args[wIdx + 1]) return resolve(args[wIdx + 1]);
+  // Both "--workspace <path>" and "--workspace=<path>"; the first one given wins.
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--workspace" && args[i + 1]) return resolve(args[i + 1]);
+    if (args[i].startsWith(WORKSPACE_FLAG_EQ) && args[i].length > WORKSPACE_FLAG_EQ.length) {
+      return resolve(args[i].slice(WORKSPACE_FLAG_EQ.length));
+    }
+  }
   const env = process.env.HARNESS_WORKSPACE;
   if (env) return resolve(env);
   return process.cwd();
+}
+
+// [KEEP-IN-SYNC] with isRealDirectory in mcp/server.mjs.
+// True for a real folder, false for a symlink or junction (even one that leads to a folder) and
+// for anything that does not exist.
+function isRealDirectory(path) {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs.
+function isInsideDir(rootPath, absPath) {
+  const rel = relative(rootPath, absPath);
+  // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
+  // ConfigMap mount has one) is inside. An absolute rel is another drive on Windows.
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + pathSep) && !isAbsolute(rel));
+}
+
+// [KEEP-IN-SYNC] with resolveInsideWorkspace in mcp/server.mjs: the same rule, that the REAL path
+// must be inside the real workspace. There is no project root to check here, and only a regular
+// file qualifies.
+// Returns the text of `target`, a file under `workspace` (package.json, the audit log, the snapshot
+// index), or null when there is nothing safe to read: it is missing or unreadable, it resolves
+// outside the workspace through a symlink or junction (on it or on any folder above it), or it is
+// not a regular file. A cloned repository can ship such links, and `-> /dev/zero` has no end. The
+// caller treats null as a missing file. The workspace itself is the user's choice, so it may be
+// reached through a link: only where the file resolves matters.
+function readFileInsideWorkspace(workspace, target) {
+  try {
+    const real = realpathSync(target);
+    if (!isInsideDir(realpathSync(workspace), real)) return null;
+    // The type of what the path resolves to: a link to a regular file inside the workspace still
+    // qualifies, and a FIFO or a device does not, whatever it is called or linked as.
+    if (!lstatSync(real).isFile()) return null;
+    return readFileSync(real, "utf-8");
+  } catch {
+    return null;
+  }
 }
 
 function findHarnessFiles(dir) {
@@ -243,10 +290,14 @@ function findHarnessFiles(dir) {
         if (entry.startsWith(".")) continue;
         const full = join(d, entry);
         try {
-          const stat = statSync(full);
-          if (stat.isDirectory() && !entry.includes("node_modules") && !entry.includes("target")) {
+          // lstat: a symlink or junction is never followed, since it can lead outside the workspace
+          // or back up to a parent folder, and a walk into such a loop never ends. A link is neither
+          // isDirectory() nor isFile(), so it is skipped (the same rule as findFiles in mcp/server.mjs).
+          const stat = lstatSync(full);
+          // Exact directory names: "targets/" or "retargeting/" are ordinary folders.
+          if (stat.isDirectory() && entry !== "node_modules" && entry !== "target") {
             walk(full);
-          } else if (entry.endsWith(".harness.yaml") || entry.endsWith(".harness.yml")) {
+          } else if (stat.isFile() && (entry.endsWith(".harness.yaml") || entry.endsWith(".harness.yml"))) {
             result.push(full);
           }
         } catch { /* skip permission errors */ }
@@ -257,9 +308,15 @@ function findHarnessFiles(dir) {
   return result;
 }
 
-function readJsonFile(path, fallback) {
+// Returns the parsed JSON object, or `fallback` when the file is missing, unreadable, not JSON,
+// or JSON that is not an object (null, an array, a string...) — callers read properties off it.
+// The file is read by readFileInsideWorkspace, so a link or a special file counts as missing.
+function readJsonFile(workspace, path, fallback) {
+  const text = readFileInsideWorkspace(workspace, path);
+  if (text === null) return fallback;
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    const value = JSON.parse(text);
+    return value !== null && typeof value === "object" && !Array.isArray(value) ? value : fallback;
   } catch {
     return fallback;
   }
@@ -281,11 +338,18 @@ const KEY_DOCS = [
 function cmdProjectStatus() {
   const workspace = findWorkspace();
   const files = findHarnessFiles(workspace);
-  const exampleFiles = findHarnessFiles(join(workspace, "examples"));
+  // examples/ comes from the repository, and a link there could lead anywhere (`examples -> /`
+  // would walk the whole disk): it is searched only when it is a real folder. The workspace itself
+  // is the user's choice, so it may be reached through a link.
+  const examplesDir = join(workspace, "examples");
+  const exampleFiles = isRealDirectory(examplesDir) ? findHarnessFiles(examplesDir) : [];
   const harnessDir = join(workspace, ".harness");
   const auditLog   = join(harnessDir, "audit.log.jsonl");
   const snapIndex  = join(harnessDir, "snapshots", "index.json");
-  const packageJson = readJsonFile(join(workspace, "package.json"), {});
+  // package.json, the audit log and the snapshot index come from the workspace, which may be a
+  // cloned repository: each is read only if it is a regular file that resolves inside the workspace
+  // (readFileInsideWorkspace), and counts as missing otherwise.
+  const packageJson = readJsonFile(workspace, join(workspace, "package.json"), {});
   const keyDocs = KEY_DOCS.map((docPath) => ({
     path: docPath,
     exists: existsSync(join(workspace, docPath)),
@@ -293,18 +357,15 @@ function cmdProjectStatus() {
 
   // Count audit entries
   let auditCount = 0;
-  if (existsSync(auditLog)) {
-    try {
-      const lines = readFileSync(auditLog, "utf-8").split("\n").filter(Boolean);
-      auditCount = lines.length;
-    } catch { /* ignore */ }
-  }
+  const auditText = readFileInsideWorkspace(workspace, auditLog);
+  if (auditText !== null) auditCount = auditText.split("\n").filter(Boolean).length;
 
   // Count snapshots
   let snapCount = 0;
-  if (existsSync(snapIndex)) {
+  const snapText = readFileInsideWorkspace(workspace, snapIndex);
+  if (snapText !== null) {
     try {
-      const idx = JSON.parse(readFileSync(snapIndex, "utf-8"));
+      const idx = JSON.parse(snapText);
       snapCount = Object.values(idx).flat().length;
     } catch { /* ignore */ }
   }
@@ -346,6 +407,30 @@ function cmdProjectStatus() {
   console.log();
 }
 
+// [KEEP-IN-SYNC] with findDanglingConnections in mcp/server.mjs.
+// A saved workflow identifies its agents by list position ("agent-<i>"), the rule the app's
+// loadWorkflow and generators use, so every connection endpoint must be one of those ids.
+function findDanglingConnections(workflow) {
+  const count = workflow.agents.length;
+  const known = new Set(workflow.agents.map((_, i) => `agent-${i}`));
+  const validIds = count === 0 ? "the workflow has no agents"
+    : count === 1 ? "valid id: agent-0"
+    : `valid ids: agent-0 to agent-${count - 1}`;
+  const quote = (id) => {
+    const text = JSON.stringify(id);
+    return text.length > 66 ? `${text.slice(0, 65)}…"` : text;
+  };
+  const issues = [];
+  workflow.connections.forEach((connection, index) => {
+    for (const key of ["sourceAgentId", "targetAgentId"]) {
+      if (!known.has(connection[key])) {
+        issues.push({ path: `connections.${index}.${key}`, message: `Unknown agent ${quote(connection[key])} (${validIds})` });
+      }
+    }
+  });
+  return issues;
+}
+
 function cmdWorkflowValidate(filePath) {
   if (!filePath) fail("Usage: harness workflow validate <path>", "Provide a path to a .harness.yaml file.");
   const abs = resolve(filePath);
@@ -360,7 +445,15 @@ function cmdWorkflowValidate(filePath) {
 
   const result = workflowDefSchema.safeParse(raw);
 
-  if (result.success) {
+  // The schema only checks shape: a connection to an agent that does not exist still parses.
+  const issues = result.success
+    ? findDanglingConnections(result.data)
+    : result.error.issues.map((i) => ({
+        path: i.path.join("."),
+        message: i.message,
+      }));
+
+  if (issues.length === 0) {
     const wf = result.data;
     const data = {
       valid: true,
@@ -376,10 +469,6 @@ function cmdWorkflowValidate(filePath) {
     console.log(`  Agents     : ${wf.agents.length}`);
     console.log(`  Connections: ${wf.connections.length}\n`);
   } else {
-    const issues = result.error.issues.map((i) => ({
-      path: i.path.join("."),
-      message: i.message,
-    }));
     if (jsonOut) { out({ valid: false, file: abs, issues }); process.exit(1); }
     console.error(`\n✕ INVALID  ${basename(abs)}`);
     for (const i of issues) {
@@ -453,7 +542,8 @@ Commands:
   run <workflow> --task "…"           Run a workflow headless (run --help for options)
 
 Options:
-  --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env)
+  --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env);
+  --workspace=<path>   the same, in one argument
   --json               Emit JSON output (machine-readable)
 
 Examples:

@@ -27,14 +27,14 @@ with `isError: true`. `initialize` reports `serverInfo.version` `0.1.0`.
 
 | Tool | Status | Notes |
 |---|---|---|
-| `project_status` | Working | Counts workflows/tests/docs and runs a type-check probe |
-| `list_workflows` | Working | Lists `.harness.yaml` files under the project |
+| `project_status` | Working | Counts workflows (`.harness.yaml` and `.harness.yml`), test files and docs, and runs a type-check probe; does not follow links |
+| `list_workflows` | Working | Lists `.harness.yaml` and `.harness.yml` files under the project; does not follow links |
 | `validate_workflow` | Working | Validates a workflow path scoped to the project root |
 | `run_tests` | Working | Runs Vitest via `npx --no-install`; optional filter is validated before subprocess spawn (filters starting with `-` are rejected) |
 | `run_cargo_tests` | Working | Runs `cargo test` in `src-tauri` |
 | `list_providers` | Working | Provider metadata and capability flags; credential references only, never values |
-| `list_artifacts` | Working | File metadata under `.harness/artifacts/` (no content); empty for app runs until runs persist artifacts |
-| `get_recent_logs` | Working | Recent `.harness/audit.log.jsonl` entries with best-effort secret redaction (not a guarantee) |
+| `list_artifacts` | Working | File metadata under `.harness/artifacts/` (no content); empty for app runs until runs persist artifacts. A `.harness/artifacts` that resolves outside the workspace or the project (through a link) is refused |
+| `get_recent_logs` | Working | Recent `.harness/audit.log.jsonl` entries with best-effort secret redaction (not a guarantee). The log must be a regular file that resolves inside the workspace and the project: a link out, a FIFO, a device or a folder is refused |
 
 Not implemented:
 
@@ -104,6 +104,20 @@ The MCP server is intentionally constrained:
   with best-effort secret redaction; this is not a guarantee.
 - `validate_workflow` rejects `..` and paths outside the project root;
   `list_artifacts` and `get_recent_logs` only accept workspace paths inside it.
+- Links are resolved before anything is read:
+  - `validate_workflow` checks the real path, which must be inside the project and
+    be a `.harness.yaml` or `.harness.yml` file.
+  - `list_artifacts` and `get_recent_logs` check the real path of
+    `.harness/artifacts` and `.harness/audit.log.jsonl`, which must be inside both
+    the workspace and the project. A link that leads out through a symlink or
+    junction is refused, and the error names no path outside. A link that stays
+    inside the workspace still works.
+- `get_recent_logs` reads a regular file only. A FIFO, a device or a folder as the
+  audit log is refused: opening a FIFO with no writer would block the
+  single-threaded server for good.
+- The file walks (`list_workflows`, `project_status`) do not follow symlinks or
+  junctions, so a link can neither lead them out of the project nor loop them. A
+  `tests/` folder that is a link is not walked.
 - `run_tests.filter` rejects shell metacharacters, path traversal, and values
   starting with `-`.
 - Test commands are limited to the project's Vitest and Cargo suites; `npx` runs
