@@ -1,6 +1,6 @@
 ﻿# Harness Studio User Manual
 
-Updated: 2026-09-25
+Updated: 2026-09-30
 
 ## What Harness Studio Is
 
@@ -66,13 +66,57 @@ run the workflow against configured providers.
 
 | Provider | Local/cloud | Key required | Notes |
 |---|---|---|---|
-| Ollama local | Local | No | Requires Ollama installed and model pulled |
+| Ollama local | Local | No | Requires Ollama installed and model pulled. The app asks it for a 16384-token context window (see Settings for Local Models) |
 | Ollama Cloud | Cloud | Yes | `https://ollama.com/api`, `gemma4:31b-cloud`, `OLLAMA_API_KEY` |
 | Remote Ollama | Cloud/hosted | Maybe | Requires base URL and possibly `OLLAMA_REMOTE_API_KEY` |
 | OpenAI | Cloud | Yes | Capabilities depend on selected model/account |
 | Anthropic | Cloud | Yes | Claude models |
-| OpenAI-compatible | Gateway | Maybe | Capabilities vary; do not assume streaming/tools |
+| OpenAI-compatible | Gateway | Maybe | Settings calls it Custom Endpoint. The app asks the server for native tool calls and streamed replies, and falls back to the text tool protocol, or to a reply that is not streamed, when the server refuses, so what works depends on the server. The model name has no default |
 | Gemini | Planned | Yes | Catalog only; direct adapter not implemented |
+
+## Settings for Local Models
+
+A model on the same machine or network (Ollama, or an OpenAI-compatible server) is
+set up in **Settings** (gear icon). Save with **Save all & close**.
+
+| Field | Section | What it does |
+|---|---|---|
+| **Ollama context window (tokens)** | Ollama — Local or Cloud | The window the app asks Ollama for (`num_ctx`). Default 16384. `0` sends none, so the server's own default stands. Not sent to ollama.com. |
+| **Model name** | Custom Endpoint (OpenAI-compatible) | The model your server serves. There is no default. Blank sends each agent's own model. |
+| **Model call timeout (seconds)** | Execution Behavior | How long one model call may take in total: 30 to 86400, default 600. |
+
+- **Context window.** Ollama cuts a prompt that does not fit its window, without a
+  word. The app's value overrides the server's own `OLLAMA_CONTEXT_LENGTH`: if the
+  server sets one, use `0` or the same value. A larger window needs more memory on the
+  Ollama server: lower it if the model no longer fits. Ollama reloads a model when a
+  request asks for a different window, so other tools on the same server with another
+  window cause reloads. A number that is not valid turns red and **Save all & close**
+  stays off.
+- **Context window warning.** When a node's estimated prompt (about 4 characters per
+  token) plus its `maxTokens` does not fit the window, the audit strip shows a
+  warning (the `warn` chip), once per node. The run goes on. The estimate is a
+  minimum: it leaves out the tool definitions and the steps after the first.
+- **Test connection** (Custom Endpoint) with a blank Model name sends nothing and
+  says: "No model name is set, so there is nothing to test. Enter the model name your
+  server serves, or click ↻ Models to list the models it has." **↻ Models** lists
+  what the server has, under **Available models**: click a name to copy it, and
+  paste it into **Model name**. A
+  `gpt-4o-mini` that Settings saved earlier, when it was the default, stays until you
+  clear the field.
+- **Run dialog.** **Provider Override** has a **Custom** chip beside OpenAI,
+  Anthropic, Ollama and Ollama Cloud. It runs that one run on the Custom endpoint
+  from Settings. **Use Settings** keeps the provider set in Settings.
+- **Slow hardware.** Raise the model call timeout and the agent's **Timeout (s)**
+  (Role tab, Limits; 300 for a new agent). The agent's Timeout bounds its whole run,
+  all its model calls and tools, so with the defaults it ends a slow call before the
+  call's own 600 s does. A call that runs out of its timeout says "The model did not
+  answer within the request timeout. On slow hardware, raise the model call timeout
+  (Settings in the app, --request-timeout in harness run)."
+- **`harness run`** has the same settings as flags and variables
+  (`--num-ctx`, `--request-timeout`, `HARNESS_CUSTOM_BASE_URL` and others:
+  [HEADLESS.md](HEADLESS.md)). The app does not read those variables.
+
+See [AIRGAPPED.md](AIRGAPPED.md) for the full guide.
 
 ## CLI
 

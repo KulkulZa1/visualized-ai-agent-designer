@@ -2,7 +2,8 @@
 
 How to run Harness Studio on a workstation with **no internet access**, against a
 **local OpenAI-compatible server** (URL, API key, and model name provided at that
-machine). It also covers building and testing the source on such a workstation.
+machine) or against **Ollama** on the same machine or network. It also covers
+building and testing the source on such a workstation.
 
 Updated: 2026-09-30.
 
@@ -24,6 +25,9 @@ Harness Studio works air-gapped without code changes to the runtime. The key fac
 - **The "Custom" provider** is an OpenAI-compatible client: it POSTs to
   `<base-url>/chat/completions` and lists models from `<base-url>/models`. The API
   key is optional — when blank, no `Authorization` header is sent.
+- **Ollama on this machine or the network** works too. Every request to it asks for
+  a context window (`num_ctx`, 16384 tokens by default), because Ollama's own
+  default is small and it cuts a longer prompt without a word. See §5.
 
 There are two ways to use Harness Studio on an air-gapped workstation. Each needs
 the internet once, on a connected machine:
@@ -86,25 +90,30 @@ the three values provided at that machine:
 |---|---|---|
 | **Base URL** | `http://localhost:8000/v1` | Whatever your server exposes. The app appends `/chat/completions` and `/models`. Include the `/v1` if your server uses it. |
 | **API key** | `sk-local-...` or *(blank)* | Optional. Blank = no `Authorization` header. |
-| **Model** | `qwen2.5-coder:7b` | The exact model name your server serves. |
+| **Model name** | `qwen2.5-coder:7b` | The exact model name your server serves. There is no default. Blank sends each agent's own model, and a server only has the models its owner put on it. |
 
 Then:
 
-1. Enter the **Model** first, then click **Test connection**. It sends a real
-   one-token completion to `<base-url>/chat/completions`, with a 10 s limit, for
-   the model in that field, or `gpt-4o-mini` when the field is blank. A green
-   result means the server answered that request with a success status. A server
-   that is still loading the model can take longer than 10 s, and the test then
-   fails: wait, and test again.
-2. (Optional) Click **Load models** to list `<base-url>/models`.
+1. Enter the **Model name** first, then click **Test connection**. It sends a real
+   one-token completion to `<base-url>/chat/completions` for the model in that
+   field, and waits up to 120 s in total (connecting fails after 10 s), because a
+   server that is still loading the model can be slow to answer. A green result
+   means the server answered that request with a success status. A server that
+   takes longer than that fails the test: wait, and test again. With the field
+   blank, nothing is sent: the test says "No model name is set, so there is nothing
+   to test. Enter the model name your server serves, or click ↻ Models to list the
+   models it has."
+2. (Optional) Click **↻ Models** to list `<base-url>/models`. Open **Available
+   models**, click a name to copy it, and paste it into **Model name**.
 3. **Save.**
 4. Set the run provider to **Custom**: in **Provider Settings**, set
    **Active Provider Mode** to **Custom**. This forces every agent to the custom
-   endpoint. **Auto** never picks Custom: it chooses OpenAI, Anthropic or local
+   endpoint. (For one run only, pick **Custom** under **Provider Override** in the
+   Run dialog.) **Auto** never picks Custom: it chooses OpenAI, Anthropic or local
    Ollama from each agent's model name, and nodes have no provider setting of
    their own. From a terminal, run
    `harness run --provider openai-compatible --base-url <base-url> --model <model>`
-   (`docs/HEADLESS.md`).
+   (`docs/HEADLESS.md`), or set the `HARNESS_CUSTOM_*` variables (§5).
 
 ---
 
@@ -115,10 +124,182 @@ Then:
 2. Press **Run**. Each agent should call your local server and show output.
 3. Check the audit strip — each agent logs `▶ <name> — <model> via openai-compatible`.
 
-If the server is unreachable, an agent fails with `Cannot reach <base-url>: ...`
-rather than hanging. Generation calls are also time-bounded: connect fails after
-10 s, and a response that never completes is cut off after 10 min, so a wedged
-server can never hang a run forever.
+If the server is unreachable when you press **Run**, the run does not start: the
+preflight says `Cannot reach <base-url>: ...`. If it goes away during a run, the
+agent fails with `Network error: ...`. Neither hangs. Generation calls are
+time-bounded: connecting fails after 10 s, and a call that has not finished after
+600 s (10 min, the default of the model call timeout: see §5) is cut off, so a
+wedged server can never hang a run forever.
+
+---
+
+## 5. Tune it for a local model
+
+A model on the same machine or network is slower, and has less memory, than a
+hosted one. Four things matter: Ollama's context window, the model's name, how
+`harness run` gets its settings, and the timeouts.
+
+### Ollama's context window
+
+Ollama cuts a prompt that does not fit its context window, and says nothing. Its own
+default window is small, a few thousand tokens, and an agent's prompt with its tool
+results is longer. So every request to Ollama (`/api/chat`: the text-protocol call, a
+native tool-calling turn and the app's streaming turn) carries `options.num_ctx`.
+
+- **Default:** 16384 tokens. There is one value for the whole run.
+- **`0`** sends none, so the server's own default stands (for example its
+  `OLLAMA_CONTEXT_LENGTH`).
+- **Never sent to Ollama's hosted service** (ollama.com and its subdomains), which
+  sizes its own context. A server on this machine or the LAN always gets it, whatever
+  its URL looks like.
+- **In the app:** **Settings → Ollama — Local or Cloud → Ollama context window
+  (tokens)**, saved with **Save all & close**. A value that is not a whole number of
+  0 or more turns red and switches **Save all & close** off.
+- **In `harness run`:** `--num-ctx <n>` or `HARNESS_OLLAMA_NUM_CTX`. The flag wins,
+  and a blank variable counts as unset. A value that is not a whole number from 0 to
+  4294967295 is exit 2, and the message names the flag or the variable.
+- **In the run record:** `provider.ollamaNumCtx` in `.harness/runs/<id>/run.json`. A
+  resume does not compare it.
+
+What the server's admin should know:
+
+- **The request's window overrides the server's own.** If the server is set up with
+  its own context length (`OLLAMA_CONTEXT_LENGTH`), set the app's window to 0, or to
+  the same value.
+- **A larger window needs more memory** on the Ollama server (the KV cache). If the
+  model no longer fits, lower the window.
+- **Ollama reloads a model** when a request asks for a different window than the one
+  it has loaded. So another tool that uses the same server with another window causes
+  reloads.
+
+An example on the Ollama server, then from a terminal:
+
+```bash
+ollama pull qwen2.5-coder:7b              # downloads the model: do it where there is a route
+OLLAMA_CONTEXT_LENGTH=32768 ollama serve  # only if the server should decide the window
+```
+
+If the server decides, set the app's window to `0` (and pass `--num-ctx 0` to
+`harness run`), so that its 32768 stands. If the app should decide, leave
+`OLLAMA_CONTEXT_LENGTH` alone and set the window in Settings. However you start the
+server, set the variable in its environment and restart it.
+
+```bash
+node cli/harness.mjs run examples/purchasing-decision.harness.yaml --task "Pick a laptop" \
+  --provider ollama --base-url http://192.168.1.20:11434 --model qwen2.5-coder:7b --num-ctx 32768
+```
+
+**The warning.** When a node's estimated prompt plus its `maxTokens` is more than the
+window, the run warns, once for that node. The prompt is estimated at about 4
+characters per token, over the system message and the user message. `maxTokens` is
+the agent's own (2048 if it is 0). For example:
+
+```
+warning: ⚠ Coder: about 18,048 tokens (a prompt of ~16,000 plus up to 2,048 for the reply) do not fit Ollama's context window of 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+```
+
+- It is an audit warning (action `context_window`) and never fails the run. The app
+  shows it in the audit strip (the `warn` chip).
+- `harness run` prints it on stderr as `warning: …`. With `--json` it is an `audit`
+  event with `warning: true`.
+- The estimate is a minimum. It covers the first prompt only, and leaves out the tool
+  definitions and the steps after it.
+- There is no warning when the window is 0, for ollama.com, or for another provider.
+- To clear it: raise the window (mind the memory), shorten what the agent is given,
+  or lower its `maxTokens`.
+
+### Model names (the Custom endpoint)
+
+- **No default.** The model name no longer defaults to `gpt-4o-mini`. Enter the name
+  your server serves, or click **↻ Models** beside **Test connection** to list what
+  it has.
+- **Blank** means each agent's own model is sent. A server only has the models its
+  owner put on it.
+- **Test connection with a blank name** sends nothing and says: "No model name is
+  set, so there is nothing to test. Enter the model name your server serves, or click
+  ↻ Models to list the models it has."
+- **The run's preflight** asks the server about the model the run will send: the
+  **Model name** (`--model` or `HARNESS_CUSTOM_MODEL` in `harness run`), or, when that
+  is blank, the first agent's own model (Hook and Memory nodes call no model).
+- **An old saved value stays.** A `gpt-4o-mini` saved in Settings earlier stays until
+  you clear the field and save.
+
+### `harness run` without flags
+
+These variables are read by `harness run` only, and a flag wins over its variable. A
+blank variable counts as unset. The app does not read them: set the same things in
+Settings.
+
+| Variable | Same as | Notes |
+|---|---|---|
+| `HARNESS_CUSTOM_BASE_URL` | `--base-url` | An OpenAI-compatible endpoint only |
+| `HARNESS_CUSTOM_MODEL` | `--model` | An OpenAI-compatible endpoint only |
+| `HARNESS_CUSTOM_API_KEY` | (the key) | As before; there is no key flag |
+| `HARNESS_OLLAMA_NUM_CTX` | `--num-ctx` | |
+| `HARNESS_REQUEST_TIMEOUT_SECS` | `--request-timeout` | |
+
+The two `HARNESS_CUSTOM_*` settings apply when the run uses the Custom endpoint:
+`--provider openai-compatible`, or `--provider auto` (the default) with
+`LLM_PROVIDER=openai-compatible`. `harness-core` reads `LLM_PROVIDER`, as the app
+does. So this needs no flag:
+
+```bash
+export LLM_PROVIDER=openai-compatible
+export HARNESS_CUSTOM_BASE_URL=http://localhost:8000/v1
+export HARNESS_CUSTOM_MODEL=qwen2.5-coder:7b
+node cli/harness.mjs run examples/purchasing-decision.harness.yaml --task "Pick a laptop"
+```
+
+With no URL from a flag or a variable, `--provider openai-compatible` is exit 2
+(`--provider openai-compatible needs --base-url (or HARNESS_CUSTOM_BASE_URL)`).
+`LLM_PROVIDER=openai-compatible` alone gets past that check, and the engine then
+refuses to start the run, before any agent runs: exit 3, `Custom endpoint URL is not
+configured. Add it in Settings → Custom Endpoint.` That message is the app's wording:
+in `harness run`, set the URL with `--base-url` or `HARNESS_CUSTOM_BASE_URL`.
+
+### Timeouts
+
+| What | Limit | Change it |
+|---|---|---|
+| Connecting to a server | 10 s | Fixed |
+| Test connection, and the run's preflight probe: Ollama, Ollama Cloud and Custom | 120 s in total | Fixed |
+| The same probe for OpenAI and Anthropic | 10 s in total | Fixed |
+| One model call | 600 s in total; 30 to 86400 | **Settings → Execution Behavior → Model call timeout (seconds)**; `harness run --request-timeout <secs>` or `HARNESS_REQUEST_TIMEOUT_SECS` (the flag wins) |
+| An agent's whole run: all its model calls and tools | 300 s for an agent made in the app | The agent's **Timeout (s)** (Role tab, Limits), or `timeoutSeconds` in the workflow file (1 to 86400) |
+
+The probe limit is longer for a local server because it may still be loading its
+model (the Custom probe asks for one token of a model, so a server that has not
+loaded it yet must do so first). The model call timeout covers the whole call,
+including a streamed reply, and applies to every provider's model calls, not to the
+probes.
+
+A call that runs out of it fails with: "The model did not answer within the request
+timeout. On slow hardware, raise the model call timeout (Settings in the app,
+--request-timeout in harness run)." It is the message for calls to Ollama and to
+OpenAI-style endpoints (OpenAI and the Custom endpoint), and for streamed replies. A
+refused connection keeps its own message (Ollama: "… is not reachable at `<url>`";
+the Custom endpoint: "Network error: …").
+
+**The agent's own Timeout is a second limit, and it comes first by default.** It
+bounds the agent's whole run: all its model calls and tools (time spent waiting for
+you to approve a command does not count). The agent stops waiting when it runs out,
+and fails with "`<name>` timed out after `<N>`s", even if a model call is still
+going. The call itself cannot be cancelled, and its late answer is thrown away. So a
+call cannot outlast its agent. With the defaults (600 s for a call, 300 s for an
+agent made in the app) the agent's limit ends a slow call before the call's own
+does. On slow hardware, raise both: the model call timeout above your slowest single
+reply, and each agent's Timeout above what the whole agent needs. The workflow-level
+`timeoutSeconds` is saved but not applied.
+
+### What was checked
+
+2026-09-30, on Linux: unit tests against scripted fake servers. The Rust tests use a
+mock Ollama server and a mock OpenAI-compatible server (the request bodies, the probe
+limits, the timeout message); the `harness run` tests use a fake `harness-core`;
+component tests cover Settings and the Run dialog. **Not run:** a real model server
+(Ollama, llama.cpp, vLLM or LM Studio), Windows, macOS, and the Tauri window. The
+notes about Ollama's own behavior above (its small default window,
+`OLLAMA_CONTEXT_LENGTH`, memory use, reloads) were not tested here.
 
 ---
 
@@ -363,11 +544,11 @@ distro; a machine with no Rust toolchain.
 | Action | Network target | Air-gapped behavior |
 |---|---|---|
 | Run a workflow (Custom provider) | Your local server (Rust → reqwest) | Works |
-| Test connection / Load models (Custom) | Your local server (Rust → reqwest) | Works |
+| Test connection / ↻ Models (Custom) | Your local server (Rust → reqwest) | Works |
 | Open a `.md` / `.yaml` file in the editor | — (Monaco is bundled into the app) | Works |
 | Local Ollama (if installed) | `http://localhost:11434` | Works (allowed by CSP) |
 | OpenAI / Anthropic / Ollama Cloud | Public cloud hosts | Unreachable offline; leave unconfigured |
-| Per-node ModelPicker **Load from API** (Ollama, OpenRouter) | In-WebView `fetch()` | Subject to CSP; not used by the Custom endpoint path. Use the Settings → Custom "Load models" button instead. |
+| Per-node ModelPicker **Load from API** (Ollama, OpenRouter) | In-WebView `fetch()` | Subject to CSP; not used by the Custom endpoint path. Use the Settings → Custom **↻ Models** button instead. |
 | App startup, fonts, updates, telemetry | — | None. The app makes no startup network calls. |
 
 ---
@@ -393,7 +574,11 @@ distro; a machine with no Rust toolchain.
 | Symptom | Cause / fix |
 |---|---|
 | Installer asks for internet / "downloading WebView2" | Built without `-Offline`. Rebuild with `-Offline`, or pre-install the WebView2 Evergreen runtime on the target. |
-| **Test connection** fails with "Cannot reach …" | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. It can also be a server that is still loading the model: the test gives up after 10 s. |
+| **Test connection** fails with "Cannot reach …" | Server not running, wrong host/port, or a firewall block between the workstation and the server. Confirm the URL in a local tool first. It can also be a server that is still loading the model: the test gives up after 120 s in total, and connecting fails after 10 s. |
+| **Test connection** says "No model name is set …" | The **Model name** field is blank, so nothing was sent. Enter the name your server serves, or click **↻ Models** and copy one (§5). |
 | "Authentication failed — check your API key" | Server requires a key but the field is blank or wrong. |
-| Agents error with "Custom endpoint URL is not configured." | Provider mode is **Custom** but no Base URL is saved. Enter it in Settings → Custom. |
+| The run does not start, with "Custom endpoint URL is not configured." | Provider mode is **Custom** but no Base URL is saved. Enter it in Settings → Custom. In `harness run`, pass `--base-url` or set `HARNESS_CUSTOM_BASE_URL` (exit 3 when only `LLM_PROVIDER=openai-compatible` is set). |
 | Run says no model / HTTP 404 on `/chat/completions` | Model name doesn't match what the server serves, or the Base URL is missing a required suffix like `/v1`. |
+| An agent fails with "The model did not answer within the request timeout …" | One model call ran past the model call timeout (600 s by default). Raise it in Settings → Execution Behavior, or with `--request-timeout`, and raise the agent's **Timeout (s)** too (§5). |
+| An agent fails with "`<name>` timed out after `<N>`s" | The agent's own Timeout (300 s for an agent made in the app) ran out. It bounds all the agent's model calls and tools: raise **Timeout (s)** in its Role tab, or `timeoutSeconds` in the workflow file (§5). |
+| A warning says a prompt does not fit "Ollama's context window", or an Ollama agent acts as if it had not seen the start of its prompt | Raise the context window (Settings → Ollama context window; `--num-ctx`), or shorten what the agent is given. A larger window needs more memory on the Ollama server (§5). |

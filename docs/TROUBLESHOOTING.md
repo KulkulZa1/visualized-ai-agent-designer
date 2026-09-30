@@ -1,6 +1,6 @@
 ﻿# Troubleshooting
 
-Updated: 2026-09-24
+Updated: 2026-09-30
 
 ## App Launch
 
@@ -55,6 +55,73 @@ switch to Ollama local.
 - Confirm the base URL.
 - If auth is required, use the Settings auth token or `OLLAMA_REMOTE_API_KEY`.
 - Do not assume a remote gateway has the same privacy as local Ollama.
+
+### A model call fails with "The model did not answer within the request timeout"
+
+Full message: "The model did not answer within the request timeout. On slow hardware,
+raise the model call timeout (Settings in the app, --request-timeout in harness
+run)." One model call to Ollama or an OpenAI-compatible server ran past the model
+call timeout (600 s by default). It used to read like an unreachable server.
+
+- Raise it: Settings → Execution Behavior → **Model call timeout (seconds)** (30 to
+  86400), then **Save all & close**. In `harness run`: `--request-timeout <secs>` or
+  `HARNESS_REQUEST_TIMEOUT_SECS`.
+- Raise the agent's **Timeout (s)** too (Role tab, Limits; `timeoutSeconds` in the
+  workflow file). It bounds the agent's whole run, all its model calls and tools, and
+  the agent gives up at it, with "`<name>` timed out after `<N>`s", even if a call is
+  still going. A new agent has 300 s, which is shorter than the default 600 s call
+  timeout.
+- A refused connection keeps its own message (Ollama: "… is not reachable at
+  `<url>`"; the Custom endpoint: "Network error: …"). Connecting fails after 10 s,
+  whatever the timeout.
+- **Test connection** and the run's preflight have their own limits: 120 s for
+  Ollama, Ollama Cloud and the Custom endpoint (a local server may still be loading
+  its model), 10 s for OpenAI and Anthropic. The model call timeout does not change
+  them.
+
+### Ollama cuts off a prompt, or the run warns about its context window
+
+Ollama cuts a prompt that does not fit its context window, without a word, so an
+agent can act as if it had not seen the start of its prompt. The app asks for 16384
+tokens by default, and the run warns when a node's estimated prompt (about 4
+characters per token) plus its `maxTokens` does not fit:
+
+```
+⚠ Coder: about 18,048 tokens (a prompt of ~16,000 plus up to 2,048 for the reply) do not fit Ollama's context window of 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+```
+
+It is in the audit strip (the `warn` chip), and `harness run` prints it on stderr as
+`warning: …`. It never stops the run.
+
+- Raise Settings → Ollama — Local or Cloud → **Ollama context window (tokens)**, or
+  `harness run --num-ctx <n>`. A larger window needs more memory (KV cache) on the
+  Ollama server: lower it if the model no longer fits.
+- Or shorten what the agent is given, or lower its `maxTokens`.
+- The app's window overrides the server's `OLLAMA_CONTEXT_LENGTH`. If the server sets
+  its own, set the window to `0` (sends none, so the server's stands) or to the same
+  value. With `0` there is no warning.
+- Ollama reloads a model when a request asks for a different window. Another tool on
+  the same server with another window makes it reload.
+- The window is not sent to ollama.com, and there is no warning for it.
+- The estimate is a minimum. It covers the first prompt, and leaves out the tool
+  definitions and the steps after it, so a long run can still pass the window with no
+  warning.
+
+### Test connection says "No model name is set"
+
+The Custom endpoint's **Test connection** asks the server for one token of a model.
+With no **Model name** it sends nothing, and says: "No model name is set, so there is
+nothing to test. Enter the model name your server serves, or click ↻ Models to list
+the models it has."
+
+- Type the name your server serves, or click **↻ Models**, open **Available models**,
+  click a name to copy it and paste it into **Model name**. There is no default (it
+  used to be `gpt-4o-mini`).
+- A run with the field blank sends each agent's own model, and the run's preflight
+  asks the server about the first agent's model. A server only has the models its
+  owner put on it: set the Model name unless every agent's own model is one of them.
+- A `gpt-4o-mini` saved in Settings earlier stays until you clear the field. If the
+  server does not have it, the test fails: clear it or enter the right name.
 
 ## Workflow Execution
 
