@@ -478,14 +478,21 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   // A baseline is a fingerprint; null (there was no such script); or UNVERIFIABLE_HOOK, when
   // harness-core could not say (the script cannot be read, or it is older than the app and does
   // not have hook_fingerprint), which nothing matches. A failed fingerprint never fails the run.
+  // The record keeps only that marker. The text of the error behind it is kept in this attempt
+  // alone (whyUnverifiable), for the refusal: a resume that carries the marker on has none.
+  /** The text of harness-core's error when it could not fingerprint a hook, by node key: the last
+   *  call's, so a call that then answers clears it. */
+  const whyUnverifiable = new Map<string, string>();
   /** What harness-core says the fingerprint of a hook's script and env is: a string; null when
    *  there is no such script; UNVERIFIABLE_HOOK when it cannot say (it failed, or did not answer
    *  with a fingerprint or null). */
-  const fingerprintHook = async (ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
+  const fingerprintHook = async (key: string, ws: string, path: string, env: HookConfig["env"]): Promise<string | null> => {
+    whyUnverifiable.delete(key);
     try {
       const fingerprint = await invoke<unknown>("hook_fingerprint", { workspacePath: ws, hookPath: path, env });
       return fingerprint === null || (typeof fingerprint === "string" && fingerprint !== "") ? fingerprint : UNVERIFIABLE_HOOK;
-    } catch {
+    } catch (e) {
+      whyUnverifiable.set(key, String(e));
       return UNVERIFIABLE_HOOK;
     }
   };
@@ -495,7 +502,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   if (savedScripts === undefined && workspacePath) {
     await Promise.all(nodes.map(async (n, i) => {
       const path = hookScriptPath(n);
-      if (path) hookScripts[savedNodeId(i)] = await fingerprintHook(workspacePath, path, n.data.preHook?.env);
+      const key = savedNodeId(i);
+      if (path) hookScripts[key] = await fingerprintHook(key, workspacePath, path, n.data.preHook?.env);
     }));
   }
   /** What a hook that runs without asking may do now: it is refused, with the reason (the node
@@ -507,12 +515,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       return { refusal: `Hook script ${hook.path} has no baseline from this run's first attempt, so it is not run unasked; ` +
         "run it from the Hooks tab or start a new run." };
     }
-    const unverifiable = { refusal: `Hook script ${hook.path} could not be checked (the script could not be read, or ` +
-      "harness-core is older than the app), so it is not run unasked; run it from the Hooks tab or start a new run." };
+    // Says why in harness-core's own words when it gave any (a path outside the workspace, a folder,
+    // a permission error); a baseline saved by an earlier attempt has none.
+    const unverifiable = () => ({ refusal: `Hook script ${hook.path} could not be checked (` +
+      (whyUnverifiable.get(key) || "the script could not be read, or harness-core is older than the app") +
+      "), so it is not run unasked; run it from the Hooks tab or start a new run." });
     const baseline = hookScripts[key];
-    if (baseline === UNVERIFIABLE_HOOK) return unverifiable;
-    const now = await fingerprintHook(ws, hook.path, hook.env);
-    if (now === UNVERIFIABLE_HOOK) return unverifiable;
+    if (baseline === UNVERIFIABLE_HOOK) return unverifiable();
+    const now = await fingerprintHook(key, ws, hook.path, hook.env);
+    if (now === UNVERIFIABLE_HOOK) return unverifiable();
     if (baseline === null && now === null) {
       // Not there as the run started, and still not: there is nothing to run, so nothing is started.
       return { refusal: `Hook script ${hook.path} was not found in the workspace, so it was not run.` };

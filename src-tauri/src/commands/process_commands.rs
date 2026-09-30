@@ -93,9 +93,9 @@ fn fingerprint_hook(script: &[u8], env: Option<&HashMap<String, String>>) -> Str
     hex(&Sha256::digest(input.as_bytes()))
 }
 
-/// A hook script's bytes, read from the path `resolve_safe_path` returned. Only a regular file
-/// is read: a FIFO, a device or a folder is refused first, because reading a FIFO that has no
-/// writer waits for ever, and the caller with it.
+/// A hook script's bytes, read from the path the interpreter is given (see `hook_fingerprint`).
+/// Only a regular file is read: a FIFO, a device or a folder is refused first, because reading a
+/// FIFO that has no writer waits for ever, and the caller with it.
 fn read_script(path: &Path) -> std::io::Result<Vec<u8>> {
     if !std::fs::metadata(path)?.is_file() {
         return Err(std::io::Error::new(ErrorKind::InvalidInput, "not a regular file"));
@@ -109,8 +109,11 @@ fn read_script(path: &Path) -> std::io::Result<Vec<u8>> {
 /// failure to read it is an error too; the message is the operating system's, with no file
 /// content.
 ///
-/// The file is read at the path `resolve_safe_path` returns, links followed: a link that was
-/// re-pointed is hashed as its target, the file `execute_hook` runs.
+/// The file is read at the path `execute_hook` gives the interpreter: the one `resolve_safe_path`
+/// returns, links followed, as the text `interpreter_path` makes of it. A link that was re-pointed
+/// is hashed as its target, the file `execute_hook` runs. The text is read, not the resolved path,
+/// because a resolved name that is not UTF-8 changes when made into text (each bad byte becomes
+/// U+FFFD), and the interpreter opens the changed name.
 // `async`: run on Tauri's thread pool, so that a slow read does not block the UI thread, where
 // a plain sync command runs.
 #[cfg_attr(feature = "app", tauri::command(async))]
@@ -120,7 +123,7 @@ pub fn hook_fingerprint(
     env: Option<HashMap<String, String>>,
 ) -> AppResult<Option<String>> {
     let safe = resolve_safe_path(&workspace_path, &hook_path)?;
-    match read_script(&safe) {
+    match read_script(Path::new(&interpreter_path(&safe))) {
         Ok(script) => Ok(Some(fingerprint_hook(&script, env.as_ref()))),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -152,6 +155,8 @@ pub fn execute_hook(
     // Validate path stays within workspace
     let safe = resolve_safe_path(&workspace_path, &hook_path)?;
     let hook_arg = interpreter_path(&safe);
+    // `hook_arg` goes to the interpreter; the check below reads a copy of it.
+    let script_file = hook_arg.clone();
 
     // Determine executor based on extension
     let ext = safe
@@ -178,12 +183,14 @@ pub fn execute_hook(
     }
 
     // The last step before the start: read the script again, at the path the interpreter is
-    // given (links followed), and fingerprint it with the `env` about to be applied. A script
-    // that changed, is gone, is not a regular file or cannot be read, or an `env` other than the
-    // one that was checked, is not run. What this cannot close is the moment between this read
-    // and the interpreter's own opening of the file.
+    // given (links followed), and fingerprint it with the `env` about to be applied. That is the
+    // text path, not `safe`: a resolved name that is not UTF-8 changes when made into text, and
+    // the interpreter opens the changed name. A script that changed, is gone, is not a regular
+    // file or cannot be read, or an `env` other than the one that was checked, is not run. What
+    // this cannot close is the moment between this read and the interpreter's own opening of the
+    // file.
     if let Some(expected) = &expected_fingerprint {
-        let unchanged = read_script(&safe)
+        let unchanged = read_script(Path::new(&script_file))
             .is_ok_and(|script| fingerprint_hook(&script, env.as_ref()) == *expected);
         if !unchanged {
             return Err(AppError::HookExecution(format!(
@@ -734,6 +741,7 @@ mod tests {
         //   (d) fingerprint(b"\xff\xfe#!/bin/sh\necho \xc3\x28\n",
         //           {"Z": "tab\there \"quoted\" back\\slash", "\u00e9": "caf\u00e9 \u2028 \U0001F600",
         //            "A": "line\nbreak \r\x08\x0c \x01 \x1b \x7f"})      -> NOT_UTF8_FINGERPRINT
+        //   (e) fingerprint(b"x", {"\U0001F600": "1", "\uFF5E": "2"})     -> code_point_order below
         //
         // (a) again with sha256sum alone. The first command gives the script hash, which goes
         // into the input of the second:
@@ -752,6 +760,12 @@ mod tests {
             "916fc571515d8f38c8a9f715cf797ff32bd361cefed15ba5a35cf58376a5dbcf"
         );
         assert_eq!(fingerprint_hook(NOT_UTF8, Some(&escaping_env())), NOT_UTF8_FINGERPRINT);
+        // The names sort by code point (the UTF-8 bytes' order), not by UTF-16 unit: U+FF5E is one
+        // unit (0xFF5E) and U+1F600 two (0xD83D 0xDE00), so by unit the emoji would come first and
+        // the fingerprint would be 2a0e5b2d8f722ca007450a41d76519eed4866e76b49bd853167416b76ff0bc47.
+        let code_point_order = "b93e80432a647b56eac82834a1c205482eb98c81acd1e6a524e11074aade4aa3";
+        let astral = env_of(&[("\u{1F600}", "1"), ("\u{FF5E}", "2")]);
+        assert_eq!(fingerprint_hook(b"x", Some(&astral)), code_point_order);
 
         // hook_fingerprint hashes the file on disk the same way.
         let dir = tempdir().unwrap();
@@ -1023,6 +1037,39 @@ mod tests {
 
         assert_refused_as_changed(&run_checked(dir.path(), "hook.sh", None, Some(&fingerprint)), "hook.sh");
         assert!(!dir.path().join("marker.txt").exists(), "the script the link was re-pointed to ran");
+    }
+
+    /// The file that is checked is the file the interpreter opens. `interpreter_path` makes the
+    /// resolved path into text, and a name that is not UTF-8 changes in that (each bad byte becomes
+    /// U+FFFD): a check that read the resolved path itself would hash one file while bash ran
+    /// another. Linux only: macOS refuses such names.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_to_a_name_that_is_not_utf8_is_checked_as_the_file_the_interpreter_opens() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("hook.sh"), "echo hook-ran\n").unwrap();
+        let fingerprint = fingerprint_of(dir.path(), "hook.sh", None); // as the run starts
+
+        // Then hook.sh becomes a link to `hook<0xFF>.sh`, a copy with the same bytes and so the
+        // same fingerprint. The interpreter is given that name with U+FFFD for the byte: another
+        // file, and a script that leaves a marker.
+        let copy = dir.path().join(OsStr::from_bytes(b"hook\xff.sh"));
+        fs::write(&copy, "echo hook-ran\n").unwrap();
+        fs::write(dir.path().join("hook\u{FFFD}.sh"), writes_the_marker()).unwrap();
+        fs::remove_file(dir.path().join("hook.sh")).unwrap();
+        std::os::unix::fs::symlink(&copy, dir.path().join("hook.sh")).unwrap();
+
+        let result = run_checked(dir.path(), "hook.sh", None, Some(&fingerprint));
+
+        assert!(!dir.path().join("marker.txt").exists(), "a file other than the checked one ran: {result:?}");
+        assert_refused_as_changed(&result, "hook.sh");
+        // hook_fingerprint reads that file too: the engine's check sees the script that would run.
+        assert_eq!(
+            fingerprint_of(dir.path(), "hook.sh", None),
+            fingerprint_hook(writes_the_marker().as_bytes(), None)
+        );
     }
 
     #[cfg(unix)]

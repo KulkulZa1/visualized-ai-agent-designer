@@ -501,7 +501,11 @@ describe("a Hook node that runs without asking", () => {
   const SCRIPT = "scripts/gate.sh";
   const CHANGED = `Hook script ${SCRIPT} or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
   const CHANGED_BY_AGENT = `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab or start a new run.`;
-  const UNVERIFIABLE = `Hook script ${SCRIPT} could not be checked (the script could not be read, or harness-core is older than the app), so it is not run unasked; run it from the Hooks tab or start a new run.`;
+  /** The refusal for a hook harness-core could not fingerprint: with `reason`, harness-core's own words; without one,
+   *  the general text (a baseline an earlier attempt saved, or an answer that is not a fingerprint or null). */
+  const unverifiable = (reason = "the script could not be read, or harness-core is older than the app", path = SCRIPT) =>
+    `Hook script ${path} could not be checked (${reason}), so it is not run unasked; run it from the Hooks tab or start a new run.`;
+  const UNVERIFIABLE = unverifiable();
   const MISSING = `Hook script ${SCRIPT} was not found in the workspace, so it was not run.`;
   /** What harness-core answers when it refuses a hook itself: the script or env is not what it was checked as. */
   const REFUSED_BY_CORE = `Hook execution error: Hook script ${SCRIPT} or its environment changed after it was checked; it was not run.`;
@@ -518,13 +522,14 @@ describe("a Hook node that runs without asking", () => {
 
   /** harness-core's hook_fingerprint for SCRIPT: the fingerprint of what the script holds at each call in turn
    *  (the last one goes on repeating), as text or as bytes, with the env it is asked for; null is no such script,
-   *  and an Error a call that fails. Every other path has no script. */
+   *  and an Error a call that fails, rejected with its message as Tauri and harness-core reject. Every other path
+   *  has no script. */
   function script(...reads: Array<string | Uint8Array | null | Error>): Handler {
     let next = 0;
     return (args) => {
       if (args.hookPath !== SCRIPT) return null;
       const read = reads[Math.min(next++, reads.length - 1)];
-      if (read instanceof Error) throw read;
+      if (read instanceof Error) throw read.message;
       return read === null ? null : hookFingerprint(read, envOf(args));
     };
   }
@@ -720,8 +725,8 @@ describe("a Hook node that runs without asking", () => {
     const audit = auditFile();
     const records: RunRecord[] = [];
     let asked = 0;
-    const { host } = fakeHost({
-      hook_fingerprint: () => { asked++; throw new Error("IO error: Permission denied (os error 13)"); },
+    const { host, log } = fakeHost({
+      hook_fingerprint: () => { asked++; throw "IO error: Permission denied (os error 13)"; }, // rejected with the message
       execute_hook: executed,
       write_audit_entry: audit.write,
     }, { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
@@ -729,20 +734,23 @@ describe("a Hook node that runs without asking", () => {
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
     if (!outcome.started) throw new Error(outcome.error); // the run did start: only the hook is refused
+    // The refusal says why, in harness-core's words: on the node, and in the audit, on screen and in the workspace's log.
+    const refusal = unverifiable("IO error: Permission denied (os error 13)");
+    const entry = expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: refusal });
     expect(executed).not.toHaveBeenCalled();
     expect(asked).toBe(1); // as the run started; what could not be fingerprinted then is not tried again
-    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: refusal });
+    expect(log.audit).toContainEqual(entry);
+    expect(audit.writes).toEqual([{ workspacePath: "/ws", entry }]);
+    // The record has the plain marker, not the words.
     expect(records[0].hookScripts).toEqual({ "agent-0": UNVERIFIABLE_HOOK });
-    expect(audit.writes).toEqual([{
-      workspacePath: "/ws",
-      entry: expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: UNVERIFIABLE }),
-    }]);
+    expect(records.at(-1)?.hookScripts).toEqual({ "agent-0": UNVERIFIABLE_HOOK });
   });
 
-  it("is not run when harness-core is older than the app and has no hook_fingerprint, and the refusal names that", async () => {
+  it("is not run when harness-core is older than the app and has no hook_fingerprint, and the refusal has its answer", async () => {
     const executed = hookRan();
     const { host } = fakeHost({
-      hook_fingerprint: () => { throw new Error("Unknown command: hook_fingerprint"); }, // as harness-core answers
+      hook_fingerprint: () => { throw "Unknown command: hook_fingerprint"; }, // as harness-core answers
       execute_hook: executed,
     });
 
@@ -750,8 +758,28 @@ describe("a Hook node that runs without asking", () => {
 
     if (!outcome.started) throw new Error(outcome.error);
     expect(executed).not.toHaveBeenCalled();
-    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
-    expect(outcome.run.agents.Gate.error).toContain("harness-core is older than the app");
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: unverifiable("Unknown command: hook_fingerprint") });
+  });
+
+  it("says why in harness-core's words when the hook's path leads outside the workspace, as execute_hook did", async () => {
+    const executed = hookRan();
+    const audit = auditFile();
+    const { host } = fakeHost({
+      hook_fingerprint: (args) => { throw `Path traversal detected: ${args.hookPath}`; },
+      execute_hook: executed,
+      write_audit_entry: audit.write,
+    });
+
+    const outcome = await runWorkflow(runInput([hookNode({ path: "../outside.sh" })]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    const refusal = unverifiable("Path traversal detected: ../outside.sh", "../outside.sh");
+    expect(executed).not.toHaveBeenCalled();
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: refusal });
+    expect(audit.writes).toEqual([{
+      workspacePath: "/ws",
+      entry: expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: refusal }),
+    }]);
   });
 
   it.each([
@@ -770,17 +798,23 @@ describe("a Hook node that runs without asking", () => {
     expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
   });
 
-  it("is not run when its fingerprint cannot be taken just before it runs, though it could be as the run started", async () => {
+  it("is not run when its fingerprint cannot be taken just before it runs, though it could be as the run started, and says why", async () => {
     const executed = hookRan();
-    const { host } = fakeHost({
+    const audit = auditFile();
+    const { host, log } = fakeHost({
       hook_fingerprint: script("echo hi\n", new Error("IO error: not a regular file")), execute_hook: executed,
+      write_audit_entry: audit.write,
     });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
     if (!outcome.started) throw new Error(outcome.error);
+    const refusal = unverifiable("IO error: not a regular file");
+    const entry = expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: refusal });
     expect(executed).not.toHaveBeenCalled();
-    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: refusal });
+    expect(log.audit).toContainEqual(entry);
+    expect(audit.writes).toEqual([{ workspacePath: "/ws", entry }]);
   });
 
   it("gives execute_hook the fingerprint the run took as it started, for harness-core to verify right before the script starts", async () => {
@@ -1243,13 +1277,14 @@ describe("a Hook node that runs without asking", () => {
     it("carries an unverifiable baseline on: the hook is refused on resume too, though harness-core can fingerprint it now", async () => {
       const ws = workspace();
       const oldCore: Record<string, Handler> = {
-        ...ws.handlers, hook_fingerprint: () => { throw new Error("Unknown command: hook_fingerprint"); },
+        ...ws.handlers, hook_fingerprint: () => { throw "Unknown command: hook_fingerprint"; },
       };
       const first = await attempt(oldCore, undefined, [hookNode()], []);
-      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: unverifiable("Unknown command: hook_fingerprint") });
       expect(first.record.hookScripts).toEqual({ "agent-0": UNVERIFIABLE_HOOK });
 
-      // harness-core is updated. A resume takes no baselines, so the hook is still not run.
+      // harness-core is updated. A resume takes no baselines, so the hook is still not run. The record has the
+      // marker and not harness-core's words, so the refusal is the general text.
       const second = await attempt(ws.handlers, first.record, [hookNode()], []);
 
       expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });

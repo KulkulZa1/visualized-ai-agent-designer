@@ -244,15 +244,20 @@ describe("harness run", { timeout: 60_000 }, () => {
         expect.objectContaining({ action: "hook_executed", agentId: "agent-1", success: false, details: refusal }));
     });
 
-    it("refuses a hook when harness-core is older than the app and has no hook_fingerprint, and says so", () => {
+    it("refuses a hook when harness-core is older than the app and has no hook_fingerprint, and gives its answer", () => {
       const dir = hookWorkspace({ olderCore: true });
 
       const run = harnessRun(dir, ["--task", "t", "--json"]);
 
       expect(run.status, run.stderr).toBe(1);
-      expect(run.stdout).toContain("harness-core is older than the app");
+      const refusal = (script: string) => `Hook script scripts/${script} could not be checked (Unknown command: hook_fingerprint), ` +
+        "so it is not run unasked; run it from the Hooks tab or start a new run.";
+      expect(run.stdout).toContain(refusal("mutator.sh"));
       expect(started(run.requests)).toEqual([]);
-      expect(savedRun(dir, run.stdout).hookScripts).toEqual({ "agent-0": "unverifiable", "agent-1": "unverifiable" });
+      const saved = savedRun(dir, run.stdout);
+      expect(saved.hookScripts).toEqual({ "agent-0": "unverifiable", "agent-1": "unverifiable" }); // the marker, not the words
+      expect(saved.audit).toContainEqual( // the audit has them
+        expect.objectContaining({ action: "hook_executed", agentId: "agent-0", success: false, details: refusal("mutator.sh") }));
     });
   });
 

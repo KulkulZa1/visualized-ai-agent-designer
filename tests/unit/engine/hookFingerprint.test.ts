@@ -43,6 +43,13 @@ describe("the hook fingerprint the tests' fakes compute", () => {
     expect(hookFingerprint(script, env)).toBe("c1839de3f5d130be3e306b6fe107d8d7e6cfa3849c6e0137ca4bd9d62d253fe1");
   });
 
+  it("is the Rust vector (e): env names that sort one way by code point and another by UTF-16 unit", () => {
+    // U+FF5E is one UTF-16 unit (0xFF5E) and U+1F600 two (0xD83D 0xDE00): by unit the emoji would come first,
+    // and the fingerprint would be 2a0e5b2d8f722ca007450a41d76519eed4866e76b49bd853167416b76ff0bc47.
+    expect(hookFingerprint("x", { "\u{1F600}": "1", "\uFF5E": "2" }))
+      .toBe("b93e80432a647b56eac82834a1c205482eb98c81acd1e6a524e11074aade4aa3");
+  });
+
   it("hashes a string as its UTF-8 bytes", () => {
     expect(hookFingerprint("h\u00e9\n", undefined)).toBe(hookFingerprint(bytes("h\xc3\xa9\n"), undefined));
   });
