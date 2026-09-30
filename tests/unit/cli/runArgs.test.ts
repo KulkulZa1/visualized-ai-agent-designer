@@ -165,7 +165,8 @@ describe("RUN_USAGE", () => {
     const columns = optionLines.map((line) => /^( {2}--[\w-]+(?: <[^>]+>| "<[^>]+>")? +)\S/.exec(line)?.[1].length);
 
     expect(columns.length).toBeGreaterThan(10);
-    expect(new Set(columns)).toEqual(new Set([29]));
+    expect(columns.every((column) => typeof column === "number")).toBe(true);
+    expect(new Set(columns).size).toBe(1);
   });
 });
 

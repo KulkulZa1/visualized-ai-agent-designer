@@ -164,14 +164,18 @@ describe("createReporter", () => {
       expect(out).toEqual([]);
     });
 
-    it("has one marker on stderr: the ⚠ goes, with its emoji selector when there is one, and text without it is left as it is", () => {
+    it("has one marker on stderr: the leading ⚠ goes, with its emoji selector when there is one, and the rest is left as it is", () => {
       const { reporter: { events }, err } = capture(false);
+      // A name that starts with a digit or holds a ⚠ stays whole.
+      const named = text.replace(/^Coder/, "2nd ⚠ Reviewer");
 
       events.onAudit({ ...warning, details: `\u26A0\uFE0F ${text}` });
       events.onAudit({ ...warning, details: `\u26A0${text}` });
       events.onAudit({ ...warning, details: text });
+      events.onAudit({ ...warning, details: `⚠ ${named}` });
+      events.onAudit({ ...warning, details: named });
 
-      expect(err).toEqual([`warning: ${text}`, `warning: ${text}`, `warning: ${text}`]);
+      expect(err).toEqual([`warning: ${text}`, `warning: ${text}`, `warning: ${text}`, `warning: ${named}`, `warning: ${named}`]);
     });
 
     it("is a warning audit event with --json, and nothing on stderr", () => {
