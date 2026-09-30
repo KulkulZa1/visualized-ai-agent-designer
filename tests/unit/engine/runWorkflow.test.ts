@@ -183,6 +183,29 @@ describe("runWorkflow", () => {
         success: true,
       });
     });
+
+    it("says how to pull the model when the fallback's server answers without it", async () => {
+      const probed: string[] = [];
+      const handlers = probeHandlers(probed);
+      const pull = `ollama pull ${runInput([]).provider.ollamaModel}`;
+      handlers.check_provider_health = (args) => {
+        probed.push(String(args.provider));
+        return args.provider === "ollama"
+          ? { ok: false, provider: "ollama", latency_ms: 3, model_available: false, pull_command: pull,
+              message: `Ollama connected (3ms) — model not found. Run: ${pull}` }
+          : { ok: true, provider: args.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null };
+      };
+      const { host, log } = fakeHost(handlers);
+
+      const outcome = await runWorkflow(runInput([nodeOn("gpt-4o-mini")], [], provider({
+        llmProvider: "openai", openaiApiKey: "sk-test",
+      })), host);
+
+      expect(outcome.started).toBe(true);
+      const entry = log.audit.find((e) => e.details?.includes("ollama"));
+      expect(entry?.details).toContain(`is not pulled at http://localhost:11434 (run: ${pull})`);
+      expect(entry).toMatchObject({ success: true, warning: true });
+    });
   });
 
   /** Node A asks to run `npm test` with bash, then answers. */

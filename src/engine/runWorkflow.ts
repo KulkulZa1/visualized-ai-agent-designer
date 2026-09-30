@@ -230,11 +230,15 @@ async function runHealthChecks(
   for (const h of results) {
     // A fallback that is down is a warning: the run does not need it.
     const fallbackDown = !h.ok && h.provider === ollamaProvider && ollamaFallbackFor.length > 0;
+    // A server that answers but lacks the model says "… not found" and how to pull it.
+    const why = h.pull_command && h.message.includes("not found")
+      ? `model ${ollamaModel} is not pulled at ${ollamaUrl} (run: ${h.pull_command})`
+      : `not available at ${ollamaUrl}`;
     addEntry({
       id: `health-${h.provider}-${Date.now()}`, timestamp: new Date().toISOString(),
       action: "provider_check", agentId: "system",
       details: fallbackDown
-        ? `⚠ ${h.provider} — not available at ${ollamaUrl}, so a billing error from ` +
+        ? `⚠ ${h.provider} — ${why}, so a billing error from ` +
           `${ollamaFallbackFor.join(" or ")} cannot fall back to local Ollama`
         : `${h.ok ? "✓" : "⚠"} ${h.provider} — ${h.message}`,
       success: h.ok || fallbackDown, warning: fallbackDown,
