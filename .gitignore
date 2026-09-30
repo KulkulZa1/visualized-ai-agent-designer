@@ -57,6 +57,14 @@ target-codex-verify-root/
 *.tsbuildinfo
 
 # =====================================================
+# Offline bundle (scripts/offline-bundle.mjs)
+# =====================================================
+# `setup` writes .cargo/config.toml at the repo root; src-tauri/.cargo/ is tracked and stays.
+/.cargo/
+# The default folder `create` fills: npm cache, vendored crates, prebuilt binaries.
+/offline-bundle/
+
+# =====================================================
 # Test coverage
 # =====================================================
 coverage/

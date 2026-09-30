@@ -6,8 +6,11 @@ Updated: 2026-09-24
 
 - Node.js ^20.19.0 or >=22.12.0 (required by Vite 7)
 - npm 10+
-- Rust toolchain and Cargo, Rust 1.86 or newer (`Cargo.lock` pins `icu_*` 2.2 crates, which need 1.86)
+- Rust toolchain and Cargo, Rust 1.88 or newer (`Cargo.lock` pins crates that need it, such as `time` 0.3.47 and `serde_with` 3.19.0)
 - WebView2 Runtime on Windows
+
+With no internet, `npm install`, `cargo` and the builds cannot fetch anything: see
+`AIRGAPPED.md` ("Build and test from source, offline") for the offline bundle.
 
 ## Run From Source
 

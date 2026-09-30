@@ -37,7 +37,9 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-30 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1151 tests / 72 files;
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1413 tests / 73 files, and 1
+skipped because it needs a non-root user (CI runs it; the suite was 1151 / 72 before
+the offline bundle's tests);
 `cargo test` passed, 143 tests (the 2 Windows-only tests are not compiled on
 Linux); `cargo test --no-default-features --features core` passed, 143 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
@@ -49,8 +51,19 @@ Also run by hand, not as tests: the hook script check end to end, with the real
 on the app's production build, every Tauri `invoke` answered by the real
 `harness-core`, a scripted OpenAI-compatible server as the model). Details are in
 `docs/DEVELOPMENT_LOG.md`.
+Offline bundle pass, the same day, on the final script (commit 0e95a27), not part of
+the test suite or CI: `npm run offline:bundle`, then `offline:setup` and
+`offline:verify` in a fresh clone in a network namespace with no route out and empty
+npm and cargo caches. Setup installed 271 packages and placed both prebuilt binaries,
+all 7 verify steps passed (with the vitest and `cargo test` counts above), and
+nothing was downloaded. Setup refused a damaged npm cache (naming the package, writing
+nothing) and a changed dependency, and accepted a bump of the project's own version,
+a reformatted lock and CRLF line endings; `create --force` repaired a damaged
+bundle. Details are in `docs/AIRGAPPED.md` and `docs/DEVELOPMENT_LOG.md`.
 Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
-`.py` hooks), macOS, the Tauri window and its IPC, and a live model.
+`.py` hooks), macOS, the Tauri window and its IPC, and a live model. Also not run:
+the offline bundle on Windows, on macOS and on a physically air-gapped machine. It
+does not cover the installer build.
 `.github/workflows/ci.yml` runs these checks and `harness run` against the real
 `harness-core` on every pull request and push to master.
 
@@ -81,6 +94,10 @@ Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
 - Sub-agents: `subagent_dispatch` (`src/services/execution/subAgents.ts`) starts helpers with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time. Helpers are recorded on the node's run (`AgentRun.subAgents`) and listed in `AgentActivityPanel`.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
 - Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
+- Offline build and test (`docs/AIRGAPPED.md`): `scripts/offline-bundle.mjs` collects every npm package and Rust crate that `package-lock.json` and `src-tauri/Cargo.lock` name, and prebuilt `harness-run.mjs` and `harness-core` for its own platform, so the source builds and tests with no internet. Only cargo stays offline afterwards (`.cargo/config.toml`); a plain `npm ci` goes to the registry. Verified on Linux x64 with no network route; not run on Windows or macOS.
+  - `npm run offline:bundle -- [<dir>] [--no-binaries] [--force]`: on a connected machine, after `npm ci`, from the repo root. Writes `npm-cache/`, `cargo-vendor/`, `bin/<platform>-<arch>/` and `MANIFEST.json`.
+  - `npm run offline:setup -- [<dir>]`: on the air-gapped machine, from the repo root. Refuses a bundle made for other dependencies or with a missing or damaged npm package (every refusal comes before the first change), runs `npm ci --offline`, writes a gitignored `.cargo/config.toml` (delete it to go back online), and installs the prebuilt binaries where they are missing.
+  - `npm run offline:verify [-- --skip a,b]`: runs `tsc`, `vitest`, `cargo-core`, `cargo-app`, `build-cli`, `build-core` and `vite-build`, prints a pass/fail table, and exits 1 if any step fails.
 - CLI:
   - `npm run harness -- project status`
   - `npm run harness -- provider list`
@@ -113,7 +130,7 @@ Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
 - Agents are independent in node ID, role, prompt, model, output, status, audit entries, and snapshots. They are not separate OS processes.
 - Streaming is real for native tool-calling turns; the text-protocol fallback and helper agents still show each reply after it arrives (typed out in chunks).
 - Context snapshots are partial and not a complete durable provider request trace. Run records (`.harness/runs/`) keep each agent's status, output and the audit, not the provider requests.
-- `harness run` shows each agent's reply when it is done (no streaming). `harness-core`'s Ctrl+C handling is tested on Linux in CI; on Windows it was checked once with a scripted console Ctrl+C, not by an automated test. There are no prebuilt `harness-core` binaries, and the app has no Resume button.
+- `harness run` shows each agent's reply when it is done (no streaming). `harness-core`'s Ctrl+C handling is tested on Linux in CI; on Windows it was checked once with a scripted console Ctrl+C, not by an automated test. No `harness-core` binaries are published: build it, or use the prebuilt one an offline bundle carries, for the platform it was made on only (`docs/AIRGAPPED.md`). The app has no Resume button.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
@@ -163,6 +180,7 @@ Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
 | `docs/DEPLOYMENT_READINESS.md` | Current readiness source of truth |
 | `docs/AIRGAPPED.md` | Offline / air-gapped deployment runbook |
 | `scripts/build-installer.ps1` | Installer build; `-Offline` embeds WebView2 |
+| `scripts/offline-bundle.mjs` | Offline bundle: `create`, `setup` and `verify` (`npm run offline:bundle`, `offline:setup`, `offline:verify`); see `docs/AIRGAPPED.md` |
 
 ## Next Best Work
 
@@ -172,5 +190,6 @@ Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
 4. Add installer smoke tests on a clean Windows user profile.
 5. Add a Windows CI job for the Windows-only Rust tests and the Tauri build (`.github/workflows/ci.yml` runs on Linux only).
 6. Close the moment between `execute_hook`'s last read of a hook script and the interpreter's own opening of the file, for example by running a private copy of the checked bytes.
+7. Build the Windows installer with no network: the Tauri bundler downloads WiX and NSIS utilities and WebView2 (the bootstrapper, or with `-Offline` the full offline installer), so the offline bundle does not cover it. The bundle also has not been run on Windows or macOS.
 
 
