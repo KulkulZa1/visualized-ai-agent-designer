@@ -33,7 +33,7 @@ pub struct HookResult {
 
 /// canonicalize() yields verbatim paths on Windows (`\\?\C:\x`, `\\?\UNC\host\share`),
 /// which cmd.exe, `powershell -File` and bash cannot open. Interpreters need the
-/// ordinary form.
+/// ordinary form. The hook check reads the path returned here: the one the interpreter opens.
 fn interpreter_path(path: &Path) -> String {
     let path = path.to_string_lossy();
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
@@ -43,6 +43,22 @@ fn interpreter_path(path: &Path) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// The characters cmd.exe reads as more than a file name in the path it is asked to run: it
+/// takes that text as a command line. `&`, `|`, `<`, `>` and `^` are operators or the escape;
+/// `%` (and `!`, where delayed expansion is on) expands a variable; `,`, `;` and `=` end the name
+/// of a command that is not quoted. Rust quotes a path only if it has a space, and if that path
+/// also has `(`, `)`, `@` or one of the operators, the quote rule of cmd's `/C` drops the quotes
+/// and the path splits at its space. So `C:\ws\x&evil\gate.bat` runs `C:\ws\x`, then
+/// `evil\gate.bat`: not the file that was checked.
+const CMD_SPECIAL_CHARS: [char; 13] =
+    ['&', '|', '<', '>', '^', '%', '!', '(', ')', '@', ',', ';', '='];
+
+/// Whether cmd.exe runs the file at `path` as written. Spaces alone are fine: Rust quotes such a
+/// path, and cmd keeps the quotes.
+fn cmd_runs_path_as_written(path: &str) -> bool {
+    !path.contains(CMD_SPECIAL_CHARS)
 }
 
 /// The first line of what a hook fingerprint hashes; it names the encoding (see
@@ -142,8 +158,9 @@ pub fn execute_hook(
     // The node's timeoutSeconds; defaults to HOOK_TIMEOUT_SECS, bounded to 1 s–1 h.
     timeout_secs: Option<u64>,
     // What hook_fingerprint gave for this script and `env` when the caller checked them. When
-    // given, the hook starts only if the script and `env` still have it; None starts it
-    // without that check (the Hooks tab's manual runs).
+    // given, the hook starts only if the script and `env` still have it, and, through cmd.exe,
+    // only from a path cmd.exe runs as written; None starts it without those checks (the Hooks
+    // tab's manual runs).
     expected_fingerprint: Option<String>,
 ) -> AppResult<HookResult> {
     if !consent_granted {
@@ -173,6 +190,20 @@ pub fn execute_hook(
         "py" => ("python", vec![hook_arg]),
         _ => ("cmd.exe", vec!["/C".into(), hook_arg]),
     };
+
+    // cmd.exe takes the path as a command line (see CMD_SPECIAL_CHARS), so it can run something
+    // other than the file that was checked, and a read of that path does not show it. A hook that
+    // runs without asking is not started through it from such a path.
+    if expected_fingerprint.is_some()
+        && program == "cmd.exe"
+        && !cmd_runs_path_as_written(&script_file)
+    {
+        let special = CMD_SPECIAL_CHARS.map(String::from).join(" ");
+        return Err(AppError::HookExecution(format!(
+            "Hook script {hook_path} is at {script_file}, a path cmd.exe would not run as written \
+             (it contains one of {special}), so it was not run; move it to a path without them."
+        )));
+    }
 
     let mut env_vars = HashMap::from([
         ("AGENT_ID".to_string(), agent_id),
@@ -852,7 +883,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_link_is_fingerprinted_as_its_target() {
-        // resolve_safe_path follows links, and the resolved path is what execute_hook runs.
+        // resolve_safe_path follows links, and the resolved path, as text (interpreter_path), is
+        // what execute_hook runs.
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.sh"), "echo a\n").unwrap();
         fs::write(dir.path().join("b.sh"), "echo b\n").unwrap();
@@ -1056,7 +1088,11 @@ mod tests {
         // same fingerprint. The interpreter is given that name with U+FFFD for the byte: another
         // file, and a script that leaves a marker.
         let copy = dir.path().join(OsStr::from_bytes(b"hook\xff.sh"));
-        fs::write(&copy, "echo hook-ran\n").unwrap();
+        if fs::write(&copy, "echo hook-ran\n").is_err() {
+            // The filesystem refuses a name that is not UTF-8 (ZFS with utf8only): nothing to test.
+            eprintln!("skipped: the filesystem refuses a name that is not UTF-8");
+            return;
+        }
         fs::write(dir.path().join("hook\u{FFFD}.sh"), writes_the_marker()).unwrap();
         fs::remove_file(dir.path().join("hook.sh")).unwrap();
         std::os::unix::fs::symlink(&copy, dir.path().join("hook.sh")).unwrap();
@@ -1117,6 +1153,82 @@ mod tests {
             "{fingerprinted:?}"
         );
         assert_refused_as_changed(&run, HOOK);
+    }
+
+    #[test]
+    fn cmd_runs_a_path_as_written_unless_it_has_a_character_it_reads_as_syntax() {
+        // Each, in a folder's name and in a file's: an operator, the escape, an expansion or a
+        // delimiter to cmd.exe.
+        for special in "&|<>^%!()@,;=".chars() {
+            for path in [format!(r"C:\ws\x{special}y\gate.bat"), format!(r"C:\ws\gate{special}.bat")] {
+                assert!(!cmd_runs_path_as_written(&path), "{path}");
+            }
+        }
+        // A plain path, and paths with spaces: Rust quotes those, and cmd keeps the quotes.
+        for path in [
+            r"C:\ws\hooks\gate.bat",
+            r"C:\Users\Ann Smith\my ws\gate.bat",
+            r"\\host\share\ws\gate.bat",
+            "/tmp/a b/gate.bat",
+        ] {
+            assert!(cmd_runs_path_as_written(path), "{path}");
+        }
+    }
+
+    /// A `.bat` (or any hook that is not a script for another interpreter) is started through
+    /// cmd.exe on every platform, so this runs on Linux too: the refusal comes before anything
+    /// starts, and a start that failed (Linux has no cmd.exe) would be another error.
+    #[test]
+    fn a_hook_that_runs_without_asking_is_refused_at_a_path_cmd_would_not_run_as_written() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("x&y")).unwrap();
+        fs::write(dir.path().join("x&y/gate.bat"), writes_the_marker()).unwrap();
+        let fingerprint = fingerprint_of(dir.path(), "x&y/gate.bat", None);
+
+        // With the fingerprint that was checked, and with one that is not: the path is refused first.
+        for expected in [fingerprint.as_str(), "not-a-fingerprint"] {
+            let result = run_checked(dir.path(), "x&y/gate.bat", None, Some(expected));
+            assert!(
+                matches!(&result, Err(AppError::HookExecution(message))
+                    if message.contains("Hook script x&y/gate.bat is at ")
+                        && message.contains("a path cmd.exe would not run as written")
+                        && message.contains("(it contains one of & | < > ^ % ! ( ) @ , ; =)")
+                        && message.contains("so it was not run")),
+                "{result:?}"
+            );
+        }
+        assert!(!dir.path().join("marker.txt").exists(), "the hook ran");
+    }
+
+    /// The refusal is for cmd.exe only: bash reads the path as it is, whatever it has in it.
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_for_bash_runs_from_a_path_with_characters_cmd_reads_as_syntax() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("x&y (1),z")).unwrap();
+        fs::write(dir.path().join("x&y (1),z/hook.sh"), "echo hook-ran\n").unwrap();
+        let fingerprint = fingerprint_of(dir.path(), "x&y (1),z/hook.sh", None);
+
+        let output = run_checked(dir.path(), "x&y (1),z/hook.sh", None, Some(&fingerprint)).unwrap();
+
+        assert!(output.stdout.contains("hook-ran"), "{output:?}");
+    }
+
+    /// Without a fingerprint (the Hooks tab) the path is not refused: whatever the start does next
+    /// (Linux has no cmd.exe) is not this refusal.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_hook_without_a_fingerprint_is_not_refused_for_its_path() {
+        let dir = tempdir().unwrap();
+        fs::create_dir(dir.path().join("x&y")).unwrap();
+        fs::write(dir.path().join("x&y/gate.bat"), writes_the_marker()).unwrap();
+
+        let result = run_checked(dir.path(), "x&y/gate.bat", None, None);
+
+        assert!(
+            !matches!(&result, Err(AppError::HookExecution(message)) if message.contains("would not run as written")),
+            "{result:?}"
+        );
     }
 
     #[test]
