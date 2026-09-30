@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_PROVIDER_CATALOG } from "@/services/model-providers/providerCatalog";
 
 const root = resolve(__dirname, "../../..");
 const cliPath = join(root, "cli", "harness.mjs");
@@ -117,6 +118,21 @@ describe("harness CLI v0 subprocess", () => {
     expect(providers.find((provider) => provider.id === "openai")?.credentialRef).toBe(
       "env:OPENAI_API_KEY",
     );
+  });
+
+  it("reports native tool calling for Ollama and streaming and tool calling for the OpenAI-compatible endpoint, as the app's catalog does", () => {
+    const result = runHarness(["provider", "list", "--json"]);
+
+    const providers = JSON.parse(result.stdout) as Array<{ id: string; capabilities: Record<string, boolean> }>;
+    const capabilities = (id: string) => providers.find((provider) => provider.id === id)?.capabilities;
+    expect(capabilities("ollama")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("ollama-cloud")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("openai-compatible")).toMatchObject({ streaming: true, toolCalling: true });
+    // [KEEP-IN-SYNC] the CLI keeps its own copy of the catalog: no provider's flags may drift from the app's.
+    for (const provider of providers) {
+      expect(provider.capabilities, provider.id)
+        .toEqual(DEFAULT_PROVIDER_CATALOG.find((entry) => entry.id === provider.id)?.capabilities);
+    }
   });
 
   it("validates the purchasing decision demo", () => {

@@ -42,8 +42,13 @@ export interface RunRecord {
   /** The workflow file, relative to the workspace, and the SHA-256 of its text (harness run). */
   workflow: { name: string; path: string | null; hash: string | null };
   task: string;
-  /** The run's provider settings, without keys. */
-  provider: Omit<ProviderSettings, "apiKey" | "openaiApiKey" | "ollamaApiKey" | "customApiKey">;
+  /** The run's provider settings, without keys and without the model call timeout. `ollamaNumCtx` is
+   *  Ollama's context window for the run (0: none was sent); absent in a record from before it existed.
+   *  Recorded, never compared: a resume reuses finished agents whatever the window was. */
+  provider: Omit<
+    ProviderSettings,
+    "apiKey" | "openaiApiKey" | "ollamaApiKey" | "customApiKey" | "ollamaNumCtx" | "requestTimeoutSecs"
+  > & { ollamaNumCtx?: number };
   status: WorkflowRun["status"];
   startedAt: number;
   finishedAt?: number;

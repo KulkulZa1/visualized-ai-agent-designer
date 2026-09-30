@@ -313,3 +313,99 @@ describe("callChatTurn", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
+
+// ── Ollama's context window and the model call timeout ─────────────────────────
+
+describe("Ollama's context window and the model call timeout", () => {
+  const reply = { text: "ok", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+  const turnParams = (overrides: Partial<ChatTurnParams> = {}): ChatTurnParams => {
+    const { userMsg: _unused, ...base } = makeParams();
+    return { ...base, messages: [{ role: "user", text: "hi" }], tools: [], ...overrides };
+  };
+  /** The arguments the one invoke got. */
+  const argsOf = (spy: ReturnType<typeof vi.fn>) => spy.mock.calls[0][1] as Record<string, unknown>;
+
+  it("sends an Ollama text call the window and the timeout", async () => {
+    const spy = vi.fn().mockResolvedValue("ok");
+    await callProvider(
+      makeParams({ provider: "ollama", apiKey: "", requiresKey: false, ollamaNumCtx: 8192, requestTimeoutSecs: 1800 }),
+      spy as unknown as InvokeFn,
+    );
+    expect(spy).toHaveBeenCalledWith("call_ollama_api", expect.objectContaining({ numCtx: 8192, requestTimeoutSecs: 1800 }));
+  });
+
+  it("sends 0 as it is, and sends neither when the caller has none (the commands' defaults apply)", async () => {
+    const zero = vi.fn().mockResolvedValue("ok");
+    await callProvider(makeParams({ provider: "ollama", ollamaNumCtx: 0 }), zero as unknown as InvokeFn);
+    expect(argsOf(zero).numCtx).toBe(0);
+
+    const none = vi.fn().mockResolvedValue("ok");
+    await callProvider(makeParams({ provider: "ollama" }), none as unknown as InvokeFn);
+    expect(argsOf(none)).not.toHaveProperty("numCtx");
+    expect(argsOf(none)).not.toHaveProperty("requestTimeoutSecs");
+  });
+
+  it("sends the window to Ollama Cloud's command too: the backend leaves it out for ollama.com by the host", async () => {
+    const spy = vi.fn().mockResolvedValue("ok");
+    await callProvider(
+      makeParams({ provider: "ollama-cloud", ollamaBaseUrl: "http://192.168.1.20:11434", ollamaNumCtx: 4096 }),
+      spy as unknown as InvokeFn,
+    );
+    expect(argsOf(spy)).toMatchObject({ baseUrl: "http://192.168.1.20:11434", numCtx: 4096 });
+  });
+
+  it("sends the timeout, and no window, to a Custom endpoint, OpenAI and Anthropic", async () => {
+    for (const [provider, command, extra] of [
+      ["openai-compatible", "call_openai_api", { customBaseUrl: "http://localhost:8080/v1" }],
+      ["openai", "call_openai_api", {}],
+      ["anthropic", "call_claude_api", { model: "claude-haiku-4.5" }],
+    ] as const) {
+      const spy = vi.fn().mockResolvedValue("ok");
+      await callProvider(makeParams({ provider, ollamaNumCtx: 8192, requestTimeoutSecs: 900, ...extra }), spy as unknown as InvokeFn);
+      expect(spy).toHaveBeenCalledWith(command, expect.objectContaining({ requestTimeoutSecs: 900 }));
+      expect(argsOf(spy), provider).not.toHaveProperty("numCtx");
+    }
+  });
+
+  it("gives the billing fallback to local Ollama the window and the timeout", async () => {
+    const spy = vi.fn()
+      .mockRejectedValueOnce(new Error("billing: insufficient quota"))
+      .mockResolvedValueOnce("fallback");
+    await callProvider(makeParams({ ollamaNumCtx: 6000, requestTimeoutSecs: 1200 }), spy as unknown as InvokeFn);
+    expect(spy).toHaveBeenLastCalledWith("call_ollama_api", expect.objectContaining({ numCtx: 6000, requestTimeoutSecs: 1200 }));
+  });
+
+  it("sends an Ollama turn the window and the timeout", async () => {
+    const spy = vi.fn(async () => reply);
+    await callChatTurn(
+      turnParams({ provider: "ollama", ollamaNumCtx: 8192, requestTimeoutSecs: 1800 }), spy as unknown as InvokeFn,
+    );
+    expect(spy).toHaveBeenCalledWith("chat_turn", expect.objectContaining({ numCtx: 8192, requestTimeoutSecs: 1800 }));
+  });
+
+  it("sends a turn 0, or nothing, as the caller has it", async () => {
+    const zero = vi.fn(async () => reply);
+    await callChatTurn(turnParams({ provider: "ollama-cloud", ollamaNumCtx: 0 }), zero as unknown as InvokeFn);
+    expect((zero.mock.calls[0] as unknown[])[1]).toMatchObject({ numCtx: 0 });
+
+    const none = vi.fn(async () => reply);
+    await callChatTurn(turnParams({ provider: "ollama" }), none as unknown as InvokeFn);
+    const args = (none.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+    expect(args).not.toHaveProperty("numCtx");
+    expect(args).not.toHaveProperty("requestTimeoutSecs");
+  });
+
+  it("sends the timeout, and no window, with the turn of a Custom endpoint, OpenAI and Anthropic", async () => {
+    for (const overrides of [
+      { provider: "openai-compatible", customBaseUrl: "http://localhost:8080/v1", apiKey: "" },
+      { provider: "openai" },
+      { provider: "anthropic", model: "claude-haiku-4.5" },
+    ] as const) {
+      const spy = vi.fn(async () => reply);
+      await callChatTurn(turnParams({ ...overrides, ollamaNumCtx: 8192, requestTimeoutSecs: 900 }), spy as unknown as InvokeFn);
+      const args = (spy.mock.calls[0] as unknown[])[1] as Record<string, unknown>;
+      expect(args.requestTimeoutSecs, overrides.provider).toBe(900);
+      expect(args, overrides.provider).not.toHaveProperty("numCtx");
+    }
+  });
+});

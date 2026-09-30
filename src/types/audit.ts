@@ -10,6 +10,7 @@ export type AuditAction =
   // saved to .harness/audit.log.jsonl.
   | "provider_check"
   | "provider_fallback"
+  | "context_window"
   | "agent_started"
   | "agent_finished"
   | "agent_failed"

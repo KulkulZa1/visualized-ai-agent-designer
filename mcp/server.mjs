@@ -111,7 +111,7 @@ const PROVIDER_CATALOG = [
     isLocal: false,
     enabled: false,
     status: "not_configured",
-    capabilities: { streaming: false, toolCalling: false, modelListing: false, tokenCostEstimate: false },
+    capabilities: { streaming: true, toolCalling: true, modelListing: false, tokenCostEstimate: false },
   },
   {
     id: "ollama",
@@ -122,7 +122,7 @@ const PROVIDER_CATALOG = [
     isLocal: true,
     enabled: true,
     status: "unknown",
-    capabilities: { streaming: true, toolCalling: false, modelListing: true, tokenCostEstimate: false },
+    capabilities: { streaming: true, toolCalling: true, modelListing: true, tokenCostEstimate: false },
   },
   {
     id: "cloud-placeholder",
@@ -144,7 +144,7 @@ const PROVIDER_CATALOG = [
     isLocal: false,
     enabled: true,
     status: "unknown",
-    capabilities: { streaming: true, toolCalling: false, modelListing: true, tokenCostEstimate: false },
+    capabilities: { streaming: true, toolCalling: true, modelListing: true, tokenCostEstimate: false },
   },
   {
     id: "gemini",

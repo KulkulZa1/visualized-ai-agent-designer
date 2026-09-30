@@ -14,8 +14,12 @@ import { NodeIcon } from "@/components/nodes/NodeIcon";
 import { useExecutionStore } from "@/store/executionStore";
 import {
   DEFAULT_OLLAMA_CLOUD_BASE_URL,
+  MAX_REQUEST_TIMEOUT_SECS,
+  MIN_REQUEST_TIMEOUT_SECS,
   isOllamaCloudUrl,
   isRemoteOllamaUrl,
+  parseNumCtx,
+  parseRequestTimeoutSecs,
   type LlmProvider,
 } from "@/utils/providerConfig";
 import { ProviderRegistrySection } from "@/components/layout/ProviderRegistrySection";
@@ -70,8 +74,8 @@ const Divider = () => (
   <div style={{ height: 1, background: "var(--border)", margin: "18px 0" }}/>
 );
 
-const Hint = ({ children }: { children: React.ReactNode }) => (
-  <div style={{ fontSize: 10, color: "var(--hint)", marginTop: 4 }}>{children}</div>
+const Hint = ({ children, error }: { children: React.ReactNode; error?: boolean }) => (
+  <div style={{ fontSize: 10, color: error ? "var(--red)" : "var(--hint)", marginTop: 4 }}>{children}</div>
 );
 
 // ── Status badge ─────────────────────────────────────────────────────────────
@@ -367,6 +371,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     llmProvider, setLlmProvider,
     ollamaBaseUrl, setOllamaBaseUrl,
     ollamaModel, setOllamaModel,
+    ollamaNumCtx, setOllamaNumCtx,
+    requestTimeoutSecs, setRequestTimeoutSecs,
     continueOnError, setContinueOnError,
   } = useExecutionStore();
 
@@ -376,6 +382,11 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const [ollamaUrlDraft,   setOllamaUrlDraft]   = useState(ollamaBaseUrl);
   const [ollamaKeyDraft,   setOllamaKeyDraft]   = useState(ollamaApiKey);
   const [ollamaModelDraft, setOllamaModelDraft] = useState(ollamaModel);
+  // The numbers are typed as text: a half-typed value must not be rewritten under the cursor.
+  const [numCtxDraft,      setNumCtxDraft]      = useState(String(ollamaNumCtx));
+  const [timeoutDraft,     setTimeoutDraft]     = useState(String(requestTimeoutSecs));
+  const numCtxValid  = parseNumCtx(numCtxDraft) !== null;
+  const timeoutValid = parseRequestTimeoutSecs(timeoutDraft) !== null;
   // Custom OpenAI-compatible endpoint — backed by executionStore
   const [customUrl,   setCustomUrl]   = useState(customApiUrl);
   const [customKey,   setCustomKey]   = useState(customApiKey);
@@ -530,7 +541,12 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
     setOllamaModel(ollamaModelDraft.trim());
     setCustomApiUrl(customUrl.trim());
     setCustomApiKey(customKey.trim());
-    setCustomApiModel(customModel.trim() || "gpt-4o-mini");
+    // Blank stays blank: each agent's own model is sent, never a hosted model's name we picked.
+    setCustomApiModel(customModel.trim());
+    const numCtx = parseNumCtx(numCtxDraft);
+    if (numCtx !== null) setOllamaNumCtx(numCtx);
+    const timeout = parseRequestTimeoutSecs(timeoutDraft);
+    if (timeout !== null) setRequestTimeoutSecs(timeout);
     onClose();
   }
 
@@ -852,6 +868,32 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             />
           </div>
 
+          {/* Context window: Ollama cuts a prompt that does not fit it, without a word */}
+          <div style={{ marginTop: 12 }}>
+            <label htmlFor="ollama-num-ctx" style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 5 }}>
+              Ollama context window (tokens)
+              <span style={{ color: "var(--hint)" }}>
+                {" "}— sent to Ollama as num_ctx. It overrides the server's own default (for example
+                OLLAMA_CONTEXT_LENGTH); 0 uses the server default. Not sent to ollama.com.
+              </span>
+            </label>
+            <input
+              id="ollama-num-ctx"
+              type="number"
+              min={0}
+              step={1024}
+              value={numCtxDraft}
+              onChange={(e) => setNumCtxDraft(e.target.value)}
+              style={{
+                width: "100%", boxSizing: "border-box",
+                padding: "8px 11px", borderRadius: 6, fontSize: 12,
+                border: `1px solid ${numCtxValid ? "var(--border-md)" : "var(--red)"}`,
+                background: "var(--bg)", color: "var(--text)", fontFamily: MONO, outline: "none",
+              }}
+            />
+            {!numCtxValid && <Hint error>Enter a whole number of tokens, 0 or more.</Hint>}
+          </div>
+
           {/* Installed models — collapsed until fetched */}
           <ModelDropdown
             label={ollamaInstalled.length ? "Installed models" : "Models"}
@@ -930,16 +972,16 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             placeholder="API key (if required)"
             onEnter={testCustom}
           />
-          {/* Model name — required for execution */}
+          {/* Model name — blank sends each agent's own model */}
           <div style={{ marginTop: 6 }}>
             <label style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 4 }}>
-              Model name <span style={{ color: "var(--hint)" }}>— used when this provider is active</span>
+              Model name <span style={{ color: "var(--hint)" }}>— used when this provider is active; blank sends each agent's own model</span>
             </label>
             <input
               type="text"
               value={customModel}
               onChange={(e) => setCustomModel(e.target.value)}
-              placeholder="gpt-4o-mini  /  mistral  /  llama3.1:8b"
+              placeholder="the model your server serves, e.g. llama3.1:8b"
               style={{
                 width: "100%", boxSizing: "border-box",
                 padding: "8px 11px", borderRadius: 6, fontSize: 12,
@@ -962,7 +1004,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               <Btn primary onClick={() => {
                 setCustomApiUrl(customUrl.trim());
                 setCustomApiKey(customKey.trim());
-                setCustomApiModel(customModel.trim() || "gpt-4o-mini");
+                setCustomApiModel(customModel.trim());
               }} small>Save</Btn>
             </div>
           )}
@@ -1002,6 +1044,32 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               <Hint>Skip failing agents and continue with the rest of the workflow.</Hint>
             </div>
           </label>
+
+          <div style={{ marginTop: 14 }}>
+            <label htmlFor="request-timeout" style={{ fontSize: 12, display: "block", marginBottom: 5 }}>
+              Model call timeout (seconds)
+            </label>
+            <input
+              id="request-timeout"
+              type="number"
+              min={MIN_REQUEST_TIMEOUT_SECS}
+              max={MAX_REQUEST_TIMEOUT_SECS}
+              value={timeoutDraft}
+              onChange={(e) => setTimeoutDraft(e.target.value)}
+              style={{
+                width: "100%", boxSizing: "border-box",
+                padding: "8px 11px", borderRadius: 6, fontSize: 12,
+                border: `1px solid ${timeoutValid ? "var(--border-md)" : "var(--red)"}`,
+                background: "var(--bg)", color: "var(--text)", fontFamily: MONO, outline: "none",
+              }}
+            />
+            {timeoutValid
+              ? <Hint>
+                  How long one model call may take in total, from {MIN_REQUEST_TIMEOUT_SECS} to {MAX_REQUEST_TIMEOUT_SECS} seconds.
+                  A slow local model may need more than the default 600. An agent's own Timeout still applies.
+                </Hint>
+              : <Hint error>Enter whole seconds from {MIN_REQUEST_TIMEOUT_SECS} to {MAX_REQUEST_TIMEOUT_SECS}.</Hint>}
+          </div>
         </div>
 
         {/* Provider registry */}
@@ -1013,8 +1081,13 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
           padding: "12px 20px", borderTop: "1px solid var(--border)",
           background: "var(--surface)",
         }}>
+          {(!numCtxValid || !timeoutValid) && (
+            <span style={{ flex: 1, alignSelf: "center", fontSize: 10, color: "var(--red)" }}>
+              Fix the highlighted number to save.
+            </span>
+          )}
           <Btn onClick={onClose}>Cancel</Btn>
-          <Btn primary onClick={saveAll}>Save all &amp; close</Btn>
+          <Btn primary onClick={saveAll} disabled={!numCtxValid || !timeoutValid}>Save all &amp; close</Btn>
         </div>
       </div>
     </div>

@@ -43,7 +43,8 @@ function workspace(replies: Record<string, string[]>, extra: Record<string, unkn
   return dir;
 }
 
-function harnessRun(dir: string, args: string[]) {
+/** `env` adds to the environment the run is given: the options `harness run` also reads from it start out unset. */
+function harnessRun(dir: string, args: string[], env: Record<string, string> = {}) {
   const result = spawnSync(process.execPath, [
     join(root, "cli", "harness.mjs"), "run", join(dir, "review.harness.yaml"),
     "--workspace", dir, "--core", fakeCore, ...args,
@@ -52,6 +53,9 @@ function harnessRun(dir: string, args: string[]) {
     env: {
       ...process.env, FAKE_CORE_SCENARIO: join(dir, "scenario.json"), FAKE_CORE_LOG: join(dir, "core.log"),
       OPENAI_API_KEY: "", ANTHROPIC_API_KEY: "", LLM_PROVIDER: "",
+      HARNESS_OLLAMA_NUM_CTX: "", HARNESS_REQUEST_TIMEOUT_SECS: "", HARNESS_CUSTOM_BASE_URL: "",
+      HARNESS_CUSTOM_MODEL: "", HARNESS_CUSTOM_API_KEY: "",
+      ...env,
     },
   });
   const log = join(dir, "core.log");
@@ -270,6 +274,143 @@ describe("harness run", { timeout: 60_000 }, () => {
     const yaml = readFileSync(join(dir, "review.harness.yaml"), "utf8");
     writeFileSync(join(dir, "review.harness.yaml"), yaml.replace("name: Code Review", "name: Other Workflow"));
     expect(harnessRun(dir, ["--resume", runId]).status).toBe(2);
+  });
+
+  describe("the local model server options", () => {
+    type Request = { cmd: string; args: Record<string, unknown> };
+    /** The arguments of the model calls (the native turn and the text call) of the agent named `agent`. */
+    const modelCalls = (requests: Request[], agent: string) => requests.filter((r) =>
+      ["chat_turn", "call_ollama_api", "call_openai_api"].includes(r.cmd) && String(r.args.system).startsWith(`You are ${agent},`));
+    const savedProvider = (dir: string, stdout: string) =>
+      (JSON.parse(readFileSync(join(dir, lastEvent(stdout).trace), "utf8")) as { provider: Record<string, unknown> }).provider;
+
+    it("sends Ollama a 16384-token context window and a 600 s timeout, and records the window", () => {
+      const dir = workspace({ Coder: ["wrote the fix"], Reviewer: ["Looks good."] });
+
+      const run = harnessRun(dir, ["--task", "t", "--json"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      const calls = [...modelCalls(run.requests, "Coder"), ...modelCalls(run.requests, "Reviewer")];
+      expect(calls.map((c) => c.cmd).sort()).toEqual(["call_ollama_api", "call_ollama_api", "chat_turn"]);
+      for (const call of calls) expect(call.args).toMatchObject({ numCtx: 16384, requestTimeoutSecs: 600 });
+      // Exactly what the record holds of the run's provider: the window is in it, the timeout is not.
+      expect(savedProvider(dir, run.stdout)).toEqual({
+        llmProvider: "auto", ollamaBaseUrl: "", ollamaModel: "", customApiUrl: "", customApiModel: "", ollamaNumCtx: 16384,
+      });
+    });
+
+    it("takes the window and the timeout from --num-ctx and --request-timeout, and from the environment when no flag is given", () => {
+      const flags = harnessRun(workspace({}), ["--task", "t", "--num-ctx", "4096", "--request-timeout", "1800"]);
+      expect(flags.status, flags.stderr).toBe(0);
+      for (const call of modelCalls(flags.requests, "Reviewer")) {
+        expect(call.args).toMatchObject({ numCtx: 4096, requestTimeoutSecs: 1800 });
+      }
+
+      const env = { HARNESS_OLLAMA_NUM_CTX: "8192", HARNESS_REQUEST_TIMEOUT_SECS: "900" };
+      const fromEnv = harnessRun(workspace({}), ["--task", "t"], env);
+      expect(fromEnv.status, fromEnv.stderr).toBe(0);
+      for (const call of modelCalls(fromEnv.requests, "Reviewer")) {
+        expect(call.args).toMatchObject({ numCtx: 8192, requestTimeoutSecs: 900 });
+      }
+
+      const both = harnessRun(workspace({}), ["--task", "t", "--num-ctx", "0", "--request-timeout", "60", "--json"], env);
+      expect(both.status, both.stderr).toBe(0);
+      for (const call of modelCalls(both.requests, "Reviewer")) {
+        expect(call.args).toMatchObject({ numCtx: 0, requestTimeoutSecs: 60 });
+      }
+    });
+
+    it("records 0, and exits 2 for a value that is not a whole number, before harness-core is started", () => {
+      const dir = workspace({});
+      const zero = harnessRun(dir, ["--task", "t", "--json"], { HARNESS_OLLAMA_NUM_CTX: "0" });
+      expect(savedProvider(dir, zero.stdout)).toMatchObject({ ollamaNumCtx: 0 });
+
+      const badFlag = harnessRun(workspace({}), ["--task", "t", "--num-ctx", "lots"]);
+      expect(badFlag.status).toBe(2);
+      expect(badFlag.stderr).toContain("--num-ctx must be a whole number of tokens, 0 or more");
+      const badEnv = harnessRun(workspace({}), ["--task", "t"], { HARNESS_REQUEST_TIMEOUT_SECS: "5" });
+      expect(badEnv.status).toBe(2);
+      expect(badEnv.stderr).toContain("HARNESS_REQUEST_TIMEOUT_SECS must be a whole number of seconds from 30 to 86400");
+      expect(badEnv.requests).toEqual([]);
+    });
+
+    it("warns on stderr, as the run starts an agent, that its prompt does not fit the context window", () => {
+      const run = harnessRun(workspace({ Coder: ["done"], Reviewer: ["fine"] }), ["--task", "x".repeat(10_000), "--num-ctx", "2048"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      const warnings = run.stderr.split("\n").filter((line) => line.startsWith("warning: ⚠ Coder:"));
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("Raise the context window (Settings → Ollama context window; harness run: --num-ctx).");
+      expect(run.stdout).not.toContain("context window"); // stdout is the run's own lines
+    });
+
+    it("says it as a JSON event with --json, and keeps stderr free of it", () => {
+      const run = harnessRun(workspace({}), ["--task", "x".repeat(10_000), "--num-ctx", "2048", "--json"]);
+
+      const events = run.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+      const warned = events.filter((e) => String(e.details).includes("context window"));
+      expect(warned).toMatchObject([{ type: "audit", nodeId: "agent-0", success: true, warning: true }]);
+      expect(run.stderr).not.toContain("context window");
+    });
+
+    it("runs on a Custom endpoint given by the environment alone, with no flag", () => {
+      const dir = workspace({ Coder: ["wrote the fix"], Reviewer: ["Looks good."] });
+
+      const run = harnessRun(dir, ["--task", "t", "--json"], {
+        LLM_PROVIDER: "openai-compatible", HARNESS_CUSTOM_BASE_URL: "http://localhost:8080/v1",
+        HARNESS_CUSTOM_MODEL: "my-local-model", HARNESS_CUSTOM_API_KEY: "local-key",
+      });
+
+      expect(run.status, run.stderr).toBe(0);
+      const probe = run.requests.find((r) => r.cmd === "check_provider_health");
+      expect(probe?.args).toMatchObject({
+        provider: "openai-compatible", baseUrl: "http://localhost:8080/v1", model: "my-local-model", apiKey: "local-key",
+      });
+      const calls = run.requests.filter((r) => r.cmd === "call_openai_api");
+      expect(calls).toHaveLength(2);
+      for (const call of calls) {
+        expect(call.args).toMatchObject({ baseUrl: "http://localhost:8080/v1", model: "my-local-model", requestTimeoutSecs: 600 });
+        expect(call.args).not.toHaveProperty("numCtx");
+      }
+      expect(JSON.stringify(run.requests)).not.toContain("gpt-4o-mini");
+      expect(savedProvider(dir, run.stdout)).toMatchObject({
+        customApiUrl: "http://localhost:8080/v1", customApiModel: "my-local-model",
+      });
+    });
+
+    it("takes --provider openai-compatible with only the variable for the URL, and the flags win over the variables", () => {
+      const env = { HARNESS_CUSTOM_BASE_URL: "http://from-env/v1", HARNESS_CUSTOM_MODEL: "env-model" };
+
+      const fromEnv = harnessRun(workspace({}), ["--task", "t", "--provider", "openai-compatible"], env);
+      expect(fromEnv.status, fromEnv.stderr).toBe(0);
+      expect(fromEnv.requests.find((r) => r.cmd === "check_provider_health")?.args)
+        .toMatchObject({ baseUrl: "http://from-env/v1", model: "env-model" });
+
+      const flags = harnessRun(workspace({}),
+        ["--task", "t", "--provider", "openai-compatible", "--base-url", "http://from-flag/v1", "--model", "flag-model"], env);
+      expect(flags.status, flags.stderr).toBe(0);
+      expect(flags.requests.find((r) => r.cmd === "check_provider_health")?.args)
+        .toMatchObject({ baseUrl: "http://from-flag/v1", model: "flag-model" });
+      expect(flags.requests.find((r) => r.cmd === "call_openai_api")?.args).toMatchObject({ model: "flag-model" });
+    });
+
+    it("probes, and sends each agent, the agent's own model when no model was given for the Custom endpoint", () => {
+      const run = harnessRun(workspace({}), ["--task", "t", "--provider", "openai-compatible", "--base-url", "http://llm/v1"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      // The workflow's agents are on qwen2.5-coder:7b; nothing of ours is asked of the server.
+      expect(run.requests.find((r) => r.cmd === "check_provider_health")?.args).toMatchObject({ model: "qwen2.5-coder:7b" });
+      for (const call of run.requests.filter((r) => r.cmd === "call_openai_api")) {
+        expect(call.args.model).toBe("qwen2.5-coder:7b");
+      }
+    });
+
+    it("still fails for LLM_PROVIDER=openai-compatible with no URL from a flag or the environment", () => {
+      const run = harnessRun(workspace({}), ["--task", "t"], { LLM_PROVIDER: "openai-compatible" });
+
+      expect(run.status).toBe(3);
+      expect(run.stderr).toContain("Custom endpoint URL is not configured");
+    });
   });
 
   it("exits 3 when harness-core is missing or the provider preflight fails", () => {

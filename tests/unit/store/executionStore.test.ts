@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { useExecutionStore } from "@/store/executionStore";
 
 beforeEach(() => {
@@ -162,5 +162,68 @@ describe("executionStore — clearRun", () => {
     expect(currentRun()).toMatchObject({ id: "run-2", workflowName: "Next" });
     expect(currentRun()?.agentsCleared).toBeUndefined();
     expect(currentRun()?.agents["agent-0"]?.status).toBe("running");
+  });
+});
+
+describe("executionStore — the local model server settings", () => {
+  // The store reads localStorage when it is created: a fresh copy of it shows what a new session starts with.
+  async function freshStore() {
+    vi.resetModules();
+    return (await import("@/store/executionStore")).useExecutionStore;
+  }
+  beforeEach(() => localStorage.clear());
+
+  it("starts with no Custom model name, a 16384-token Ollama context window and a 600 s model call timeout", async () => {
+    const store = await freshStore();
+
+    expect(store.getState()).toMatchObject({ customApiModel: "", ollamaNumCtx: 16384, requestTimeoutSecs: 600 });
+  });
+
+  it("keeps a blank Custom model name blank: no hosted model's name is filled in", async () => {
+    const store = await freshStore();
+
+    store.getState().setCustomApiModel("");
+
+    expect(store.getState().customApiModel).toBe("");
+    expect((await freshStore()).getState().customApiModel).toBe("");
+  });
+
+  it("saves the context window and the timeout, and a new session starts with them", async () => {
+    const store = await freshStore();
+
+    store.getState().setOllamaNumCtx(32768);
+    store.getState().setRequestTimeoutSecs(3600);
+
+    expect(store.getState()).toMatchObject({ ollamaNumCtx: 32768, requestTimeoutSecs: 3600 });
+    expect((await freshStore()).getState()).toMatchObject({ ollamaNumCtx: 32768, requestTimeoutSecs: 3600 });
+  });
+
+  it("saves 0 as a context window: the server's own default, asked for, and not the default", async () => {
+    const store = await freshStore();
+
+    store.getState().setOllamaNumCtx(0);
+
+    expect(store.getState().ollamaNumCtx).toBe(0);
+    expect((await freshStore()).getState().ollamaNumCtx).toBe(0);
+  });
+
+  it("ignores a context window or timeout that is not a whole number in range, and saves nothing", async () => {
+    const store = await freshStore();
+
+    for (const tokens of [-1, 4.5, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 32]) store.getState().setOllamaNumCtx(tokens);
+    for (const secs of [0, 29, 86401, 60.5, Number.NaN]) store.getState().setRequestTimeoutSecs(secs);
+
+    expect(store.getState()).toMatchObject({ ollamaNumCtx: 16384, requestTimeoutSecs: 600 });
+    expect(localStorage.getItem("harness_ollama_num_ctx")).toBeNull();
+    expect(localStorage.getItem("harness_request_timeout_secs")).toBeNull();
+  });
+
+  it("takes the default for a saved value that is not valid", async () => {
+    for (const [saved, timeout] of [["abc", "abc"], ["-5", "10"], ["", ""], ["12.5", "86401"]]) {
+      localStorage.setItem("harness_ollama_num_ctx", saved);
+      localStorage.setItem("harness_request_timeout_secs", timeout);
+
+      expect((await freshStore()).getState()).toMatchObject({ ollamaNumCtx: 16384, requestTimeoutSecs: 600 });
+    }
   });
 });

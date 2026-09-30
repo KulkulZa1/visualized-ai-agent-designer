@@ -2,6 +2,7 @@
 //! text on as it arrives, and rebuild the reply the non-streaming API would have
 //! returned, so the usual parsers (chat_turn.rs) read it.
 
+use super::api_commands::TIMED_OUT_MESSAGE;
 use serde_json::{json, Value};
 
 /// Splits a byte stream into complete lines. A partial line waits for the rest,
@@ -270,11 +271,14 @@ pub(crate) async fn read_stream<S: StreamAccumulator>(
         }
         Ok(())
     };
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|e| format!("The model's reply broke off: {}", e.without_url()))?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|e| {
+        // The request timeout covers the whole reply, so a slow model's stream can run out of it.
+        if e.is_timeout() {
+            TIMED_OUT_MESSAGE.to_string()
+        } else {
+            format!("The model's reply broke off: {}", e.without_url())
+        }
+    })? {
         body.extend_from_slice(&chunk);
         for line in lines.push(&chunk) {
             take(&mut stream, &line)?;
@@ -457,5 +461,35 @@ mod tests {
         let error = stream.line(&anthropic_block_start(65)).unwrap_err();
         assert!(error.contains("65"), "{error}");
         assert_eq!((stream.blocks.len(), stream.inputs.len()), (65, 65));
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_runs_out_of_the_request_timeout_says_so_and_has_shown_what_it_got() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::time::Duration;
+
+        // A model that starts to answer, then takes longer than the client will wait.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let line = "{\"message\":{\"content\":\"Rea\"},\"done\":false}\n";
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nTransfer-Encoding: chunked\r\n\r\n";
+            stream.write_all(format!("{head}{:x}\r\n{line}\r\n", line.len()).as_bytes()).unwrap();
+            std::thread::sleep(Duration::from_secs(3));
+        });
+        let client = reqwest::Client::builder().timeout(Duration::from_millis(400)).build().unwrap();
+        let response = client.get(url).send().await.unwrap();
+        let mut pieces = Vec::new();
+
+        let error = read_stream::<OllamaStream>(response, &mut |text: &str| pieces.push(text.to_string()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, TIMED_OUT_MESSAGE);
+        assert_eq!(pieces, ["Rea"]);
     }
 }

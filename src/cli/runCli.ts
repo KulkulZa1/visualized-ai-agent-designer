@@ -90,7 +90,7 @@ export async function runHarness(argv: string[]): Promise<number> {
     out(RUN_USAGE);
     return EXIT.done;
   }
-  const parsed = parseRunArgs(argv);
+  const parsed = parseRunArgs(argv, process.env);
   if ("error" in parsed) {
     err(`harness run: ${parsed.error}\n\n${RUN_USAGE}`);
     return EXIT.usage;

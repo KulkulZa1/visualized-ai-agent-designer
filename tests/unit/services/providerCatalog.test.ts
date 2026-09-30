@@ -60,6 +60,14 @@ describe("provider catalog", () => {
     }));
   });
 
+  it("reports native tool calling for Ollama, local and cloud, and streaming and tool calling for the OpenAI-compatible endpoint: all are implemented", () => {
+    const capabilities = (id: string) => DEFAULT_PROVIDER_CATALOG.find((provider) => provider.id === id)?.capabilities;
+
+    expect(capabilities("ollama")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("ollama-cloud")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("openai-compatible")).toMatchObject({ streaming: true, toolCalling: true });
+  });
+
   it("describes capability flags and health status for each provider", () => {
     for (const provider of DEFAULT_PROVIDER_CATALOG as ProviderConfig[]) {
       expect(provider.capabilities).toEqual(

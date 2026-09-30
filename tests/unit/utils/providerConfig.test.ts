@@ -7,7 +7,13 @@ import {
   hasOllamaCredentialForEndpoint,
   isOllamaCloudUrl,
   isRemoteOllamaUrl,
+  DEFAULT_OLLAMA_NUM_CTX,
+  DEFAULT_REQUEST_TIMEOUT_SECS,
+  MAX_REQUEST_TIMEOUT_SECS,
+  MIN_REQUEST_TIMEOUT_SECS,
   maskApiKey,
+  parseNumCtx,
+  parseRequestTimeoutSecs,
   selectProviderForModel,
   shouldFallbackToOllama,
 } from "@/utils/providerConfig";
@@ -162,5 +168,32 @@ describe("providerConfig", () => {
     expect(shouldFallbackToOllama(OPENAI_QUOTA_MESSAGE)).toBe(true);
     expect(shouldFallbackToOllama(ANTHROPIC_CREDIT_MESSAGE)).toBe(true);
     expect(shouldFallbackToOllama(OPENAI_RATE_LIMIT_MESSAGE)).toBe(false);
+  });
+});
+
+describe("the local model server settings", () => {
+  it("defaults to a 16384-token context window and a 600 s model call timeout, the backend's own defaults", () => {
+    expect(DEFAULT_OLLAMA_NUM_CTX).toBe(16384);
+    expect(DEFAULT_REQUEST_TIMEOUT_SECS).toBe(600);
+    expect([MIN_REQUEST_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS]).toEqual([30, 86400]);
+  });
+
+  it("reads a context window as a whole number of tokens, 0 included, or null", () => {
+    expect(parseNumCtx("16384")).toBe(16384);
+    expect(parseNumCtx(" 4096 ")).toBe(4096);
+    expect(parseNumCtx("0")).toBe(0);
+    expect(parseNumCtx("4294967295")).toBe(4294967295); // the largest the Rust command takes
+    for (const bad of ["", " ", "-1", "1.5", "1e3", "+5", "0x10", "16k", "abc", "4294967296", "99999999999999999999"]) {
+      expect(parseNumCtx(bad), bad).toBeNull();
+    }
+  });
+
+  it("reads a model call timeout as whole seconds from 30 to 86400, or null", () => {
+    expect(parseRequestTimeoutSecs("600")).toBe(600);
+    expect(parseRequestTimeoutSecs("30")).toBe(30);
+    expect(parseRequestTimeoutSecs("86400")).toBe(86400);
+    for (const bad of ["", "0", "29", "86401", "-30", "60.5", "1e3", "ten"]) {
+      expect(parseRequestTimeoutSecs(bad), bad).toBeNull();
+    }
   });
 });

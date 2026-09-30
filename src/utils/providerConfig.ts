@@ -28,6 +28,40 @@ export const SUGGESTED_OLLAMA_MODELS = [
   "codellama",
 ];
 
+/**
+ * Ollama's context window in tokens, sent as `options.num_ctx`. Ollama's own default is a few
+ * thousand tokens and it cuts a longer prompt without saying so; an agent's prompt and tool
+ * results are longer. 0 sends none, so the server's own default (e.g. OLLAMA_CONTEXT_LENGTH)
+ * stands. One fixed value per run: Ollama reloads the model whenever it changes.
+ * [KEEP-IN-SYNC] with DEFAULT_OLLAMA_NUM_CTX in src-tauri/src/commands/api_commands.rs.
+ */
+export const DEFAULT_OLLAMA_NUM_CTX = 16384;
+/** The largest window the Rust commands take (a u32). */
+export const MAX_OLLAMA_NUM_CTX = 4294967295;
+
+/** How long one model call may take in total, in seconds. [KEEP-IN-SYNC] with api_commands.rs, which keeps a value within the bounds. */
+export const DEFAULT_REQUEST_TIMEOUT_SECS = 600;
+export const MIN_REQUEST_TIMEOUT_SECS = 30;
+export const MAX_REQUEST_TIMEOUT_SECS = 86400;
+
+/** Text is a whole number in [min, max] (spaces around it allowed), or null. */
+function wholeNumber(text: string, min: number, max: number): number | null {
+  const trimmed = text.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) && n >= min && n <= max ? n : null;
+}
+
+/** A context window from text (a setting, a flag, an environment variable): 0 or more whole tokens, or null. */
+export function parseNumCtx(text: string): number | null {
+  return wholeNumber(text, 0, MAX_OLLAMA_NUM_CTX);
+}
+
+/** A model call's timeout from text: whole seconds from 30 to 86400, or null. */
+export function parseRequestTimeoutSecs(text: string): number | null {
+  return wholeNumber(text, MIN_REQUEST_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS);
+}
+
 export interface ProviderRuntimeConfig {
   provider: LlmProvider;
   ollamaBaseUrl: string;

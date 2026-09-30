@@ -148,6 +148,30 @@ describe("createReporter", () => {
       { type: "revision", nodeId: "Reviewer", details, success: true, warning: true });
   });
 
+  describe("a context window warning", () => {
+    const details = "⚠ Coder: about 5,000 tokens (a prompt of ~4,000 plus up to 1,000 for the reply) do not fit Ollama's " +
+      "context window of 2,048 tokens, so Ollama may cut off the start of the prompt. Raise the context window.";
+    const warning = { ...audit("Coder", "context_window", details), warning: true };
+
+    it("goes to stderr as a warning, where the run's other warnings are, and not among the run's lines", () => {
+      const { reporter: { events }, out, err } = capture(false);
+
+      events.onAudit(warning);
+
+      expect(err).toEqual([`warning: ${details}`]);
+      expect(out).toEqual([]);
+    });
+
+    it("is a warning audit event with --json, and nothing on stderr", () => {
+      const { reporter: { events }, out, err } = capture(true);
+
+      events.onAudit(warning);
+
+      expect(out.map((line) => JSON.parse(line))).toEqual([{ type: "audit", nodeId: "Coder", details, success: true, warning: true }]);
+      expect(err).toEqual([]);
+    });
+  });
+
   it("emits one JSON event per line with --json, ending with the summary", () => {
     const { reporter, out } = capture(true);
 

@@ -44,6 +44,12 @@ struct ChatTurnArgs {
     reasoning_effort: Option<String>,
     base_url: Option<String>,
     // `onDelta`, the app's stream channel, is ignored: harness-core does not stream.
+    // Callers from before these two do not send them: Ollama's context window is then 16384
+    // tokens and the call's total timeout 600 s.
+    #[serde(default)]
+    num_ctx: Option<u32>,
+    #[serde(default)]
+    request_timeout_secs: Option<u64>,
 }
 
 /// call_openai_api, call_anthropic_api and call_claude_api. The Anthropic ones
@@ -58,6 +64,9 @@ struct TextCallArgs {
     max_tokens: u32,
     reasoning_effort: Option<String>,
     base_url: Option<String>,
+    // Callers from before this do not send it: the call's total timeout is then 600 s.
+    #[serde(default)]
+    request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +78,11 @@ struct OllamaArgs {
     base_url: String,
     api_key: Option<String>,
     max_tokens: u32,
+    // Callers from before these two do not send them (see ChatTurnArgs).
+    #[serde(default)]
+    num_ctx: Option<u32>,
+    #[serde(default)]
+    request_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -215,24 +229,35 @@ pub async fn dispatch(cmd: String, args: Value) -> Result<Value, String> {
         Call::ChatTurn(a) => reply(
             run_turn(
                 a.provider, a.model, a.system, a.messages, a.tools, a.api_key, a.max_tokens,
-                a.reasoning_effort, a.base_url, None,
+                a.reasoning_effort, a.base_url, a.num_ctx, a.request_timeout_secs, None,
             )
             .await,
         ),
         Call::OpenAi(a) => reply(
             call_openai_api(
                 a.model, a.system, a.user_message, a.api_key, a.max_tokens, a.reasoning_effort, a.base_url,
+                a.request_timeout_secs,
             )
             .await,
         ),
-        Call::Anthropic(a) => {
-            reply(call_anthropic_api(a.model, a.system, a.user_message, a.api_key, a.max_tokens).await)
-        }
-        Call::Claude(a) => {
-            reply(call_claude_api(a.model, a.system, a.user_message, a.api_key, a.max_tokens).await)
-        }
+        Call::Anthropic(a) => reply(
+            call_anthropic_api(
+                a.model, a.system, a.user_message, a.api_key, a.max_tokens, a.request_timeout_secs,
+            )
+            .await,
+        ),
+        Call::Claude(a) => reply(
+            call_claude_api(
+                a.model, a.system, a.user_message, a.api_key, a.max_tokens, a.request_timeout_secs,
+            )
+            .await,
+        ),
         Call::Ollama(a) => reply(
-            call_ollama_api(a.model, a.system, a.user_message, a.base_url, a.api_key, a.max_tokens).await,
+            call_ollama_api(
+                a.model, a.system, a.user_message, a.base_url, a.api_key, a.max_tokens, a.num_ctx,
+                a.request_timeout_secs,
+            )
+            .await,
         ),
         Call::Health(a) => reply(check_provider_health(a.provider, a.api_key, a.base_url, a.model).await),
         Call::Defaults => reply(Ok::<_, String>(get_provider_defaults())),
@@ -376,14 +401,27 @@ mod tests {
                 "maxTokens": 1024, "reasoningEffort": null, "baseUrl": "http://localhost:11434", "onDelta": null,
                 "provider": "ollama", "model": "qwen2.5-coder:7b", "apiKey": ""
             })),
-            ("call_openai_api", json!({"model": "gpt-4o-mini", "system": "s", "userMessage": "u", "apiKey": "",
+            // The same, from a build that sends Ollama's context window and the call's timeout.
+            ("chat_turn", json!({
+                "system": "You are A.", "messages": [{"role": "user", "text": "Read a.md"}], "tools": [],
+                "maxTokens": 1024, "reasoningEffort": null, "baseUrl": "http://localhost:11434", "onDelta": null,
+                "provider": "ollama", "model": "qwen2.5-coder:7b", "apiKey": "",
+                "numCtx": 16384, "requestTimeoutSecs": 600
+            })),
+            ("call_openai_api", json!({"model": "local-model", "system": "s", "userMessage": "u", "apiKey": "",
                 "maxTokens": 1024, "baseUrl": "https://llm.example/v1", "reasoningEffort": null})),
+            ("call_openai_api", json!({"model": "local-model", "system": "s", "userMessage": "u", "apiKey": "",
+                "maxTokens": 1024, "baseUrl": "https://llm.example/v1", "reasoningEffort": null,
+                "requestTimeoutSecs": 900})),
             ("call_claude_api", json!({"model": "claude-sonnet-4-5", "system": "s", "userMessage": "u",
                 "apiKey": "", "maxTokens": 1024})),
             ("call_anthropic_api", json!({"model": "claude-sonnet-4-5", "system": "s", "userMessage": "u",
-                "apiKey": "", "maxTokens": 1024})),
+                "apiKey": "", "maxTokens": 1024, "requestTimeoutSecs": 900})),
             ("call_ollama_api", json!({"model": "qwen2.5-coder:7b", "system": "s", "userMessage": "u",
                 "baseUrl": "http://localhost:11434", "apiKey": "", "maxTokens": 1024})),
+            ("call_ollama_api", json!({"model": "qwen2.5-coder:7b", "system": "s", "userMessage": "u",
+                "baseUrl": "http://localhost:11434", "apiKey": "", "maxTokens": 1024,
+                "numCtx": 32768, "requestTimeoutSecs": 1800})),
             ("check_provider_health", json!({"provider": "ollama", "apiKey": "",
                 "baseUrl": "http://localhost:11434", "model": "qwen2.5-coder:7b"})),
             ("get_provider_defaults", json!({})),
@@ -417,6 +455,65 @@ mod tests {
     fn names_a_missing_argument() {
         let err = parse("read_workspace_file", json!({"workspacePath": "/ws"})).unwrap_err();
         assert!(err.contains("relativePath"), "{err}");
+    }
+
+    /// `num_ctx` and `request_timeout_secs` of the model call `cmd` parsed from `args` (the rest of the
+    /// call's arguments are filled in).
+    fn model_call_options(cmd: &str, extra: Value) -> (Option<u32>, Option<u64>) {
+        let mut args = match cmd {
+            "chat_turn" => json!({"provider": "ollama", "model": "m", "system": "s", "messages": [], "tools": [],
+                "apiKey": "", "maxTokens": 64}),
+            "call_ollama_api" => json!({"model": "m", "system": "s", "userMessage": "u",
+                "baseUrl": "http://localhost:11434", "apiKey": "", "maxTokens": 64}),
+            _ => json!({"model": "m", "system": "s", "userMessage": "u", "apiKey": "", "maxTokens": 64}),
+        };
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        match parse(cmd, args) {
+            Ok(Call::ChatTurn(a)) => (a.num_ctx, a.request_timeout_secs),
+            Ok(Call::Ollama(a)) => (a.num_ctx, a.request_timeout_secs),
+            Ok(Call::OpenAi(a) | Call::Anthropic(a) | Call::Claude(a)) => (None, a.request_timeout_secs),
+            other => panic!("{cmd}: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_model_call_carries_the_context_window_and_timeout_it_was_given() {
+        for cmd in ["chat_turn", "call_ollama_api"] {
+            // Callers from before the two arguments send neither, and are still served: the
+            // commands' own defaults (16384 tokens, 600 s) apply.
+            assert_eq!(model_call_options(cmd, json!({})), (None, None), "{cmd}");
+            assert_eq!(model_call_options(cmd, json!({"numCtx": null, "requestTimeoutSecs": null})), (None, None), "{cmd}");
+            assert_eq!(
+                model_call_options(cmd, json!({"numCtx": 32768, "requestTimeoutSecs": 1800})),
+                (Some(32768), Some(1800)),
+                "{cmd}"
+            );
+            // 0 is "ask for none", a value of its own, not a missing one.
+            assert_eq!(model_call_options(cmd, json!({"numCtx": 0})), (Some(0), None), "{cmd}");
+        }
+        for cmd in ["call_openai_api", "call_anthropic_api", "call_claude_api"] {
+            assert_eq!(model_call_options(cmd, json!({})).1, None, "{cmd}");
+            assert_eq!(model_call_options(cmd, json!({"requestTimeoutSecs": 900})).1, Some(900), "{cmd}");
+        }
+    }
+
+    #[test]
+    fn rejects_a_context_window_or_timeout_that_is_not_a_whole_number() {
+        for (cmd, extra) in [
+            ("call_ollama_api", json!({"numCtx": -1})),
+            ("call_ollama_api", json!({"numCtx": "8192"})),
+            ("chat_turn", json!({"numCtx": 4.5})),
+            ("chat_turn", json!({"requestTimeoutSecs": -30})),
+        ] {
+            let mut args = match cmd {
+                "chat_turn" => json!({"provider": "ollama", "model": "m", "system": "s", "messages": [],
+                    "tools": [], "apiKey": "", "maxTokens": 64}),
+                _ => json!({"model": "m", "system": "s", "userMessage": "u", "baseUrl": "", "apiKey": "",
+                    "maxTokens": 64}),
+            };
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            assert!(parse(cmd, args).is_err(), "{cmd} {extra}");
+        }
     }
 
     #[test]
@@ -570,6 +667,39 @@ mod tests {
         let reply = dispatch("chat_turn".into(), args).await.unwrap();
         assert_eq!(reply["text"], "hi");
         assert_eq!(reply["finishReason"], "stop");
+    }
+
+    /// The JSON body a call sent the mock Ollama server.
+    fn sent_body(request: &str) -> Value {
+        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn passes_the_context_window_on_to_ollama_in_a_turn_and_in_a_text_call() {
+        for (cmd, ollama_reply) in [
+            ("chat_turn", r#"{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}"#),
+            ("call_ollama_api", r#"{"message":{"content":"hi"}}"#),
+        ] {
+            for (args, expected) in [
+                (json!({"numCtx": 4096}), Some(4096)),
+                (json!({}), Some(16384)), // a caller from before numCtx
+                (json!({"numCtx": 0}), None),
+            ] {
+                let (base_url, request) = spawn_mock_ollama_server(200, ollama_reply);
+                let mut all = json!({
+                    "system": "You are A.", "messages": [{"role": "user", "text": "Say hi"}], "tools": [],
+                    "userMessage": "Say hi", "maxTokens": 64, "reasoningEffort": null, "baseUrl": base_url,
+                    "provider": "ollama", "model": "qwen2.5-coder:7b", "apiKey": ""
+                });
+                all.as_object_mut().unwrap().extend(args.as_object().unwrap().clone());
+
+                dispatch(cmd.into(), all).await.unwrap();
+
+                let options = sent_body(&request.recv_timeout(Duration::from_secs(2)).unwrap())["options"].clone();
+                assert_eq!(options.get("num_ctx"), expected.map(|n| json!(n)).as_ref(), "{cmd} {args}");
+                assert_eq!(options["num_predict"], 64);
+            }
+        }
     }
 
     fn replies(output: Vec<u8>) -> Vec<Value> {
