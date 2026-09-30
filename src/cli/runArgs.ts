@@ -46,7 +46,7 @@ export const RUN_USAGE = `Usage: harness run <workflow.harness.yaml> --task "…
   --base-url <url>           The Ollama or OpenAI-compatible endpoint
   --model <name>             The Ollama or OpenAI-compatible model (hosted providers use each agent's model)
   --num-ctx <n>              Ollama's context window in tokens, sent as num_ctx (default 16384; 0 sends none, so the server's own default stands)
-  --request-timeout <secs>   How long one model call may take in total, 30 to 86400 (default 600)
+  --request-timeout <secs>   How long one model call may take in total, 30 to 86400 (default 600); an agent's own timeoutSeconds still bounds its whole run
   --max-parallel <n>         Agents running at once (default: the workflow's setting)
   --continue-on-error        Keep running the other agents after one fails
   --allow-command "<cmd>"    Let agents run this exact command (repeatable); every other command is denied

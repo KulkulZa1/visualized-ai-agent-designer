@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
 import { UNVERIFIABLE_HOOK, type RunRecord } from "@/engine/runRecord";
+import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
 import { hookFingerprint } from "../../fixtures/hookFingerprint.mjs";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
@@ -1913,49 +1914,96 @@ describe("Ollama's context window and the model call timeout", () => {
 });
 
 describe("the context window warning", () => {
-  // The numbers in a warning's text, in order: the total, the prompt, the reply and the window.
-  const numbers = (details: string) =>
-    /about ([^ ]+) tokens \(a prompt of ~([^ ]+) plus up to ([^ ]+) for the reply\) do not fit Ollama's context window of ([^ ]+) tokens/
-      .exec(details)?.slice(1).map((n) => Number(n.replace(/\D/g, "")));
   const warnings = (audit: AuditEntry[]) => audit.filter((e) => e.action === "context_window");
-  /** Runs `nodes` with a task of `taskTokens` tokens (chars / 4); returns the audit and the outcome. */
-  async function run(nodes: AgentNode[], overrides: Partial<RunInput["provider"]>, taskTokens = 3000, edges: Edge[] = [],
+  /** The warning's whole text, for agent `name`: its prompt, the most it may reply with, and the window. */
+  const warning = (name: string, prompt: number, reply: number, window: number) =>
+    `⚠ ${name}: its prompt is about ${prompt.toLocaleString()} tokens and it may reply with up to ${reply.toLocaleString()} ` +
+    `tokens, but Ollama's context window is ${window.toLocaleString()} tokens, so Ollama may cut off the start of the prompt. ` +
+    "Raise the context window (Settings → Ollama context window; harness run: --num-ctx).";
+  /** Runs `nodes` with the task `task`; returns the audit and the outcome. */
+  async function runTask(nodes: AgentNode[], overrides: Partial<RunInput["provider"]>, task: string, edges: Edge[] = [],
     handlers: Record<string, Handler> = {}) {
     const { host, log } = fakeHost(handlers);
     const input = runInput(nodes, edges, settings(overrides));
-    input.config = { ...input.config, userInput: "x".repeat(taskTokens * 4) };
+    input.config = { ...input.config, userInput: task };
     const outcome = await runWorkflow(input, host);
     return { outcome, log, warnings: warnings(log.audit) };
   }
+  /** Runs `nodes` with a task of `taskTokens` tokens (chars / 4). */
+  const run = (nodes: AgentNode[], overrides: Partial<RunInput["provider"]>, taskTokens = 3000, edges: Edge[] = [],
+    handlers: Record<string, Handler> = {}) => runTask(nodes, overrides, "x".repeat(taskTokens * 4), edges, handlers);
+  // The first prompt of a lone agent is its system message and "USER TASK:\n" and the task; the engine's
+  // estimate is that text's length / 4, rounded up. So a task of the right length gives a prompt of exactly `tokens`.
+  const systemLength = (name: string) => buildSystemMessage({
+    agentName: name, role: AgentRole.Worker, workflowName: "W", tools: [], memoryRead: [], memoryWrite: [], promptContent: "",
+  }).length;
+  const promptOf = (name: string, tokens: number) => "x".repeat(4 * tokens - systemLength(name) - "USER TASK:\n".length);
+  /** Runs the lone agent `node` (named "A") whose first prompt is exactly `tokens`. */
+  const runPrompt = (node: AgentNode, overrides: Partial<RunInput["provider"]>, tokens: number) =>
+    runTask([node], overrides, promptOf(node.id, tokens));
+  const withMaxTokens = (maxTokens: number) => {
+    const node = makeNode("A");
+    node.data.maxTokens = maxTokens;
+    return node;
+  };
 
-  it("says that the prompt and Max tokens do not fit the window: a warning, not a failure, naming the node and both numbers", async () => {
-    const { outcome, warnings } = await run([makeNode("A")], { ollamaNumCtx: 2048 });
+  it("says that the prompt does not fit the window: a warning, not a failure, in words that name the agent and the three numbers", async () => {
+    // The reply may take 1,024 tokens, which is half of a 2,048 window: 3,000 + 1,024 is over it.
+    const { outcome, warnings } = await runPrompt(makeNode("A"), { ollamaNumCtx: 2048 }, 3000);
 
     expect(outcome.started && outcome.run.agents.A.status).toBe("done");
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatchObject({ action: "context_window", agentId: "A", warning: true, success: true });
-    const [total, prompt, reply, window] = numbers(warnings[0].details!)!;
-    expect(warnings[0].details).toContain("A:");
-    expect([reply, window]).toEqual([1024, 2048]);
-    expect(prompt).toBeGreaterThanOrEqual(3000); // the task alone
-    expect(total).toBe(prompt + reply);
-    expect(warnings[0].details).toContain("Raise the context window");
+    expect(warnings[0].details).toBe(warning("A", 3000, 1024, 2048));
   });
 
-  it("warns when the prompt plus Max tokens is one over the window, and not when it just fits", async () => {
-    const [, prompt, reply] = numbers((await run([makeNode("A")], { ollamaNumCtx: 1 })).warnings[0].details!)!;
+  it("does not blame the prompt for a generous Max tokens alone: 16,384 against the default window of 16,384, with a short prompt", async () => {
+    // The shipped examples give some agents 16384. It is a ceiling for the reply, not its size.
+    const { outcome, warnings } = await run([withMaxTokens(16384)], { ollamaNumCtx: 16384 }, 100);
 
-    expect((await run([makeNode("A")], { ollamaNumCtx: prompt + reply })).warnings).toHaveLength(0);
-    expect((await run([makeNode("A")], { ollamaNumCtx: prompt + reply - 1 })).warnings).toHaveLength(1);
+    expect(outcome.started && outcome.run.agents.A.status).toBe("done");
+    expect(warnings).toEqual([]);
   });
 
-  it("uses the node's Max tokens, 2048 when it has none", async () => {
-    const node = makeNode("A");
-    node.data.maxTokens = 0;
+  it("says nothing for the Max tokens the shipped examples use, at the default window, with a short prompt", async () => {
+    for (const maxTokens of [16384, 12288, 8192, 4096, 0]) {
+      expect((await run([withMaxTokens(maxTokens)], { ollamaNumCtx: 16384 }, 300)).warnings, String(maxTokens)).toEqual([]);
+    }
+  });
 
-    const [, , reply] = numbers((await run([node], { ollamaNumCtx: 1 })).warnings[0].details!)!;
+  it("counts a reply as at most half the window: with 16,384 Max tokens a prompt of half the window fits and one over half does not", async () => {
+    const node = withMaxTokens(16384);
 
-    expect(reply).toBe(2048);
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 8192)).warnings).toEqual([]);
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 8193);
+    expect(over.warnings).toHaveLength(1);
+    // It says what the agent may reply with (its Max tokens), not the half the check counts.
+    expect(over.warnings[0].details).toBe(warning("A", 8193, 16384, 16384));
+  });
+
+  it("rounds half of an odd window down", async () => {
+    const node = withMaxTokens(20000);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 10001 }, 5001)).warnings).toEqual([]); // 5,001 + 5,000 fits
+    expect((await runPrompt(node, { ollamaNumCtx: 10001 }, 5002)).warnings).toHaveLength(1);
+  });
+
+  it("counts the whole reply when it is less than half the window: a prompt one token over what is left warns, one that just fits does not", async () => {
+    const node = withMaxTokens(2048);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14335)).warnings).toEqual([]); // under
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14336)).warnings).toEqual([]); // 14,336 + 2,048 just fits
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 14337);
+    expect(over.warnings).toHaveLength(1);
+    expect(over.warnings[0].details).toBe(warning("A", 14337, 2048, 16384));
+  });
+
+  it("uses 2,048 for an agent with no Max tokens", async () => {
+    const node = withMaxTokens(0);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14336)).warnings).toEqual([]);
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 14337);
+    expect(over.warnings.map((e) => e.details)).toEqual([warning("A", 14337, 2048, 16384)]);
   });
 
   it("warns once per node for the run, though a revision runs the node again", async () => {

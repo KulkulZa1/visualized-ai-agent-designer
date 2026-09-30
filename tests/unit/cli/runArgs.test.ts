@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseRunArgs, providerSettings, type RunArgs } from "@/cli/runArgs";
+import { parseRunArgs, providerSettings, RUN_USAGE, type RunArgs } from "@/cli/runArgs";
 
 type Env = Record<string, string | undefined>;
 
@@ -149,6 +149,23 @@ describe("parseRunArgs: the options the environment can give", () => {
         expect(args.model, provider).toBeUndefined();
       }
     });
+  });
+});
+
+describe("RUN_USAGE", () => {
+  const optionLines = RUN_USAGE.split("\n").filter((line) => line.startsWith("  --"));
+
+  it("says beside --request-timeout that an agent's own timeoutSeconds still bounds its whole run", () => {
+    expect(optionLines.find((line) => line.includes("--request-timeout"))).toBe(
+      "  --request-timeout <secs>   How long one model call may take in total, 30 to 86400 (default 600); " +
+      "an agent's own timeoutSeconds still bounds its whole run");
+  });
+
+  it("keeps the descriptions of the options in one column", () => {
+    const columns = optionLines.map((line) => /^( {2}--[\w-]+(?: <[^>]+>| "<[^>]+>")? +)\S/.exec(line)?.[1].length);
+
+    expect(columns.length).toBeGreaterThan(10);
+    expect(new Set(columns)).toEqual(new Set([29]));
   });
 });
 

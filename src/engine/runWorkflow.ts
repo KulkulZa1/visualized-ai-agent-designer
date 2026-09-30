@@ -818,18 +818,20 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       // Ollama cuts a prompt that does not fit its context window (num_ctx) without a word, so say it,
       // once per node for the run. Only when num_ctx is really sent: not for 0, and not for ollama.com.
       // The estimate is the first prompt's (the system and user messages, chars / 4); the tool
-      // definitions and the steps after it add to it, so it is a minimum.
+      // definitions and the steps after it add to it, so it is a minimum. The reply counts as at most
+      // half the window: Max tokens is a ceiling, not a size, and a generous one (the shipped examples
+      // give some agents 16384, the whole default window) should not warn on its own.
       if ((runtimeProvider === "ollama" || runtimeProvider === "ollama-cloud") && ollamaNumCtx > 0 &&
           !isOllamaCloudUrl(effectiveOllamaUrl) && !contextWarned.has(nodeId)) {
         const promptTokens = estimateTokens(systemMsg, baseUserMsg, "");
-        if (promptTokens + maxTok > ollamaNumCtx) {
+        if (promptTokens + Math.min(maxTok, Math.floor(ollamaNumCtx / 2)) > ollamaNumCtx) {
           contextWarned.add(nodeId);
           addEntry({ id: `${nodeId}-ctx-${Date.now()}`, timestamp: new Date().toISOString(),
             action: "context_window", agentId: nodeId, warning: true, success: true,
-            details: `⚠ ${data.name}: about ${(promptTokens + maxTok).toLocaleString()} tokens ` +
-              `(a prompt of ~${promptTokens.toLocaleString()} plus up to ${maxTok.toLocaleString()} for the reply) ` +
-              `do not fit Ollama's context window of ${ollamaNumCtx.toLocaleString()} tokens, so Ollama may cut off ` +
-              "the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx)." });
+            details: `⚠ ${data.name}: its prompt is about ${promptTokens.toLocaleString()} tokens and it may reply ` +
+              `with up to ${maxTok.toLocaleString()} tokens, but Ollama's context window is ` +
+              `${ollamaNumCtx.toLocaleString()} tokens, so Ollama may cut off the start of the prompt. ` +
+              "Raise the context window (Settings → Ollama context window; harness run: --num-ctx)." });
         }
       }
       const effectiveThinkDepth =

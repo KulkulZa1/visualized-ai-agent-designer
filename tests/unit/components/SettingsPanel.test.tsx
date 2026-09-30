@@ -25,14 +25,15 @@ describe("SettingsPanel: Ollama's context window", () => {
     expect(contextWindow().value).toBe("16384");
   });
 
-  it("says that it is sent to Ollama as num_ctx, overrides the server's own default, and that 0 uses the server default", () => {
+  it("says that it is sent to Ollama as num_ctx, overrides the server's default and a model's own num_ctx, and that 0 sends none", () => {
     render(<SettingsPanel onClose={() => {}} />);
 
     const label = contextWindow().labels?.[0]?.textContent ?? "";
     expect(label).toContain("sent to Ollama as num_ctx");
-    expect(label).toContain("overrides the server's own default");
-    expect(label).toContain("OLLAMA_CONTEXT_LENGTH");
-    expect(label).toContain("0 uses the server default");
+    expect(label).toContain("It overrides the server's default (OLLAMA_CONTEXT_LENGTH)");
+    expect(label).toContain("and a model's own num_ctx (Modelfile)");
+    expect(label).toContain("0 sends none, so those stand");
+    expect(label).toContain("Not sent to ollama.com.");
   });
 
   it("saves a new window with Save all & close", () => {

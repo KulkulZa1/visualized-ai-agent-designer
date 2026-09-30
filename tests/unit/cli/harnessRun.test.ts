@@ -338,9 +338,12 @@ describe("harness run", { timeout: 60_000 }, () => {
       const run = harnessRun(workspace({ Coder: ["done"], Reviewer: ["fine"] }), ["--task", "x".repeat(10_000), "--num-ctx", "2048"]);
 
       expect(run.status, run.stderr).toBe(0);
-      const warnings = run.stderr.split("\n").filter((line) => line.startsWith("warning: ⚠ Coder:"));
+      const warnings = run.stderr.split("\n").filter((line) => line.startsWith("warning: Coder:"));
       expect(warnings).toHaveLength(1);
+      // (The numbers carry the locale's thousands separator, whatever it is.)
+      expect(warnings[0]).toMatch(/^warning: Coder: its prompt is about [^ ]+ tokens and it may reply with up to 1\D?024 tokens, but Ollama's context window is 2\D?048 tokens, /);
       expect(warnings[0]).toContain("Raise the context window (Settings → Ollama context window; harness run: --num-ctx).");
+      expect(run.stderr).not.toContain("warning: ⚠"); // one marker, not two
       expect(run.stdout).not.toContain("context window"); // stdout is the run's own lines
     });
 

@@ -873,8 +873,8 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             <label htmlFor="ollama-num-ctx" style={{ fontSize: 11, color: "var(--muted)", display: "block", marginBottom: 5 }}>
               Ollama context window (tokens)
               <span style={{ color: "var(--hint)" }}>
-                {" "}— sent to Ollama as num_ctx. It overrides the server's own default (for example
-                OLLAMA_CONTEXT_LENGTH); 0 uses the server default. Not sent to ollama.com.
+                {" "}— sent to Ollama as num_ctx. It overrides the server's default (OLLAMA_CONTEXT_LENGTH)
+                and a model's own num_ctx (Modelfile); 0 sends none, so those stand. Not sent to ollama.com.
               </span>
             </label>
             <input

@@ -149,8 +149,10 @@ describe("createReporter", () => {
   });
 
   describe("a context window warning", () => {
-    const details = "⚠ Coder: about 5,000 tokens (a prompt of ~4,000 plus up to 1,000 for the reply) do not fit Ollama's " +
-      "context window of 2,048 tokens, so Ollama may cut off the start of the prompt. Raise the context window.";
+    // The audit entry's text starts with the ⚠ the app's audit strip shows.
+    const text = "Coder: its prompt is about 4,000 tokens and it may reply with up to 1,000 tokens, but Ollama's " +
+      "context window is 2,048 tokens, so Ollama may cut off the start of the prompt. Raise the context window.";
+    const details = `⚠ ${text}`;
     const warning = { ...audit("Coder", "context_window", details), warning: true };
 
     it("goes to stderr as a warning, where the run's other warnings are, and not among the run's lines", () => {
@@ -158,8 +160,18 @@ describe("createReporter", () => {
 
       events.onAudit(warning);
 
-      expect(err).toEqual([`warning: ${details}`]);
+      expect(err).toEqual([`warning: ${text}`]);
       expect(out).toEqual([]);
+    });
+
+    it("has one marker on stderr: the ⚠ goes, with its emoji selector when there is one, and text without it is left as it is", () => {
+      const { reporter: { events }, err } = capture(false);
+
+      events.onAudit({ ...warning, details: `\u26A0\uFE0F ${text}` });
+      events.onAudit({ ...warning, details: `\u26A0${text}` });
+      events.onAudit({ ...warning, details: text });
+
+      expect(err).toEqual([`warning: ${text}`, `warning: ${text}`, `warning: ${text}`]);
     });
 
     it("is a warning audit event with --json, and nothing on stderr", () => {
