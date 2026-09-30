@@ -24,6 +24,10 @@ Tauri's system packages (WebKit, GTK).
 
 Use Node 20 or later (`package.json` declares it).
 
+On a machine with no internet, `npm ci` and `cargo` cannot fetch anything: see
+`docs/AIRGAPPED.md` for the offline bundle, which holds the packages and crates, and
+prebuilt `harness-run.mjs` and `harness-core` for the platform it was made on.
+
 ## Run
 
 ```bash
@@ -335,8 +339,9 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
 - The hook script check has gaps: files a script sources or imports, and a change
   in the moment between `execute_hook`'s last read and the interpreter's own
   opening of the file (see Hooks).
-- There are no prebuilt binaries: build the bundle and `harness-core` from the
-  repository.
+- No binaries are published: build the bundle and `harness-core` from the
+  repository. An offline bundle (`npm run offline:bundle`) carries prebuilt ones,
+  for the platform it was made on only (`docs/AIRGAPPED.md`).
 - The app has no Resume button; resume with `harness run`.
 - Ctrl+C handling in `harness-core` is tested on Linux in CI. On Windows it was
   checked once with a real console Ctrl+C (the run stopped, was saved as

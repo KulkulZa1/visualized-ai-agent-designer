@@ -1,5 +1,37 @@
 ﻿# Development Log
 
+## 2026-09-30 - Offline bundle: build and test with no internet
+
+- **Goal:** build, test and run the source on a machine with no internet. `docs/AIRGAPPED.md` covered only running the installer, and called building there out of scope.
+- **Added:** `scripts/offline-bundle.mjs` with three npm scripts (unit tests in `tests/unit/scripts/offline-bundle.test.mjs`), and `/.cargo/` and `/offline-bundle/` in `.gitignore`.
+  - **`npm run offline:bundle -- [<dir>] [--no-binaries] [--force]`**, on a connected machine after `npm ci`, from the repo root. `<dir>` defaults to `offline-bundle`. It writes:
+    - `npm-cache/`: every package in `package-lock.json`, the optional platform packages of every OS included (the esbuild, rollup and Tauri CLI binaries for Windows, macOS and Linux). A digest check confirms every package is in the cache, for every OS, and an offline install check runs for the platform it was made on;
+    - `cargo-vendor/`: `cargo vendor --locked`, every platform's crates;
+    - `bin/<platform>-<arch>/`: `harness-run.mjs` and `harness-core`, prebuilt for the platform it was made on only (`--no-binaries` skips them);
+    - `MANIFEST.json`: the git commit; hashes of `package-lock.json`, `src-tauri/Cargo.lock` (line endings normalized) and `package.json`'s dependency fields; the node, npm, cargo and rustc versions; the platform and arch, and glibc on Linux; counts; binary checksums; the longest path inside the bundle.
+    - **The folder:** `create` refuses one that is not empty. `--force` re-creates only a folder this script made, and keeps `npm-cache` for reuse. Size: about 1.1 GB (`npm-cache` about 307 MB, `cargo-vendor` about 836 MB, binaries about 6 MB). Time: about 2 minutes with binaries, on a fast machine.
+  - **`npm run offline:setup -- [<dir>]`**, on the air-gapped machine, from the repo root. It refuses a bundle made for other dependencies (naming the file that differs) and one with missing packages (listing them; this catches a damaged copy), and warns when node, npm, cargo or rustc differ from the bundle's. It runs `npm ci --offline` from the bundle's cache and writes a gitignored `.cargo/config.toml` that points cargo at the vendored crates and sets `net.offline = true` (delete it to go back online; it refuses to overwrite one it did not write). It installs the prebuilt `cli/dist/harness-run.mjs` and `src-tauri/target/release/harness-core` where they are missing, after checking their sha256.
+  - **`npm run offline:verify [-- --skip a,b]`** runs `tsc`, `vitest`, `cargo-core`, `cargo-app`, `build-cli`, `build-core` and `vite-build`, and prints a pass/fail table (exit 1 if any step fails). `--skip cargo-app` is for a machine without Tauri's system libraries.
+- **Docs:** `docs/AIRGAPPED.md` has a new section, "Build and test from source, offline", and no longer calls building offline out of scope. Four statements in it were false and are fixed:
+  - the summary said local Ollama is always probed. It is probed only when the run uses Ollama, or uses OpenAI or Anthropic (its billing-error fallback); a Custom-only run does not probe it;
+  - §3 said to leave Auto and set each node's provider. Nodes have no provider field, and Auto never selects Custom. Use provider mode Custom, or `harness run --provider openai-compatible --base-url … --model …`;
+  - the CSP note said tightening it would not change the app's outbound behavior. Provider calls are Rust and not subject to CSP, but the model picker's "Load from API" is an in-WebView `fetch()` (local Ollama's tags, openrouter.ai) and is;
+  - §3 said a green "Test connection" confirms reachability and auth. It sends a real 1-token completion with a 10 s limit, using the configured model, or `gpt-4o-mini` when the model field is blank. Enter the model first; a server still loading the model can time out.
+- **Review findings, fixed:**
+  - **`--force` could delete any folder's `bin/`.** It now re-creates only a folder this script made.
+  - **The npm check could not see a missing optional package.** An offline install needs only its own platform's packages, so a package for another OS could be missing from the cache with the check green. `create` now confirms by digest that every package is in the cache, for every OS, and `setup` refuses a bundle with missing packages.
+  - **Hashing refused CRLF checkouts and any `package.json` edit.** The lockfiles are now hashed with line endings normalized, and `package.json` by its dependency fields only.
+  - The smaller findings (nits) were fixed too.
+- **Verification** (2026-09-30, Linux x64, node 22.22.2, npm 10.9.7, cargo and rustc 1.94.1; not part of the test suite or CI). A bundle was created with network access. Then, in a fresh clone inside a network namespace with no route out (`unshare -rn`), with empty cargo and npm caches so that the bundle was the only source:
+  - **Setup:** `offline:setup` installed 271 packages offline and placed both binaries.
+  - **The shipped binary:** `harness-core` ran `harness run examples/purchasing-decision.harness.yaml --provider openai` with no key, before anything was built. It exited 3 with `not_started`, which is CI's own check.
+  - **Verify:** `offline:verify` passed all 7 steps: vitest 1269 tests / 73 files; `cargo test` 143 (app) and 143 + 2 (core); both release builds and the vite build. The compile took about 6 minutes.
+  - **No downloads:** every crate compiled from the vendored folder, none from the machine's own cache, and nothing was downloaded.
+  - **Negative controls:** the same steps without the bundle fail at once (`cargo fetch` cannot resolve crates.io; `npm ci --offline` gives ENOTCACHED).
+  - **Refusals:** a one-byte change to `package-lock.json`, and a `.cargo/config.toml` it did not write, were both refused with the file left unchanged.
+- **Not verified:** Windows; macOS; a physically air-gapped machine; the installer build; the prebuilt binary on another Linux distro; a machine with no Rust toolchain.
+- **Not covered by the bundle:** the Windows installer build (the Tauri bundler downloads WiX, NSIS utilities and the WebView2 bootstrapper, so build installers on a connected machine as before), and the toolchains and system packages. The prebuilt binaries run only on the platform the bundle was made on; the Linux ones are also tied to its glibc (2.39 in the verified bundle).
+
 ## 2026-09-30 - Follow-ups: #10's review fixes, and the hook check in Rust
 
 - **Goal:** two follow-ups on this branch. The review of #10 (the Windows QA's UI fixes) found problems in them. The hook script check of 2026-09-29 had two known gaps, scripts that aren't valid UTF-8 and the gap between the check and the hook's start; a check in Rust closes the first and narrows the second.

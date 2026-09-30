@@ -6,6 +6,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (offline bundle)
+- **Offline bundle**: build and test the source on a machine with no internet (`docs/AIRGAPPED.md`). `scripts/offline-bundle.mjs` has three npm scripts.
+  - `npm run offline:bundle -- [<dir>] [--no-binaries] [--force]`, on a connected machine after `npm ci`, writes a folder with:
+    - `npm-cache/`: every package in `package-lock.json`, the optional platform packages of every OS included (the esbuild, rollup and Tauri CLI binaries for Windows, macOS and Linux);
+    - `cargo-vendor/`: `cargo vendor --locked`, every platform's crates;
+    - `bin/<platform>-<arch>/`: `harness-run.mjs` and `harness-core`, prebuilt for the platform it was made on only;
+    - `MANIFEST.json`: the git commit, hashes of the lockfiles and of `package.json`'s dependency fields, the toolchain versions, the platform, and binary checksums.
+  - `npm run offline:setup -- [<dir>]`, on the air-gapped machine, refuses a bundle made for other dependencies or with missing packages, warns when the toolchain differs, and runs `npm ci --offline`.
+    - It writes a gitignored `.cargo/config.toml` that points cargo at the vendored crates and turns the network off. Delete it to go back online.
+    - It installs the prebuilt binaries where they are missing.
+  - `npm run offline:verify [-- --skip a,b]` runs `tsc`, `vitest`, both `cargo test` builds, `build:cli`, `build:core` and `vite build`, and prints a pass/fail table.
+  - Checked on Linux x64 in a network namespace with no route out: setup, all 7 verify steps, and no downloads. Not run on Windows or macOS.
+  - Not covered: the Windows installer build (the Tauri bundler downloads WiX, NSIS utilities and the WebView2 bootstrapper), and the toolchains and system packages, which are not in the bundle.
+
 ### Added (headless runs and CI)
 - **`harness run`**: runs a workflow without the app, for CI (`docs/HEADLESS.md`).
   - It uses the app's run engine, now `src/engine/runWorkflow.ts` with the hook as its host.

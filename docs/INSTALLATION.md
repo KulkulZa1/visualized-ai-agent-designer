@@ -9,6 +9,9 @@ Updated: 2026-09-24
 - Rust toolchain and Cargo, Rust 1.86 or newer (`Cargo.lock` pins `icu_*` 2.2 crates, which need 1.86)
 - WebView2 Runtime on Windows
 
+With no internet, `npm install`, `cargo` and the builds cannot fetch anything: see
+`AIRGAPPED.md` ("Build and test from source, offline") for the offline bundle.
+
 ## Run From Source
 
 ```powershell
