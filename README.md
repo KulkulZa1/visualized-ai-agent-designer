@@ -42,6 +42,7 @@ Verified on 2026-09-26 (the Tauri dev app and Tauri package rows come from an ea
 | Changes and undo | Every file a run's agents change is listed under **Changes (N)** in the run panel, with a side-by-side diff and revert per file or all (files created by the run are deleted) |
 | Shell commands | `bash`/`run_command` run a command line in the workspace folder only after you approve that exact command in a dialog, once or for the rest of the run (in `harness run`: only commands passed exactly with `--allow-command`); not sandboxed, no input, no provider keys, stopped at the agent's time limit or killed on Stop; helpers never get it |
 | Headless runs | `harness run` runs a workflow without the app, with the same engine and the app's Rust commands (`harness-core`, built without Tauri); keys from the environment, `--json` events, CI exit codes ([docs/HEADLESS.md](docs/HEADLESS.md)) |
+| Scoring workflows | `harness eval` runs a workflow on a task set several times per task, each in a fresh copy of the task's folder, scores each run with command, output and file checks, and reports a score and the tokens used ([docs/EVAL.md](docs/EVAL.md)) |
 | Run records and resume | Every run (the app with a workspace open, and `harness run`) is saved to `.harness/runs/<runId>/run.json`; `harness run --resume` reuses the agents that finished and did not change |
 | CI | `.github/workflows/ci.yml` on Linux; `examples/ci/harness-run.yml` is a template for running workflows in other repositories |
 | Long runs | Past 75% of a node's Token budget, older steps are summarized into a progress note; the workspace's `AGENTS.md` is given to agents with workspace tools |
@@ -102,6 +103,7 @@ secret redaction.
 - [Installation](docs/INSTALLATION.md)
 - [Air-Gapped Deployment](docs/AIRGAPPED.md)
 - [Headless Runs (`harness run`)](docs/HEADLESS.md)
+- [Scoring Workflows (`harness eval`)](docs/EVAL.md)
 - [MCP Usage](docs/MCP_USAGE.md)
 - [Security](docs/SECURITY.md)
 - [Project Status](docs/PROJECT_STATUS.md)

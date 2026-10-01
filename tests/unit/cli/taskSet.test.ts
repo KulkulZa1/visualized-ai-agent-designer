@@ -670,3 +670,13 @@ describe("unapprovedScorerCommands", () => {
     expect(unapprovedScorerCommands([taskDef("a")], new Set())).toEqual([]);
   });
 });
+
+describe("the shipped example task set", () => {
+  it("examples/evals/research-synthesis.tasks.yaml loads, with an evolve, a smoke and a heldout task", () => {
+    const loaded = loadTaskSet(resolve("examples/evals/research-synthesis.tasks.yaml"));
+    if ("errors" in loaded) throw new Error(loaded.errors.join("\n"));
+    expect(loaded.taskSet.tasks.map((t) => [t.id, t.split, t.smoke])).toEqual([
+      ["four-day-week", "evolve", true], ["office-return", "heldout", false],
+    ]);
+  });
+});

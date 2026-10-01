@@ -608,6 +608,14 @@ distro; a machine with no Rust toolchain.
 
 ---
 
+## Measure a workflow offline
+
+`harness eval` scores a workflow on a set of tasks, several runs each, against the same local
+model server, and needs no network (`docs/EVAL.md`). Use `--provider ollama` or the Custom
+endpoint as for `harness run`. Every run checks the server first; for a Custom endpoint that is
+a one-token completion, which can take up to 120 s while the model loads. The token counts come
+from the server's own replies; a server that leaves them out gives none (`C` is `null`).
+
 ## Notes and limitations
 
 - **CSP still lists cloud hosts** (`api.openai.com`, `api.anthropic.com`,
