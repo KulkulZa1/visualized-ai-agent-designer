@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createReporter } from "@/cli/report";
+import { createReporter, finalNodes, finalOutputs } from "@/cli/report";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole } from "@/types/agent";
 import type { AuditEntry } from "@/types/audit";
@@ -272,5 +272,53 @@ describe("createReporter", () => {
     expect(json.out.map((line) => JSON.parse(line))).toEqual([
       { type: "run_finished", status: "not_started", error: "Ollama is not running" },
     ]);
+  });
+});
+
+describe("finalNodes and finalOutputs: the run's result, which harness eval's output scorer reads too", () => {
+  const memory = (id: string): AgentNode => ({ ...node(id), data: { ...node(id).data, role: AgentRole.Memory } });
+  const hook = (id: string): AgentNode => ({ ...node(id), data: { ...node(id).data, role: AgentRole.Hook } });
+  const finished = (outputs: Record<string, string | undefined>): WorkflowRun => ({
+    id: "run-1", workflowName: "W", startedAt: 0, status: "done",
+    agents: Object.fromEntries(Object.entries(outputs).map(([id, output]) => [id, { agentId: id, agentName: id, status: "done" as const, output }])),
+  });
+
+  it("are the agents no other agent runs after: a feedback edge does not make its source a predecessor", () => {
+    // graph: Coder → Reviewer, and Reviewer → Coder as feedback
+    expect(finalNodes(graph).map((n) => n.id)).toEqual(["Reviewer"]);
+  });
+
+  it("leave out memory and hook nodes, and a node followed only by them is still final", () => {
+    const g: WorkflowGraph = {
+      ...graph, nodes: [node("Writer"), memory("Notes"), hook("Check")],
+      edges: [{ id: "w-n", source: "Writer", target: "Notes" }, { id: "n-c", source: "Notes", target: "Check" }],
+    };
+
+    expect(finalNodes(g).map((n) => n.id)).toEqual(["Writer"]);
+  });
+
+  it("are every agent nothing follows, when there are several", () => {
+    const g: WorkflowGraph = { ...graph, nodes: [node("A"), node("B"), node("C")], edges: [{ id: "a-c", source: "A", target: "C" }] };
+
+    expect(finalNodes(g).map((n) => n.id)).toEqual(["B", "C"]);
+  });
+
+  it("give each final agent's output with its name, in node order, and skip one with no output", () => {
+    const g: WorkflowGraph = { ...graph, nodes: [node("A"), node("B"), node("C")], edges: [] };
+
+    expect(finalOutputs(g, finished({ A: "first", B: undefined, C: "third" }))).toEqual([
+      { id: "A", name: "A", output: "first" }, { id: "C", name: "C", output: "third" },
+    ]);
+    expect(finalOutputs(g, finished({ A: "", B: "" }))).toEqual([]);
+    expect(finalOutputs(g, { ...finished({}), agents: {} })).toEqual([]);
+  });
+
+  it("are what the reporter's summary prints as the final output", () => {
+    const { reporter, out } = capture(false);
+
+    reporter.summary({ started: true, run }, 1000);
+
+    expect(finalOutputs(graph, run)).toEqual([{ id: "Reviewer", name: "Reviewer", output: "Looks good.\nShip it." }]);
+    expect(out.join("\n")).toContain("Final output — Reviewer:\n  Looks good.\n  Ship it.");
   });
 });
