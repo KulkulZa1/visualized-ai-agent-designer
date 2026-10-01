@@ -15,7 +15,8 @@ import type { WorkflowRun } from "@/types/execution";
 import type { HookResult } from "@/types/hookResult";
 import { createReporter, finalOutputs } from "@/cli/report";
 import {
-  isInsideDir, kindOf, linkProblem, pathParts, relativePathProblem, type CommandScorer, type FileScorer, type OutputScorer, type Scorer, type TaskDef,
+  isInsideDir, kindOf, linkProblem, pathParts, relativePathProblem, shown, treeProblem,
+  type CommandScorer, type FileScorer, type OutputScorer, type Scorer, type TaskDef,
 } from "@/cli/taskSet";
 
 // [KEEP-IN-SYNC] with execute_command in src-tauri/src/commands/process_commands.rs. Its timeout error reads
@@ -136,10 +137,11 @@ function physicalTarget(dir: string, root: string, path: string, folder: string)
 
 export interface ScoreContext {
   invoke: InvokeFn;
-  /** The trial's folder, where the scorers' commands run and the file scorers look. */
+  /** The trial's folder, where the file scorers look. */
   trialDir: string;
   /** Where the trial's folder physically is (`realpathSync.native`), recorded once when it was made. Whether a
-   *  path is inside the trial is decided against this, never against the folder looked up again. */
+   *  path is inside the trial is decided against this, never against the folder looked up again; and the scorers'
+   *  commands run in it, by this path. */
   trialRoot: string;
   /** The task's workspace as the task set recorded it (a real path), which `restore` puts files back from. */
   fixtureDir?: string;
@@ -217,6 +219,18 @@ function checkFile(ctx: ScoreContext, scorer: FileScorer): Verdict {
   return verdict(textFailures(readFileSync(real, "utf8"), scorer.contains, [], scorer.matches));
 }
 
+/** The links of the tree a restore has just put at `target` must stay in the trial's folder, as they stayed in the
+ *  fixture. They were copied as they are, with their relative targets; but an agent's link can put the tree somewhere
+ *  else than its path says (a restore of a/b, when a is a link to the trial's own folder, puts it at b), and from
+ *  there the same targets lead elsewhere. The rule is the one the fixture's links met when the task set was read.
+ *  (A tree that an inject puts in holds no link: `copyTree` refuses one.) */
+function assertLinksStay(ctx: ScoreContext, path: string, target: string): void {
+  const bad = treeProblem(target, (found) => shown(ctx.trialRoot, found), ctx.trialRoot, "the trial's folder");
+  if (bad === undefined) return;
+  const at = shown(ctx.trialRoot, target);
+  throw new Error(`the restored ${path}${at === path ? "" : ` (put at ${at}, where a link of the trial leads)`}: ${bad}`);
+}
+
 /** Puts the files of a command scorer in place. Each restore path is deleted, then copied back from the
  *  pristine workspace if it has it; each inject is deleted at its target, then copied in. Replacement, not
  *  overlay: a test file the agent added under a restored folder is gone. Every link in the trial is the agents'
@@ -232,7 +246,10 @@ function prepareFiles(ctx: ScoreContext, scorer: CommandScorer): void {
       if (kindOf(source) === "missing") source = undefined; // the pristine workspace has none: it is only deleted
     }
     rmSync(target, { recursive: true, force: true });
-    if (source !== undefined) copyTree(source, target, ctx.fixtureDir);
+    if (source !== undefined) {
+      copyTree(source, target, ctx.fixtureDir);
+      assertLinksStay(ctx, path, target);
+    }
   }
   for (const { from, to } of scorer.inject) {
     const target = physicalTarget(ctx.trialDir, ctx.trialRoot, to, "the trial's folder");
@@ -251,14 +268,15 @@ const tail = (text: string) =>
 async function runCommandScorer(ctx: ScoreContext, scorer: CommandScorer, index: number): Promise<Verdict> {
   // AGENT.md rule 6: no command runs without the user's approval of that exact command.
   if (!ctx.allowedCommands.has(scorer.command)) throw new Error(`the command was not approved with --allow-scorer: ${scorer.command}`);
-  // The command runs in the trial's folder: the one that was made, not a link an agent put in its place.
+  // The command runs in the trial's folder: the one that was made, not a link an agent put in its place. It is given
+  // by the real path recorded when it was made, so that nothing looks the folder up again between this check and the command.
   if (realpathSync.native(ctx.trialDir) !== ctx.trialRoot) throw new Error("the trial's folder is not where it was made: it was replaced");
   prepareFiles(ctx, scorer);
   const commandId = `${ctx.commandPrefix}-score-${index}`;
   ctx.activeCommands.add(commandId);
   try {
     const result = await ctx.invoke<HookResult>("execute_command", {
-      workspacePath: ctx.trialDir, command: scorer.command, consentGranted: true, timeoutSecs: scorer.timeoutSecs, commandId,
+      workspacePath: ctx.trialRoot, command: scorer.command, consentGranted: true, timeoutSecs: scorer.timeoutSecs, commandId,
     });
     return {
       passed: result.exitCode === 0, exitCode: result.exitCode, timedOut: false, command: scorer.command,

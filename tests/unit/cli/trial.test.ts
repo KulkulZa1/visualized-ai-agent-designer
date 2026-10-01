@@ -378,6 +378,16 @@ describe("the command scorer", () => {
     expect(r.calls[1].args).toMatchObject({ command: "npm run lint", timeoutSecs: 300, commandId: "eval-1-laptop-t0-score-1" });
   });
 
+  it.skipIf(!canLink)("runs the command at the real path recorded when the trial's folder was made, not at the path it is reached by: nothing looks the folder up again", async () => {
+    const r = rig();
+    const via = join(dirname(r.trialDir), "via"); // another way to the same folder, through a link
+    symlinkSync(r.trialDir, via);
+
+    scored(await r.score([command()], { trialDir: via }));
+
+    expect(r.calls[0].args.workspacePath).toBe(r.trialDir);
+  });
+
   it("lists the command as running while it does, for the Ctrl+C that cancels it, and not afterwards", async () => {
     const r = rig();
     await r.score([command()]);
@@ -813,6 +823,37 @@ describe("restore and inject put the grader's files back by replacement", () => 
 
         expect(read(r.trialDir, "vendor/lib/index.js")).toBe("// lib\n");
         expect(readlinkSync(join(r.trialDir, "deps"))).toBe("vendor/lib");
+      });
+
+      it("is checked where the restore put it: the fixture has a/b/link -> ../../c, an agent makes a -> . in the trial, and the restore of a/b copies the link to b/link, where it leads out of the trial", async () => {
+        const r = rig();
+        put(r.fixtureDir, "c/data.txt", "c\n");
+        put(r.fixtureDir, "a/b/keep.txt", "k\n");
+        symlinkSync("../../c", join(r.fixtureDir, "a", "b", "link")); // fine in the fixture: it leads to c
+        copyTree(r.fixtureDir, r.trialDir, r.fixtureDir);
+        rmSync(join(r.trialDir, "a"), { recursive: true });
+        symlinkSync(".", join(r.trialDir, "a")); // a is now the trial's own folder, so a/b is b
+
+        const result = await r.score([command({ restore: ["a/b"] })]);
+
+        expect(result).toMatchObject({
+          missing: 'scorer tests: the restored a/b (put at b, where a link of the trial leads): b/link is a link whose target ("../../c") climbs out of the trial\'s folder: a step of it goes above it',
+        });
+        expect(r.calls).toEqual([]); // the command did not run
+      });
+
+      it("is let by where the restore put it when it still leads inside the trial from there", async () => {
+        const r = rig();
+        put(r.fixtureDir, "a/b/keep.txt", "k\n");
+        symlinkSync("../b/keep.txt", join(r.fixtureDir, "a", "b", "link")); // a/b/link leads to a/b/keep.txt
+        copyTree(r.fixtureDir, r.trialDir, r.fixtureDir);
+        rmSync(join(r.trialDir, "a"), { recursive: true });
+        symlinkSync(".", join(r.trialDir, "a"));
+
+        const result = scored(await r.score([command({ restore: ["a/b"] })]));
+
+        expect(result.reward).toBe(1); // at b/link it leads to b/keep.txt, which is there
+        expect(readlinkSync(join(r.trialDir, "b", "link"))).toBe("../b/keep.txt");
       });
 
       it("is checked again when a restore copies it: a link that no longer qualifies makes the trial missing", async () => {

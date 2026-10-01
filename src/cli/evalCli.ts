@@ -178,7 +178,7 @@ async function evaluate(argv: string[]): Promise<number> {
   };
   process.on("SIGINT", onSigint);
   let tempDir: string | undefined;
-  let outMade = false;
+  const outMade: string[] = []; // the folders this eval made for --out (it may be a/b/c, new all the way), outermost first
   try {
     // The folders are made only now, after every check and with harness-core up: a failure here leaves nothing behind.
     try {
@@ -188,7 +188,8 @@ async function evaluate(argv: string[]): Promise<number> {
       return EXIT.notStarted;
     }
     try {
-      outMade = kindOf(outDir) === "missing";
+      const { existing, rest } = nearestExisting(outDir);
+      rest.forEach((_, i) => outMade.push(join(existing, ...rest.slice(0, i + 1))));
       mkdirSync(outDir, { recursive: true });
     } catch (e) {
       err(`harness eval: cannot make the output folder ${outDir}: ${messageOf(e)}`);
@@ -288,11 +289,13 @@ async function evaluate(argv: string[]): Promise<number> {
   } finally {
     process.off("SIGINT", onSigint);
     await core.close();
-    if (outMade) {
+    // A folder this eval made for --out and wrote nothing to goes again, the innermost first. (rmdir takes only an empty
+    // one, so one with something in it stays, and so does one that was there: it is not in the list.)
+    for (const made of outMade.reverse()) {
       try {
-        if (readdirSync(outDir).length === 0) rmdirSync(outDir); // nothing was written to the folder this eval made: it leaves none
+        rmdirSync(made);
       } catch {
-        // it is not ours to worry about
+        // it has something in it, or it was never made (mkdir stopped before it)
       }
     }
     if (tempDir !== undefined && !args.keepWorkspaces) {

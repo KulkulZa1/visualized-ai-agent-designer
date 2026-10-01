@@ -4,10 +4,14 @@
  * files are different: there unknown keys are dropped). Every path is checked when the file is
  * loaded, before any trial. Pure of the run: nothing here starts a process.
  *
- * Links. Where a path leads is decided by the kernel, never by reading the path as text: a `..` after
- * a link goes up from the link's target, not from the link, so a path that looks inside a folder can
- * lead out of it. Every decision below is made on `realpathSync.native`, and the helpers that need
- * one (`physicalPath`, `linkProblem`) are here.
+ * Links. Where a path leads is the kernel's to say, never the text's: a `..` after a link goes up from
+ * the link's target, not from the link, so a path that looks inside a folder can lead out of it. Two
+ * helpers ask the kernel (`realpathSync.native`): `physicalPath`, and `realOf` in the loader. `linkProblem`
+ * walks a link's target by hand, one step at a time as the kernel does (`walkLink`), because it must also
+ * know that no step goes above the fixture, which the kernel's answer does not say; the kernel then
+ * cross-checks where the walk ended. `relativePathProblem` is lexical on purpose: it judges a path as the
+ * task set wrote it, before there is any folder, and what is stored is written out (no `.` or `..`), so that
+ * nothing is left to be read two ways.
  */
 import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
@@ -235,10 +239,11 @@ const MAX_LINK_HOPS = 40;
 
 /** Walks the target `text` of the link at `link` one step at a time, as the kernel does: where the link is, with each link
  *  on the way replaced by its own target, and a `..` going up from the place the walk has reached (not from where the
- *  text says it is: after a link, those are different places). `root` is the fixture's real path and `link` a real path
- *  below it. Returns the place the walk ends at, or what stopped it: it climbed above `root` at some step (even to come
- *  back in later: in a copy of the fixture, above it is not the fixture's own place), it met a link with an absolute
- *  target, or it led to nothing (a name that is not there, a file with something after it, links in a loop). */
+ *  text says it is: after a link, those are different places). `root` is the real path of the folder the link must stay
+ *  in (the fixture's) and `link` a real path below it. Returns the place the walk ends at, or what stopped it: it climbed
+ *  above `root` at some step (even to come back in later: in a copy of the fixture, above it is not the fixture's own
+ *  place), it met a link with an absolute target, or it led to nothing (a name that is not there, a file with something
+ *  after it, links in a loop). */
 function walkLink(link: string, text: string, root: string): { end: string } | { stop: "climbs" | "absolute" | "nothing" } {
   let here = dirname(link);
   let atFile = false;
@@ -282,10 +287,13 @@ function walkLink(link: string, text: string, root: string): { end: string } | {
  *  there and to copy as it is. `root` is the fixture's real path; `link` is a real path below it, with no
  *  link on the way (a walk that never follows a link gives it so). A link in a fixture is allowed when:
  *  - its target is relative: an absolute one leads out of every copy;
- *  - the kernel's walk of it (`walkLink`, links and all, never reading `..` as text) never goes above the fixture, and
+ *  - the walk of it (`walkLink`, links and all, never reading `..` as text) never goes above the fixture, and
  *    ends at a place that exists. The copy is another folder, and above it is not the same place as above the fixture;
- *    so a walk that stays in the fixture is the same walk in the copy, and the copied link points inside the copy. */
-export function linkProblem(link: string, root: string): string | undefined {
+ *    so a walk that stays in the fixture is the same walk in the copy, and the copied link points inside the copy;
+ *  - the kernel agrees with where the walk ended (`realpathSync.native`): it says no to what the walk has no word for,
+ *    a trailing slash after a file for one.
+ *  `folder` is how the messages call the folder `root`: the same rule judges the links a restore has put in a trial. */
+export function linkProblem(link: string, root: string, folder = "the fixture"): string | undefined {
   let text: string;
   try {
     text = readlinkSync(link);
@@ -293,11 +301,11 @@ export function linkProblem(link: string, root: string): string | undefined {
     return `is a link that cannot be read (${errorCode(e)})`;
   }
   const target = JSON.stringify(text);
-  if (isAbsoluteLinkTarget(text)) return `is a link with an absolute target (${target}): a link in a fixture must be relative`;
+  if (isAbsoluteLinkTarget(text)) return `is a link with an absolute target (${target}): a link in ${folder} must be relative`;
   const walked = walkLink(link, text, root);
   const nothing = `is a link to nothing (its target ${target} does not exist, or links loop)`;
   if ("stop" in walked) {
-    if (walked.stop === "climbs") return `is a link whose target (${target}) climbs out of the fixture: a step of it goes above the fixture's folder`;
+    if (walked.stop === "climbs") return `is a link whose target (${target}) climbs out of ${folder}: a step of it goes above it`;
     return walked.stop === "absolute" ? `is a link whose target (${target}) goes through a link with an absolute target` : nothing;
   }
   let real: string;
@@ -306,24 +314,25 @@ export function linkProblem(link: string, root: string): string | undefined {
   } catch {
     return nothing;
   }
-  // The walk agrees with the kernel, unless the file system is not the plain kind this walk knows: then it is not trusted.
-  if (!isInsideDir(root, real)) return `is a link that leads out of the fixture (it ends at ${real})`;
+  if (!isInsideDir(root, real)) return `is a link that leads out of ${folder} (it ends at ${real})`;
   return undefined;
 }
 
 const LINK_ON_THE_WAY = "is a link (a path in a task set may not go through a link)";
 const LINK_NOT_ALLOWED = "is a link (grader files and task files may not contain links)";
-const shown = (base: string, path: string) => relative(base, path).split(pathSep).join("/") || ".";
+/** `path` as a message says it: below `base`, written with "/". */
+export const shown = (base: string, path: string) => relative(base, path).split(pathSep).join("/") || ".";
 
 /** Why the tree at `path` is not plain material, or undefined when every entry is. Nothing is followed: a link
  *  is looked at where it is and never entered, so `a -> .` cannot loop. A pipe, a device or a socket is never
- *  material (a copy of it would block). A link is refused, unless `root` (the real path of a fixture) is given:
- *  then it is checked with `linkProblem`. `show` writes a path as the message should say it. */
-function treeProblem(path: string, show: (path: string) => string, root?: string): string | undefined {
+ *  material (a copy of it would block). A link is refused, unless `root` (the real path of a fixture, or of the trial's
+ *  folder that a restore has put the tree in; `folder` calls it so) is given: then it is checked with `linkProblem`.
+ *  `show` writes a path as the message should say it. */
+export function treeProblem(path: string, show: (path: string) => string, root?: string, folder?: string): string | undefined {
   const kind = kindOf(path);
   if (kind === "link") {
     if (root === undefined) return `${show(path)} ${LINK_NOT_ALLOWED}`;
-    const problem = linkProblem(path, root);
+    const problem = linkProblem(path, root, folder);
     return problem === undefined ? undefined : `${show(path)} ${problem}`;
   }
   if (kind === "unreadable") return `${show(path)} cannot be looked at (no permission?)`;
@@ -336,7 +345,7 @@ function treeProblem(path: string, show: (path: string) => string, root?: string
       return `${show(path)} cannot be read (${errorCode(e)})`;
     }
     for (const name of names) {
-      const problem = treeProblem(join(path, name), show, root);
+      const problem = treeProblem(join(path, name), show, root, folder);
       if (problem) return problem;
     }
   }

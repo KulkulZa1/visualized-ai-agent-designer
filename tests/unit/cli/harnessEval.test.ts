@@ -296,9 +296,11 @@ describe("harness eval", { timeout: 60_000 }, () => {
       taskSet: { trials: 1 },
       commands: { "quick cmd": { exitCode: 0 }, "slow cmd": { exitCode: 0, delayMs: 60_000 } },
     });
+    const tmp = join(dir, "trial-folders"); // the folder the trials are made in: the eval's own, so that what it leaves can be told
+    mkdirSync(tmp);
     const child = spawn(process.execPath, [
       cli, "eval", join(dir, "tasks.yaml"), "--core", fakeCore, "--out", out(dir), "--allow-scorer", "quick cmd", "--allow-scorer", "slow cmd",
-    ], { cwd: dir, env: environment(dir), stdio: ["ignore", "pipe", "pipe"] });
+    ], { cwd: dir, env: environment(dir, { TMPDIR: tmp }), stdio: ["ignore", "pipe", "pipe"] });
     let stderr = "";
     child.stderr.setEncoding("utf8");
     child.stderr.on("data", (chunk) => { stderr += chunk; });
@@ -316,12 +318,15 @@ describe("harness eval", { timeout: 60_000 }, () => {
       // The first trial is in the report, which says the eval is still running.
       expect(reportOf(dir)).toMatchObject({ status: "running", n_expected: 3, n_done: 1, S: 1 });
       expect(reportOf(dir).per_task.fast.trials).toHaveLength(1);
+      const [folderOfTrials] = readdirSync(tmp);
+      expect(readdirSync(join(tmp, folderOfTrials))).toEqual(["slow-t0"]); // the interrupted trial's folder is there now
 
       const stopped = Date.now();
       child.kill("SIGINT");
       expect(await closed).toBe(130);
 
       expect(Date.now() - stopped).toBeLessThan(20_000); // the 60 s command was cancelled, not waited for
+      expect(readdirSync(tmp)).toEqual([]); // and the interrupted trial's folder is gone, with the folder of the trials
       expect(stderr).toContain("Stopping the eval… (press Ctrl+C again to exit now)");
       const slow = requestsOf(dir).find((r) => r.cmd === "execute_command" && r.args.command === "slow cmd");
       expect(requestsOf(dir)).toContainEqual({ cmd: "cancel_command", args: { commandId: slow?.args.commandId } });

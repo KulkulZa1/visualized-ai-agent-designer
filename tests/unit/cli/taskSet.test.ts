@@ -344,7 +344,7 @@ describe("loadTaskSet", () => {
       const dir = project();
       symlinkSync(fixture(dir, "package.json"), fixture(dir, "test", "abs.json"));
 
-      expect(problems(dir)).toMatch(/task laptop: workspace: fixtures\/laptop\/test\/abs\.json is a link with an absolute target .*a link in a fixture must be relative/);
+      expect(problems(dir)).toMatch(/task laptop: workspace: fixtures\/laptop\/test\/abs\.json is a link with an absolute target .*a link in the fixture must be relative/);
     });
 
     it("refuses a link that leads out of the fixture, whether its target says so or not", () => {
@@ -399,6 +399,13 @@ describe("loadTaskSet", () => {
       symlinkSync("two", fixture(loop, "one"));
       symlinkSync("one", fixture(loop, "two"));
       expect(problems(loop)).toMatch(/is a link to nothing .*links loop/);
+    });
+
+    it("asks the kernel where a link ends, as well as walking it: a trailing slash after a file is a link to nothing, which the walk alone lets by", () => {
+      const dir = project();
+      symlinkSync("package.json/", fixture(dir, "l")); // the kernel says ENOTDIR: a file is not a folder
+
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/l is a link to nothing/);
     });
 
     it("refuses a workspace that is itself a link, and one reached through a link", () => {
@@ -479,6 +486,24 @@ describe.skipIf(!canLink)("linkProblem", () => {
     expect(linkProblem(join(root, "via-abs"), root)).toMatch(/^is a link whose target \("abs\/f\.txt"\) goes through a link with an absolute target/);
     expect(linkProblem(join(root, "above"), root)).toMatch(/^is a link whose target \("sub\/up\/\.\."\) climbs out of the fixture/);
     expect(linkProblem(join(root, "through-file"), root)).toMatch(/^is a link to nothing/);
+  });
+
+  it("asks the kernel too: a trailing slash after a file passes the walk and is a link to nothing", () => {
+    const root = fixtureRoot();
+    symlinkSync("sub/f.txt/", join(root, "slash"));
+    symlinkSync("sub/", join(root, "folder-slash")); // a trailing slash after a folder is fine
+
+    expect(linkProblem(join(root, "slash"), root)).toMatch(/^is a link to nothing/);
+    expect(linkProblem(join(root, "folder-slash"), root)).toBeUndefined();
+  });
+
+  it("calls the folder what it is told to, for the links a restore puts in a trial", () => {
+    const root = fixtureRoot();
+    symlinkSync("../../out", join(root, "sub", "up"));
+    symlinkSync(join(root, "sub"), join(root, "abs"));
+
+    expect(linkProblem(join(root, "sub", "up"), root, "the trial's folder")).toMatch(/^is a link whose target \("\.\.\/\.\.\/out"\) climbs out of the trial's folder: a step of it goes above it$/);
+    expect(linkProblem(join(root, "abs"), root, "the trial's folder")).toMatch(/: a link in the trial's folder must be relative$/);
   });
 
   it("gives up on links that loop, and on a link that cannot be read", () => {

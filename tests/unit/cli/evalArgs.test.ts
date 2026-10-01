@@ -162,6 +162,12 @@ describe("EVAL_USAGE", () => {
     expect(EVAL_USAGE).toMatch(/--keep-workspaces +Keep each trial's folder, as it is after scoring: restored files back, grader files in/);
   });
 
+  it("says that the output and file scorers read what the agent left, before any command scorer runs", () => {
+    const text = EVAL_USAGE.replace(/\s+/g, " ");
+
+    expect(text).toContain("Output and file scorers read the trial before any command scorer runs, so they see what the agent left, and a file scorer cannot check what a scorer command builds.");
+  });
+
   it("says which scorer commands run, how the exit codes read, and that every trial checks the provider", () => {
     expect(EVAL_USAGE).toContain("--allow-scorer");
     expect(EVAL_USAGE).toMatch(/Exit codes: 0 the eval finished, 1 --min-score was given and S is below it, 2 bad usage/);

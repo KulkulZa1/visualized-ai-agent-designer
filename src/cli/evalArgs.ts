@@ -40,7 +40,9 @@ export interface EvalArgs extends ProviderArgs {
 export const EVAL_USAGE = `Usage: harness eval <tasks.yaml> [options]
 
 Runs a workflow on each task of a task set k times, each time in a fresh copy of the task's workspace,
-scores every trial with the task's scorers, and writes report.json after each trial.
+scores every trial with the task's scorers, and writes report.json after each trial. Output and file scorers
+read the trial before any command scorer runs, so they see what the agent left, and a file scorer cannot
+check what a scorer command builds.
 
   --workflow <file>          The workflow to run (default: the task set's \`workflow\`)
   --split <name>             The tasks to run: evolve (default), heldout, smoke or all

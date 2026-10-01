@@ -64,10 +64,12 @@ function refuse(fn: "readdirSync" | "rmSync" | "copyFileSync" | "writeFileSync",
   return fault;
 }
 
+/** Where os.tmpdir() looks: TMPDIR on POSIX, TEMP and TMP on Windows, which ignores TMPDIR. */
+const TEMP_VARIABLES = ["TMPDIR", "TEMP", "TMP"];
 const scratch: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
-  for (const name of ["FAKE_CORE_SCENARIO", "FAKE_CORE_LOG", "TMPDIR"]) savedEnv[name] = process.env[name];
+  for (const name of ["FAKE_CORE_SCENARIO", "FAKE_CORE_LOG", ...TEMP_VARIABLES]) savedEnv[name] = process.env[name];
 });
 afterEach(() => {
   faults.active.length = 0; // before the cleanup, which uses the same functions
@@ -214,23 +216,51 @@ describe("runTrial, when the file system refuses", () => {
 // ── The eval ──────────────────────────────────────────────────────────────────
 
 describe("runEval, when the file system refuses", () => {
-  /** `harness eval` in this process: its exit code, and what it wrote to stdout and stderr. */
+  /** `harness eval` in this process: its exit code, what it wrote to stdout and stderr, and how many Ctrl+C handlers the
+   *  process had before it, the most while it wrote a line of progress, and after it. However the eval ends, it gives back
+   *  the handler it took (the process that runs it is not one that ends with it, as a test's is not). */
   async function run(tasks: string, out: string, extra: string[] = []) {
     const stdout: string[] = [];
     const stderr: string[] = [];
-    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => { stdout.push(String(chunk)); return true; });
+    const before = process.listenerCount("SIGINT");
+    let during = before;
+    vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+      during = Math.max(during, process.listenerCount("SIGINT"));
+      stdout.push(String(chunk));
+      return true;
+    });
     vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
     const code = await runEval([tasks, "--core", resolve(__dirname, "../../fixtures/fake-core.mjs"), "--out", out, ...extra]);
+    const after = process.listenerCount("SIGINT");
     vi.restoreAllMocks();
-    return { code, stdout: stdout.join(""), stderr: stderr.join("") };
+    expect(after, "the Ctrl+C handler of the eval is still there").toBe(before);
+    return { code, stdout: stdout.join(""), stderr: stderr.join(""), sigint: { before, during, after } };
   }
   const reportIn = (out: string) => JSON.parse(readFileSync(join(out, "report.json"), "utf8"));
-  /** A folder for the trials that is the test's own, so that what is left in it can be told. */
+  /** A folder for the trials that is the test's own, so that what is left in it can be told: the one variable os.tmpdir() reads on
+   *  each platform is set (all three are, as the platform is not asked). */
   function privateTemp() {
     const temp = folder("harness-temp-");
-    process.env.TMPDIR = temp;
+    for (const name of TEMP_VARIABLES) process.env[name] = temp;
     return temp;
   }
+
+  it("takes a Ctrl+C handler while it runs and gives it back when it ends, whether the eval finished or not", async () => {
+    const finished = project();
+
+    const done = await run(finished.tasks, finished.out);
+
+    expect(done.code).toBe(0);
+    expect(done.sigint.during).toBe(done.sigint.before + 1); // there while the trial's line was written
+    expect(done.sigint.after).toBe(done.sigint.before);
+
+    const failing = project();
+    refuse("writeFileSync", "report.json.tmp");
+    const failed = await run(failing.tasks, failing.out); // the handler was taken, and the eval ended before any trial
+
+    expect(failed.code).toBe(3);
+    expect(failed.sigint.after).toBe(failed.sigint.before);
+  });
 
   it("is 2, and says why, when a folder of a fixture cannot be read: it is a problem of the task set, and nothing starts", async () => {
     const p = project();
@@ -269,6 +299,23 @@ describe("runEval, when the file system refuses", () => {
     expect(p.asked()).not.toContain("check_provider_health"); // no trial was tried
     expect(existsSync(p.out)).toBe(false);
     expect(readdirSync(temp)).toEqual([]); // and no folder of trials
+  });
+
+  it("removes every folder it made for a nested --out when it ends before it wrote anything, and no folder that was there", async () => {
+    const p = project();
+    refuse("writeFileSync", "report.json.tmp");
+    mkdirSync(join(p.dir, "kept"));
+    writeFileSync(join(p.dir, "kept", "keep.txt"), "mine\n");
+    mkdirSync(join(p.dir, "empty")); // there, and empty: still not the eval's to remove
+
+    const underKept = await run(p.tasks, join(p.dir, "kept", "x", "y", "z"));
+    const underEmpty = await run(p.tasks, join(p.dir, "empty", "inner"));
+    const allNew = await run(p.tasks, join(p.dir, "a", "b", "c"));
+
+    expect([underKept.code, underEmpty.code, allNew.code]).toEqual([3, 3, 3]);
+    expect(readdirSync(join(p.dir, "kept"))).toEqual(["keep.txt"]);
+    expect(readdirSync(join(p.dir, "empty"))).toEqual([]);
+    expect(existsSync(join(p.dir, "a"))).toBe(false);
   });
 
   it("is 3 when the last report cannot be written, and still prints the results; the report is tried once more, as an error", async () => {

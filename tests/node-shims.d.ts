@@ -114,5 +114,6 @@ declare const process: {
   stderr: { write(text: string): boolean };
   on(event: "SIGINT", listener: () => void): void;
   off(event: "SIGINT", listener: () => void): void;
+  listenerCount(event: "SIGINT"): number;
   exit(code?: number): never;
 };
