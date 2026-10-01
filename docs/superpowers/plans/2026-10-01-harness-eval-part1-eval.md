@@ -37,7 +37,7 @@ plan does not repeat it. Read `AGENT.md` for the project rules.
   - every check of §1, before any trial:
     - ids, splits, `taskFile` or `task`;
     - paths inside the task set's folder;
-    - no symlinks in a fixture or an injected file;
+    - links: only relative links that stay inside the fixture at every step (changed in review; see the spec's §1), none in an injected file;
     - `restore` and `inject.to` inside the trial;
     - `node:` names exactly one agent of the workflow under test.
 - **`src/cli/trial.ts`:**
@@ -121,7 +121,7 @@ plan does not repeat it. Read `AGENT.md` for the project rules.
   - a bad id and duplicate ids;
   - `task` and `taskFile` both or neither;
   - a path leaving the task set's folder;
-  - a symlink in a fixture;
+  - links in a fixture: allowed and refused kinds (changed in review; see the spec's §1);
   - `restore` and `inject.to` leaving the trial;
   - `node:` naming no agent or two.
 - **Scorers:**

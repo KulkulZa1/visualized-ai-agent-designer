@@ -76,13 +76,43 @@ tasks:
 
 **Paths.**
 - **Inside the task set's folder:** `workspace`, `taskFile` and an `inject.from`
-  must resolve inside the task set's own folder. Symlinks are refused.
+  must resolve inside the task set's own folder.
 - **The `workflow`** may be anywhere; it is read, never copied.
 - **Inside the trial's folder:** `restore` paths and `inject.to` must stay
   inside it: no absolute paths, and no `..` that leaves it.
+- **Containment is decided physically.**
+  - It uses the operating system's own resolution (`realpathSync.native`), never
+    a lexical one.
+  - At run time it is checked against the trial folder's real path, recorded when
+    the folder is made.
+  - What gets deleted or written is the real place, never the unresolved path.
+  - Found in review: lexical resolution let a link chain an agent made, such as
+    `a/up -> ..` and `test -> a/up/..`, lead a restore or inject outside the
+    trial.
 - **One helper** checks containment. It carries a `[KEEP-IN-SYNC]` marker, like
   the other copies of `isInsideDir`.
 - **When the checks run.** All of it is checked before any trial.
+
+**Links.**
+- **Allowed in a fixture:** a link whose text is relative and whose every step
+  stays inside the fixture's own root. An npm `node_modules/.bin` is such a link.
+  It is copied verbatim, so in a trial it points inside the trial.
+- **Refused:**
+  - absolute targets;
+  - dangling links and loops;
+  - links that leave the fixture, even ones that come back in by the fixture's
+    name;
+  - a link as the workspace or on the way to it;
+  - any link in an `inject.from` source or a `taskFile`.
+- **Untrusted in a trial.** Every link in a trial is untrusted, copied ones
+  included. After a restore or inject copy, the placed tree's links are checked
+  against the trial root again.
+
+**Other checks.**
+- Task ids that clash with object keys (`__proto__`, `constructor`, `prototype`)
+  or Windows device names are refused.
+- `contains` and `notContains` need at least one entry.
+- `trials` and `-k` are capped at 1000.
 
 **Scorers.** Each scorer gives 0 or 1, and a scorer's `weight` defaults to 1.
 - **`command`** passes on exit code 0.
@@ -106,6 +136,15 @@ tasks:
   - The final-agent logic, now private in `src/cli/report.ts`, is shared.
 - **`file`** checks one file in the trial's folder after the run: it exists, and
   its `contains` and `matches` checks hold.
+
+**The order.**
+- `output` and `file` scorers run first, on what the agent left.
+- Then the `command` scorers run in declared order. Each prepares its own
+  `restore` and `inject`, and sees the earlier ones' effects.
+- The report keeps the declared order.
+- A file scorer therefore cannot check what a scorer command builds.
+- Found in review: a file scorer listed after a restore graded the restored
+  fixture, not the agent's work.
 
 **A trial's reward** is the weighted mean of its scorers.
 
@@ -132,7 +171,8 @@ Each trial goes through these steps:
    - It is the same engine as `harness run`, in the same process.
    - One `harness-core` serves the whole eval.
    - The lines `harness run` would print go to the trial's `run.log`.
-4. **The scorers** run, with the command scorers' files prepared first (§1).
+4. **The scorers** run in the order of §1. Output and file scorers go first, then
+   the command scorers, each with its files prepared first.
    - `output` checks read the run's result in memory, not the run record in the
      folder, which an agent with `bash` could have changed.
 5. **What is kept.** It is saved under `trials/<task>/t<i>/` in the eval's output
@@ -170,8 +210,13 @@ harness eval <tasks.yaml> [--workflow <file>] [--split evolve|heldout|smoke|all]
   - the task set's `trials` (else 1);
   - `--max-parallel-trials 1`. A local server usually answers one request at a
     time, and parallel trials would skew the timings;
-  - `--out`: `.harness/evals/<evalId>/` in the current folder. An `--out` folder
-    that exists and is not empty is exit 2.
+  - `--out`: `.harness/evals/<evalId>/` in the current folder.
+    - An `--out` folder that exists and is not empty is exit 2.
+    - An `--out` inside a selected task's workspace or `inject.from` source is
+      also exit 2. The default counts, and so does the trials' temp folder. Every
+      trial starts as a copy of those, so it would see the earlier trials'
+      results.
+    - The folders are made only after all checks pass.
 - **Order.** Trials run in task order, then trial order.
 - **Provider and agent options** are those of `harness run`, with the same
   environment variables:
@@ -247,6 +292,11 @@ The output folder holds `report.json` and `trials/<task>/t<i>/`.
 after every trial, with status `running`. The last write gives `done`,
 `cancelled` or `error`.
 
+**A report that is not `done`:**
+- it has `n_done` next to `n_expected`;
+- `S` and `C` cover the finished trials (`S` is `null` before the first one);
+- a report that stopped early has a top-level `error`.
+
 ```json
 { "version": 1, "evalId": "eval-…", "status": "done",
   "taskSet": { "name": "…", "path": "…", "hash": "…" },
@@ -279,10 +329,21 @@ after every trial, with status `running`. The last write gives `done`,
 
 - `0`: the eval finished, whatever the score.
 - `1`: `--min-score` was given and `S` is below it.
-- `2`: bad usage, an invalid task set or workflow, an unapproved scorer command,
-  or a non-empty `--out`.
-- `3`: the eval could not start: `harness-core` is missing, or the first trial's
-  run did not start. A later trial that does not start counts as missing.
+- `2`: any of these:
+  - bad usage;
+  - an invalid or unreadable task set, or an invalid workflow;
+  - an unapproved scorer command;
+  - a non-empty `--out`, or one inside a task's workspace or grader files.
+- `3`: the eval could not start or went wrong. That covers:
+  - `harness-core` is missing;
+  - the first trial's run did not start;
+  - a folder could not be made;
+  - a report write failed;
+  - `harness-core` stopped mid-eval;
+  - any other unexpected error.
+
+  A later trial that does not start counts as missing. No error ends as exit 1,
+  which is reserved for `--min-score`.
 - `130`: interrupted.
 
 ## 8. Code
