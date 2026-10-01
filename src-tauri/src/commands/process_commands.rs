@@ -13,12 +13,15 @@ use std::time::{Duration, Instant};
 
 const HOOK_TIMEOUT_SECS: u64 = 30;
 
-/// Provider credentials the backend reads from the environment (api_commands.rs).
-const PROVIDER_KEY_ENV_VARS: [&str; 4] = [
+/// Provider credentials in the environment that hooks and agents' commands (and `harness eval`'s scorer
+/// commands) must not inherit: the ones the backend reads (api_commands.rs), and the Custom endpoint's key,
+/// `HARNESS_CUSTOM_API_KEY`, which `harness run` and `harness eval` read and pass on to the model calls.
+const PROVIDER_KEY_ENV_VARS: [&str; 5] = [
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
     "OLLAMA_API_KEY",
     "OLLAMA_REMOTE_API_KEY",
+    "HARNESS_CUSTOM_API_KEY",
 ];
 
 #[derive(Debug, Serialize)]
@@ -338,7 +341,23 @@ pub fn execute_command(
 
     let timeout = Duration::from_secs(timeout_secs.clamp(1, 3600));
     let registration = Registration(command_id);
-    match wait_with_timeout(shell, timeout, |pid| registration.started(pid)) {
+    command_result(
+        wait_with_timeout(shell, timeout, |pid| registration.started(pid)),
+        timeout,
+    )
+}
+
+/// What a command's run comes to, as `execute_command` answers it.
+///
+/// [KEEP-IN-SYNC] with `COMMAND_TIMEOUT_PREFIX` in src/cli/trial.ts: `harness eval` tells a scorer command
+/// that ran out of time ("Command timed out after N s": the scorer fails) from one that did not run (any
+/// other error, "Could not start the command: …": the trial is missing) by the start of these texts.
+/// A test pins both here, and tests/unit/cli/trial.test.ts reads this file for them.
+fn command_result(
+    run: std::io::Result<Option<HookResult>>,
+    timeout: Duration,
+) -> AppResult<HookResult> {
+    match run {
         Ok(Some(result)) => Ok(result),
         Ok(None) => Err(AppError::Other(format!(
             "Command timed out after {} s",
@@ -1248,37 +1267,67 @@ mod tests {
         assert!(output.stdout.contains("enabled"));
     }
 
-    const PROBE_SECRET: &str = "probe-secret-must-not-leak";
+    /// The credentials a child must not inherit, spelled out here: a name missing from PROVIDER_KEY_ENV_VARS fails
+    /// the tests below, which a loop over that list could not notice. `HARNESS_CUSTOM_API_KEY` is the Custom
+    /// endpoint's key for `harness run` and `harness eval`.
+    const KEY_VARS: [&str; 5] = [
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OLLAMA_API_KEY",
+        "OLLAMA_REMOTE_API_KEY",
+        "HARNESS_CUSTOM_API_KEY",
+    ];
 
-    /// The app holds a provider key: does a child it starts see it? `run` starts the
-    /// child and returns its output.
-    fn assert_child_does_not_see_the_apps_key(test: &str, run: fn(&Path) -> AppResult<HookResult>) {
-        let Some(seen) = in_fresh_process(test, &[("OLLAMA_REMOTE_API_KEY", PROBE_SECRET)], || {
+    /// The value the probe gives a variable: one for each, so that a leak names the variable.
+    fn probe_secret(var: &str) -> String {
+        format!("probe-secret-must-not-leak-{var}")
+    }
+
+    /// A shell line that prints every variable of KEY_VARS as `name=value`, in the platform's own shell.
+    fn echo_keys(windows: bool) -> String {
+        let echoes = KEY_VARS.iter().map(|var| {
+            if windows { format!("echo {var}=%{var}%") } else { format!("echo {var}=${var}") }
+        });
+        echoes.collect::<Vec<_>>().join(if windows { " & " } else { "; " })
+    }
+
+    /// The app holds every provider key: does a child it starts see any? `run` starts the child with the
+    /// shell line it is given and returns its output.
+    fn assert_child_does_not_see_the_apps_keys(test: &str, run: fn(&Path, &str) -> AppResult<HookResult>) {
+        let secrets: Vec<(&str, String)> = KEY_VARS.iter().map(|var| (*var, probe_secret(var))).collect();
+        let env: Vec<(&str, &str)> = secrets.iter().map(|(var, secret)| (*var, secret.as_str())).collect();
+        let Some(seen) = in_fresh_process(test, &env, || {
             let dir = tempdir().unwrap();
-            let app_has_key = std::env::var("OLLAMA_REMOTE_API_KEY").as_deref() == Ok(PROBE_SECRET);
-            let stdout = run(dir.path()).map(|output| output.stdout).unwrap_or_else(|e| format!("error: {e}"));
-            format!("app_has_key={app_has_key} child_stdout={:?}", stdout.trim())
+            let app_has_keys = KEY_VARS
+                .iter()
+                .all(|var| std::env::var(var).as_deref() == Ok(probe_secret(var).as_str()));
+            let line = echo_keys(cfg!(target_os = "windows"));
+            let stdout = run(dir.path(), &line).map(|output| output.stdout).unwrap_or_else(|e| format!("error: {e}"));
+            format!("app_has_keys={app_has_keys} child_stdout={:?}", stdout.trim())
         }) else {
             return;
         };
 
-        assert!(seen.contains("app_has_key=true"), "the app had no key to leak: {seen}");
-        assert!(seen.contains(r#"child_stdout="key="#), "the child did not run: {seen}");
-        assert!(!seen.contains(PROBE_SECRET), "the child saw the key: {seen}");
+        assert!(seen.contains("app_has_keys=true"), "the app had keys to leak: {seen}");
+        assert!(seen.contains(r#"child_stdout="OPENAI_API_KEY="#), "the child did not run: {seen}");
+        for var in KEY_VARS {
+            assert!(!seen.contains(&probe_secret(var)), "the child saw {var}: {seen}");
+        }
     }
 
     #[test]
     fn child_processes_do_not_inherit_provider_api_keys() {
-        // Hooks must not be able to read the app's keys.
-        assert_child_does_not_see_the_apps_key("child_processes_do_not_inherit_provider_api_keys", |dir| {
-            run_line(dir, "echo key=%OLLAMA_REMOTE_API_KEY%", "echo key=$OLLAMA_REMOTE_API_KEY", Duration::from_secs(5))
+        // Hooks must not be able to read the app's keys, the Custom endpoint's included.
+        assert_child_does_not_see_the_apps_keys("child_processes_do_not_inherit_provider_api_keys", |dir, line| {
+            run_line(dir, line, line, Duration::from_secs(5))
         });
     }
 
     #[test]
     fn agent_commands_do_not_inherit_provider_api_keys() {
-        assert_child_does_not_see_the_apps_key("agent_commands_do_not_inherit_provider_api_keys", |dir| {
-            run_in(dir, platform("echo key=%OLLAMA_REMOTE_API_KEY%", "echo key=$OLLAMA_REMOTE_API_KEY"), 10)
+        // Nor may agents' commands, and the scorer commands of `harness eval`, which run through the same command.
+        assert_child_does_not_see_the_apps_keys("agent_commands_do_not_inherit_provider_api_keys", |dir, line| {
+            run_in(dir, line, 10)
         });
     }
 
@@ -1404,8 +1453,27 @@ mod tests {
         let line = if cfg!(target_os = "windows") { "ping -n 8 127.0.0.1 >nul" } else { "sleep 8" };
         let result = run_in(dir.path(), line, 1);
 
-        assert!(matches!(result, Err(AppError::Other(message)) if message.contains("timed out")));
+        assert!(matches!(result, Err(AppError::Other(message)) if message == "Command timed out after 1 s"));
         assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_command_that_ran_out_of_time_and_one_that_could_not_start_say_so_in_these_words() {
+        // [KEEP-IN-SYNC] with COMMAND_TIMEOUT_PREFIX in src/cli/trial.ts: `harness eval` reads these texts to fail
+        // a scorer that timed out, and to make the trial missing when its command did not run.
+        let timed_out = command_result(Ok(None), Duration::from_secs(7)).unwrap_err();
+        assert_eq!(timed_out.to_string(), "Command timed out after 7 s");
+        let not_started = std::io::Error::new(ErrorKind::NotFound, "No such file or directory (os error 2)");
+        let refused = command_result(Err(not_started), Duration::from_secs(7)).unwrap_err();
+        assert_eq!(refused.to_string(), "Could not start the command: No such file or directory (os error 2)");
+        // The two are told apart by the start of the text, as trial.ts does.
+        assert!(timed_out.to_string().starts_with("Command timed out after"));
+        assert!(!refused.to_string().starts_with("Command timed out after"));
+
+        // A command that ran comes back as it is, whatever its exit code.
+        let ran = HookResult { exit_code: 3, stdout: "out".into(), stderr: "err".into(), duration_ms: 5 };
+        let result = command_result(Ok(Some(ran)), Duration::from_secs(7)).unwrap();
+        assert_eq!((result.exit_code, result.stdout.as_str(), result.stderr.as_str()), (3, "out", "err"));
     }
 
     #[test]

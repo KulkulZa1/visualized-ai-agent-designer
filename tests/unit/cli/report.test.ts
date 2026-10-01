@@ -80,6 +80,25 @@ describe("createReporter", () => {
     ]);
   });
 
+  it("prints and emits nothing more for the usage a node's update carries: the lines, and the events, are the same", () => {
+    const usage = { input: 250, output: 30, calls: 2, callsWithoutUsage: 0 };
+    for (const json of [false, true]) {
+      const lines = (withUsage: boolean) => {
+        const { reporter: { events }, out } = capture(json);
+        events.onRunStarted("run-1", "W");
+        events.onAgentUpdate("Coder", { agentId: "Coder", agentName: "Coder", status: "running", startedAt: 1000,
+          modelUsed: "qwen3:8b", providerUsed: "ollama" });
+        events.onAgentUpdate("Coder", { status: "done", output: "patched", finishedAt: 13_300, ...(withUsage ? { usage } : {}) });
+        events.onAgentUpdate("Reviewer", { agentId: "Reviewer", agentName: "Reviewer", status: "error",
+          error: "model crashed", finishedAt: 14_000, ...(withUsage ? { usage } : {}) });
+        return out;
+      };
+
+      expect(lines(true), `json: ${json}`).toEqual(lines(false));
+      expect(lines(true).join("\n")).not.toContain("usage");
+    }
+  });
+
   it("sums up the run: status, each agent, changed files and the final output", () => {
     const { reporter, out } = capture(false);
 

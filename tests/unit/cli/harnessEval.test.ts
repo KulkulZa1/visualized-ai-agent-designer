@@ -75,10 +75,12 @@ const phone = (extra: Record<string, unknown> = {}) => ({
   id: "phone", task: "Pick a phone.", workspace: "fixtures/phone", scorers: [{ name: "answer", output: { matches: ["SUP-[AB]"] } }], ...extra,
 });
 
+/** A reply of the fake core: its text, or an object that also says what the call used (as a harness-core that reports usage answers). */
+type Reply = string | { text: string; usage?: { input: number; output: number } };
 interface Options {
   tasks?: unknown[];
   taskSet?: Record<string, unknown>;
-  replies?: Record<string, string[]>;
+  replies?: Record<string, Reply[]>;
   commands?: Record<string, unknown>;
   scenario?: Record<string, unknown>;
   files?: Record<string, string>;
@@ -201,6 +203,66 @@ describe("harness eval", { timeout: 60_000 }, () => {
     expect(first.scorers[0]).toMatchObject({ name: "tests", kind: "command", passed: false, weight: 1, exitCode: 1, timedOut: false });
     expect(first.scorers[0].ms).toBeGreaterThanOrEqual(0);
     expect(first.scorers[0]).not.toHaveProperty("stdout"); // the report stays small: the output is kept in the trial's own files
+  });
+
+  it("fills each trial's tokens, the task's tokens and C with the usage the providers reported, and keeps it in the trial's files", () => {
+    // Coder's reply carries 100 + 10 and Reviewer's 200 + 20: 330 tokens a trial.
+    const dir = project({
+      tasks: [phone()],
+      scenario: { usage: { Coder: { input: 100, output: 10 }, Reviewer: { input: 200, output: 20 } } },
+    });
+
+    const run = harnessEval(dir, []);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.report).toMatchObject({ status: "done", C: 330, n_done: 2, missing: 0 });
+    expect(run.report.per_task.phone.tokens).toEqual([330, 330]);
+    for (const trial of run.report.per_task.phone.trials) {
+      expect(trial).toMatchObject({ missing: false, reward: 1, tokens: { input: 300, output: 30 } });
+      expect(trial.tokenEstimate).toBeGreaterThan(0); // the chars / 4 estimate stays beside the count
+    }
+    expect(run.stdout).toContain("C 330 tokens");
+    const kept = join(out(dir), "trials", "phone", "t1");
+    expect(jsonIn(kept, "outcome.json").tokens).toEqual({ input: 300, output: 30 });
+    // The trial's copy of the run record has each agent's usage.
+    expect(jsonIn(kept, "run.json").nodes).toMatchObject({
+      "agent-0": { agent: "Coder", usage: { input: 100, output: 10, calls: 1, callsWithoutUsage: 0 } },
+      "agent-1": { agent: "Reviewer", usage: { input: 200, output: 20, calls: 1, callsWithoutUsage: 0 } },
+    });
+  });
+
+  it("leaves a trial's tokens null when one of its calls came back without usage, and C is the mean over the trials that have it", () => {
+    // Coder's replies are used in order, one a trial: the first call reports its usage, the second does not.
+    const dir = project({
+      tasks: [phone()],
+      replies: { Coder: [{ text: "wrote it", usage: { input: 100, output: 10 } }, { text: "wrote it" }] },
+      scenario: { usage: { Reviewer: { input: 200, output: 20 } } },
+    });
+
+    const run = harnessEval(dir, []);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.report.per_task.phone.tokens).toEqual([330, null]);
+    expect(run.report.per_task.phone.trials.map((t: Report) => t.tokens)).toEqual([{ input: 300, output: 30 }, null]);
+    // Not 330 / 2 and not 60 / 2: a trial with a partial sum would bias the cost, so it has none.
+    expect(run.report.C).toBe(330);
+    expect(run.report.per_task.phone.trials[1]).toMatchObject({ missing: false, reward: 1 });
+    expect(run.report.per_task.phone.trials[1].tokenEstimate).toBeGreaterThan(0);
+    expect(jsonIn(out(dir), "trials", "phone", "t1", "run.json").nodes["agent-0"].usage)
+      .toEqual({ input: 0, output: 0, calls: 1, callsWithoutUsage: 1 });
+  });
+
+  it("has a C and tokens of null when no call reported usage: a harness-core from before it, or a server that sends none", () => {
+    // Plain string replies are what such a core answers; the scenario's usage is left out.
+    const dir = project({ tasks: [phone()] });
+
+    const run = harnessEval(dir, []);
+
+    expect(run.status, run.stderr).toBe(0);
+    expect(run.report.C).toBeNull();
+    expect(run.report.per_task.phone.tokens).toEqual([null, null]);
+    expect(run.stdout).toContain("C n/a");
+    expect(run.report.per_task.phone.trials[0].tokenEstimate).toBeGreaterThan(0);
   });
 
   it("keeps each trial's outcome, scorer results, log and run record under trials/<task>/t<i>/", () => {

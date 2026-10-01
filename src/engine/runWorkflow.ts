@@ -45,6 +45,7 @@ import {
   REASONING_EFFORT,
   isReasoningModel,
   type ChatMessage,
+  type ChatReply,
   type InvokeFn,
 } from "@/services/model-providers/providerAdapter";
 import { MemoryService } from "@/services/execution/memoryService";
@@ -58,6 +59,7 @@ import { beforeDeadline, runAgentLoop } from "@/services/execution/agentLoop";
 import { runCommandTool } from "@/services/execution/commandTool";
 import { findChange, recordChange } from "@/services/execution/changeLog";
 import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
+import { createUsageMeter, readNodeUsage } from "@/services/execution/usage";
 import { loadProjectInstructions, usesWorkspace } from "@/services/execution/projectInstructions";
 import {
   createSubAgentRunner,
@@ -190,7 +192,8 @@ const FALLBACK_DEFAULTS: ProviderDefaults = {
   suggested_ollama_models: [],
 };
 
-function isExecutable(role: AgentRole): boolean {
+/** A node that calls a model: every role but Memory and Hook. */
+export function isExecutable(role: AgentRole): boolean {
   return role !== AgentRole.Memory && role !== AgentRole.Hook;
 }
 
@@ -466,7 +469,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       agentId: nodeId, agentName: nodes[i].data.name, status: "done", output: saved.output,
       startedAt: saved.startedAt, finishedAt: saved.finishedAt, modelUsed: saved.modelUsed,
       providerUsed: saved.providerUsed, tokenEstimate: saved.tokenEstimate, revision: saved.revision,
-      subAgents: saved.subAgents,
+      subAgents: saved.subAgents, usage: readNodeUsage(saved.usage),
     });
     updateNodeData(nodeId, { status: "done" });
   };
@@ -567,8 +570,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       return [savedNodeId(i), {
         agent: n.data.name, status: agent?.status ?? "idle", output: agent?.output, error: agent?.error,
         startedAt: agent?.startedAt, finishedAt: agent?.finishedAt, modelUsed: agent?.modelUsed,
-        providerUsed: agent?.providerUsed, tokenEstimate: agent?.tokenEstimate, revision: agent?.revision,
-        subAgents: agent?.subAgents, definitionHash: hashes.get(n.id) ?? "",
+        providerUsed: agent?.providerUsed, tokenEstimate: agent?.tokenEstimate, usage: agent?.usage,
+        revision: agent?.revision, subAgents: agent?.subAgents, definitionHash: hashes.get(n.id) ?? "",
       }];
     })),
     outputs: Object.fromEntries(nodes.flatMap((n, i) => {
@@ -768,6 +771,13 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       details: `▶ ${data.name} — ${model} via ${runtimeProvider}`, success: true,
     });
 
+    // What the node's model calls used, as the providers report it. A call is counted where it is made, not where
+    // the agent loop ends: in `counted` (the node's own turns and its helpers') and in `shared.callText` (the node's
+    // text calls, the summaries that compact its conversation, and its helpers'), so a call whose loop then fails
+    // is in it. A revision runs the node again: its tokens add to the first attempt's, which were spent all the
+    // same. The node is given the total when it ends, however it ends.
+    const usage = createUsageMeter(run.agents[nodeId]?.usage);
+
     // Streamed text reaches the node through a throttled flush. It ends with the node's
     // model calls, whether they finish, fail or are stopped: a call that Stop or a timeout
     // gave up on may keep streaming, and must not touch the node afterwards.
@@ -856,6 +866,14 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       let eventCount = 0;
       const helpers: SubAgentRecord[] = [];
 
+      // A turn that came back counts as a call. A reply that says the model refused the tool definitions was
+      // not generated (the server turned the request down): it used nothing, and the loop asks again as text.
+      const counted = async (turn: Promise<ChatReply>): Promise<ChatReply> => {
+        const reply = await turn;
+        if (reply.nativeToolsSupported) usage.count(reply.usage);
+        return reply;
+      };
+
       // Moves later by the time spent waiting for the user to approve a command.
       let deadline = Date.now() + timeoutSeconds * 1000;
       // Shared by the node and the helpers it dispatches.
@@ -872,9 +890,10 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
           ((runtimeProvider === "openai" || runtimeProvider === "anthropic") &&
             shouldFallbackToOllama(String(e)) && !isRemoteOllamaUrl(effectiveOllamaUrl)),
         callTurn: (system: string, messages: ChatMessage[], tools: ToolSpec[]) =>
-          callChatTurn({ ...providerParams, systemMsg: system, messages, tools }, invoke),
+          counted(callChatTurn({ ...providerParams, systemMsg: system, messages, tools }, invoke)),
         callText: async (system: string, userMsg: string) => {
           const callResult = await callProvider({ ...providerParams, systemMsg: system, userMsg }, invoke);
+          usage.count(callResult.usage); // after a billing fallback: the fallback call's
           if (callResult.usedOllamaFallback) {
             addEntry({ id: `${nodeId}-fb-${Date.now()}`, timestamp: new Date().toISOString(),
               action: "provider_fallback", agentId: nodeId, warning: true,
@@ -907,15 +926,15 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       const streamingCallTurn = async (system: string, messages: ChatMessage[], tools: ToolSpec[]) => {
         liveText = "";
         const params = { ...providerParams, systemMsg: system, messages, tools };
-        if (noStreaming.has(nativeKey)) return callChatTurn(params, invoke);
+        if (noStreaming.has(nativeKey)) return counted(callChatTurn(params, invoke));
         let received = false;
         try {
-          return await callChatTurn(params, invoke, (piece) => { received = true; showLiveText(piece); });
+          return await counted(callChatTurn(params, invoke, (piece) => { received = true; showLiveText(piece); }));
         } catch (e) {
           // A server that cannot stream: ask again without streaming, and stop streaming to it this run.
           if (received || !/stream/i.test(String(e))) throw e;
           noStreaming.add(nativeKey);
-          return callChatTurn(params, invoke);
+          return counted(callChatTurn(params, invoke));
         }
       };
 
@@ -1045,7 +1064,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       const tokenEstimate = loop.tokenEstimate + subAgents.tokenEstimate();
       updateAgent(nodeId, {
         status: "done", output: finalText, finishedAt: Date.now(),
-        tokenEstimate, providerUsed: runtimeProvider, modelUsed: model,
+        tokenEstimate, providerUsed: runtimeProvider, modelUsed: model, usage: usage.totals(),
       });
       updateNodeData(nodeId, { status: "done", tokens: { used: tokenEstimate, budget: data.tokens.budget } });
       addEntry({
@@ -1061,11 +1080,11 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
       endLiveText();
       if (isRunCancelled()) {
         // Stopped while this node was working: not a failure of the node.
-        updateAgent(nodeId, { status: "stopped", finishedAt: Date.now() });
+        updateAgent(nodeId, { status: "stopped", finishedAt: Date.now(), usage: usage.totals() });
         updateNodeData(nodeId, { status: "stopped" });
         return;
       }
-      updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now() });
+      updateAgent(nodeId, { status: "error", error: String(e), finishedAt: Date.now(), usage: usage.totals() });
       updateNodeData(nodeId, { status: "error" });
       addEntry({ id: `${nodeId}-err-${Date.now()}`, timestamp: new Date().toISOString(),
         action: "agent_failed", agentId: nodeId, details: String(e), success: false });
@@ -1097,7 +1116,8 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     agentOutputs.delete(nodeId);   // what later nodes are given, and the record's outputs
     gatewayRoutes.delete(nodeId);  // a gateway that is dropped takes its decision with it
     memory.forget(nodeId);         // what it wrote to memory, for the nodes that read it
-    // The record and the UI show a node that did not run: no output, error, timing or helpers.
+    // The record and the UI show a node that did not run: no output, error, timing or helpers. Its usage stays:
+    // the model calls it made were paid for, and a trial's tokens count them.
     updateAgent(nodeId, {
       agentId: nodeId, agentName: name, status: "skipped", output: undefined, error: undefined,
       startedAt: undefined, finishedAt: undefined, tokenEstimate: undefined, modelUsed: undefined,

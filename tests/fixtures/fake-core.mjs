@@ -2,9 +2,16 @@
  * A stand-in for harness-core in the CLI tests: the same JSON-lines protocol
  * (src-tauri/src/commands/core_server.rs) with canned model replies.
  *
- * FAKE_CORE_SCENARIO: a JSON file { replies: { <agent>: string[] }, healthFails?: true, healthFailsOn?: number[], olderCore?: true }.
- *   An agent's replies are used in order, and the last one repeats. A reply that
- *   starts with "ERROR:" is returned as that call's error. healthFails: every provider check fails;
+ * FAKE_CORE_SCENARIO: a JSON file { replies: { <agent>: (string | { text, usage? })[] }, usage?: { <agent>: { input, output } },
+ *   healthFails?: true, healthFailsOn?: number[], olderCore?: true }.
+ *   An agent's replies are used in order, and the last one repeats. A reply whose text
+ *   starts with "ERROR:" is returned as that call's error. The text-protocol commands (call_ollama_api and
+ *   call_openai_api) answer in one of the two shapes the real ones have had: a string reply is answered as a bare
+ *   string, as a harness-core from before token usage did (no usage), unless the scenario's `usage` has an entry
+ *   for the agent: then it is answered as { text, usage } with that entry, as the current one does. A reply that
+ *   is an object { text, usage? } is answered as it is written: { text } for a server that sent no counts,
+ *   { text, usage: { input, output } } for one that did (a different count per call, or a call with none in the
+ *   middle of others). healthFails: every provider check fails;
  *   healthFailsOn: only the checks with these numbers (1 is the first) do. healthPull: the pull_command the failing
  *   checks carry (the engine adds "\nRun: <it>" to the error of a run that cannot start). olderCore: a harness-core
  *   from before hook_fingerprint, which answers that command with "Unknown command".
@@ -39,8 +46,11 @@ function modelReply(system) {
   const replies = scenario.replies?.[agent] ?? ["ok"];
   calls[agent] = (calls[agent] ?? 0) + 1;
   const reply = replies[Math.min(calls[agent], replies.length) - 1];
-  if (reply.startsWith("ERROR:")) throw reply.slice("ERROR:".length).trim();
-  return reply;
+  const text = typeof reply === "string" ? reply : reply.text;
+  if (text.startsWith("ERROR:")) throw text.slice("ERROR:".length).trim();
+  if (typeof reply !== "string") return reply;
+  const usage = scenario.usage?.[agent];
+  return usage ? { text, usage } : text;
 }
 
 const file = (a) => join(a.workspacePath, a.relativePath);

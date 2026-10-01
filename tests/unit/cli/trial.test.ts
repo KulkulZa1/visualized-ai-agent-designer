@@ -9,10 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
 import { AgentRole } from "@/types/agent";
-import type { WorkflowRun } from "@/types/execution";
+import type { AgentRun, AgentStatus, NodeUsage, WorkflowRun } from "@/types/execution";
 import type { AgentNode } from "@/types/workflow";
 import type { CommandScorer, FileScorer, OutputScorer, Scorer } from "@/cli/taskSet";
-import { COMMAND_TIMEOUT_PREFIX, copyFixture, copyTree, scoreTrial, type ScoreContext, type Scored } from "@/cli/trial";
+import { COMMAND_TIMEOUT_PREFIX, copyFixture, copyTree, scoreTrial, tokensOf, type ScoreContext, type Scored } from "@/cli/trial";
 
 const root = resolve(__dirname, "../../..");
 const scratch: string[] = [];
@@ -1082,5 +1082,59 @@ describe("copyTree", () => {
       expect(() => copyFixture(deep, join(above, "copy2"))).toThrow(/is not the place it was/);
       expect(existsSync(join(above, "copy2"))).toBe(false);
     });
+  });
+});
+
+describe("tokensOf", () => {
+  const used = (input: number, output: number, calls = 1, callsWithoutUsage = 0): NodeUsage => ({ input, output, calls, callsWithoutUsage });
+  const agent = (id: string, status: AgentStatus, usage?: NodeUsage): AgentRun => ({ agentId: id, agentName: id, status, ...(usage ? { usage } : {}) });
+  const runOfAgents = (...agents: AgentRun[]): WorkflowRun => ({
+    id: "run-1", workflowName: "W", startedAt: 0, status: "done", agents: Object.fromEntries(agents.map((a) => [a.agentId, a])),
+  });
+  /** Coder → Memory → Reviewer, and a Hook: only the agents call a model. */
+  const graph = (): WorkflowGraph => {
+    const notes = node("notes", "Notes");
+    notes.data.role = AgentRole.Memory;
+    const gate = node("gate", "Gate");
+    gate.data.role = AgentRole.Hook;
+    return { ...chain, nodes: [node("agent-0", "Coder"), notes, node("agent-1", "Reviewer"), gate] };
+  };
+
+  it("is the input and the output of every node's model calls, summed", () => {
+    const run = runOfAgents(agent("agent-0", "done", used(100, 10, 2)), agent("agent-1", "done", used(250, 30, 3)));
+    expect(tokensOf(graph(), run)).toEqual({ input: 350, output: 40 });
+  });
+
+  it("counts a node's usage whatever became of the node: a failed or stopped one, and one a gateway dropped, spent its tokens", () => {
+    const run = runOfAgents(agent("agent-0", "error", used(100, 10)), agent("agent-1", "skipped", used(250, 30)), agent("notes", "stopped"));
+    expect(tokensOf(graph(), run)).toEqual({ input: 350, output: 40 });
+  });
+
+  it("is null when a call of any node came back without counts: a sum of some of them would bias the cost", () => {
+    const run = runOfAgents(agent("agent-0", "done", used(100, 10, 3, 1)), agent("agent-1", "done", used(250, 30)));
+    expect(tokensOf(graph(), run)).toBeNull();
+    // The same, whichever node it is.
+    expect(tokensOf(graph(), runOfAgents(agent("agent-0", "done", used(100, 10)), agent("agent-1", "done", used(0, 0, 1, 1))))).toBeNull();
+  });
+
+  it("is null when an agent that ran has no usage at all, as a run from an older engine would have", () => {
+    for (const status of ["done", "error", "stopped"] as const) {
+      expect(tokensOf(graph(), runOfAgents(agent("agent-0", "done", used(100, 10)), agent("agent-1", status))), status).toBeNull();
+    }
+  });
+
+  it("takes a node that made no model call for nothing: a memory node, a hook, and an agent that never ran", () => {
+    const run = runOfAgents(
+      agent("agent-0", "done", used(100, 10)), agent("notes", "done"), agent("gate", "done"),
+      agent("agent-1", "skipped"), // never ran
+    );
+    expect(tokensOf(graph(), run)).toEqual({ input: 100, output: 10 });
+    // An agent the run never reached is not in the run at all.
+    expect(tokensOf(graph(), runOfAgents(agent("agent-0", "done", used(100, 10))))).toEqual({ input: 100, output: 10 });
+  });
+
+  it("is 0 and 0, not null, for a run in which no node called a model, or a node made no call", () => {
+    expect(tokensOf(graph(), runOfAgents())).toEqual({ input: 0, output: 0 });
+    expect(tokensOf(graph(), runOfAgents(agent("agent-0", "error", used(0, 0, 0))))).toEqual({ input: 0, output: 0 });
   });
 });

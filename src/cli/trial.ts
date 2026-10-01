@@ -7,11 +7,11 @@ import {
   copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { runWorkflow, type ProviderSettings, type RunHost, type RunOutcome } from "@/engine/runWorkflow";
+import { isExecutable, runWorkflow, type ProviderSettings, type RunHost, type RunOutcome } from "@/engine/runWorkflow";
 import { runRecordPath, writeRunRecord } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
-import type { WorkflowRun } from "@/types/execution";
+import type { AgentStatus, WorkflowRun } from "@/types/execution";
 import type { HookResult } from "@/types/hookResult";
 import { createReporter, finalOutputs } from "@/cli/report";
 import {
@@ -19,9 +19,10 @@ import {
   type CommandScorer, type FileScorer, type OutputScorer, type Scorer, type TaskDef,
 } from "@/cli/taskSet";
 
-// [KEEP-IN-SYNC] with execute_command in src-tauri/src/commands/process_commands.rs. Its timeout error reads
-// "Command timed out after {N} s"; every other error of it ("Could not start the command: …", a workspace folder
-// that is gone) means the command did not run. tests/unit/cli/trial.test.ts reads that file and pins both texts.
+// [KEEP-IN-SYNC] with execute_command (its `command_result`) in src-tauri/src/commands/process_commands.rs. Its timeout
+// error reads "Command timed out after {N} s"; every other error of it ("Could not start the command: …", a workspace
+// folder that is gone) means the command did not run. tests/unit/cli/trial.test.ts reads that file and pins both texts,
+// and so does a Rust test there.
 export const COMMAND_TIMEOUT_PREFIX = "Command timed out after";
 
 /** The end of a command's output that a scorer's record keeps, per stream. */
@@ -64,7 +65,8 @@ export interface TrialResult {
   runStatus: "done" | "error" | "not_started";
   runMs: number;
   scoreMs: number;
-  /** The providers' token counts; null until they are read from the responses. */
+  /** The tokens the run's model calls used, as the providers reported them, summed over the nodes; null when that cannot
+   *  be said (`tokensOf`), and for a missing trial. */
   tokens: { input: number; output: number } | null;
   /** chars / 4, summed over the nodes: an estimate, not a count. null when no run started. */
   tokenEstimate: number | null;
@@ -388,6 +390,30 @@ function tokenEstimateOf(outcome: RunOutcome | undefined): number | null {
   return Object.values(outcome.run.agents).reduce((sum, agent) => sum + (agent.tokenEstimate ?? 0), 0);
 }
 
+/** The statuses of an agent that worked: the engine gives its usage when it ends, however it ends. */
+const ENDED_AFTER_WORK: ReadonlySet<AgentStatus> = new Set(["done", "error", "stopped"]);
+
+/** What the run's model calls used, as the providers reported it: input and output summed over the nodes (every call a
+ *  node made counts: its turns, its summaries, its helpers, its revision attempts). null when that cannot be said, so
+ *  that C is never the mean of partial counts: a call of some node came back without counts (a local server may leave
+ *  them out), or an agent that ran has no usage at all. A node that made no model call (memory, hook, one that never
+ *  ran) adds nothing. */
+export function tokensOf(graph: WorkflowGraph, run: WorkflowRun): { input: number; output: number } | null {
+  let input = 0;
+  let output = 0;
+  for (const node of graph.nodes) {
+    const agent = run.agents[node.id];
+    if (agent?.usage === undefined) {
+      if (agent && ENDED_AFTER_WORK.has(agent.status) && isExecutable(node.data.role)) return null;
+      continue;
+    }
+    if (agent.usage.callsWithoutUsage > 0) return null;
+    input += agent.usage.input;
+    output += agent.usage.output;
+  }
+  return { input, output };
+}
+
 /** One trial, up to what is kept: a fresh folder with the fixture in it, the run, the scorers.
  *  undefined when the eval was interrupted. */
 async function attemptTrial(
@@ -451,7 +477,7 @@ async function attemptTrial(
   return {
     result: {
       trial, reward: scored.reward, missing: false, error: runProblem(env.graph, outcome), runStatus: runStatusOf(outcome),
-      runMs, scoreMs, tokens: null, tokenEstimate: tokenEstimateOf(outcome), scorers: scored.scorers.map(entryOf),
+      runMs, scoreMs, tokens: tokensOf(env.graph, outcome.run), tokenEstimate: tokenEstimateOf(outcome), scorers: scored.scorers.map(entryOf),
     },
     outcome, scorers: scored.scorers,
   };
