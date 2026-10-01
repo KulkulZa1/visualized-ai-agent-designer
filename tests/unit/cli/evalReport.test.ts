@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -176,6 +176,18 @@ describe("writeReport", () => {
   it("ends the file with a newline", () => {
     expect(reportText(buildReport(header, tasksOf({ a: [1] }), "done")).endsWith("}\n")).toBe(true);
   });
+
+  it("throws, and leaves no temporary file, when the report cannot be put in place: the folder has only what it had", () => {
+    const dir = mkdtempSync(join(tmpdir(), "harness-report-"));
+    scratch.push(dir);
+    mkdirSync(join(dir, "report.json")); // a folder is where the report should go
+    writeFileSync(join(dir, "report.json", "kept.txt"), "x");
+
+    expect(() => writeReport(join(dir, "report.json"), buildReport(header, tasksOf({ a: [1] }), "done"))).toThrow();
+
+    expect(readdirSync(dir)).toEqual(["report.json"]); // no report.json.tmp
+    expect(readdirSync(join(dir, "report.json"))).toEqual(["kept.txt"]);
+  });
 });
 
 describe("trialLine and summaryLines", () => {
@@ -199,6 +211,20 @@ describe("trialLine and summaryLines", () => {
     expect(trialLine(3, 4, "phone", trial(0, 1, { runStatus: "error", error: "Reviewer failed: model crashed", scorers: [
       { name: "answer", kind: "output", passed: true, weight: 1, ms: 0 }] })))
       .toBe("[3/4] phone t0: reward 1.00 (answer ✓) · run 1.0 s, scoring 0.1 s · error: Reviewer failed: model crashed");
+  });
+
+  it("keeps a line to one line: an error with line breaks in it is shown on one line, and is kept as it was in the data", () => {
+    const text = "Ollama is not running\nRun: ollama pull qwen3:8b\r\n\n  then try again.";
+    const lost = missing(1, text);
+    const failed = trial(0, 1, { runStatus: "error", error: "Reviewer failed: bad\nreply", scorers: [{ name: "answer", kind: "output", passed: true, weight: 1, ms: 0 }] });
+
+    expect(trialLine(2, 4, "laptop", lost)).toBe("[2/4] laptop t1: missing (Ollama is not running Run: ollama pull qwen3:8b then try again.) · run 1.0 s");
+    expect(trialLine(3, 4, "phone", failed)).toBe("[3/4] phone t0: reward 1.00 (answer ✓) · run 1.0 s, scoring 0.1 s · error: Reviewer failed: bad reply");
+    for (const line of [trialLine(2, 4, "laptop", lost), trialLine(3, 4, "phone", failed)]) expect(line).not.toMatch(/[\r\n]/);
+    // The report and the trial's files have the whole text.
+    expect(lost.error).toBe(text);
+    const report = JSON.parse(reportText(buildReport(header, [{ id: "laptop", weight: 1, trials: [lost] }], "done")));
+    expect(report.per_task.laptop.trials[0].error).toBe(text);
   });
 
   it("sums up the eval: each task's rewards, then S, C and the trials", () => {

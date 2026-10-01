@@ -257,7 +257,7 @@ function isRealDirectory(path) {
   }
 }
 
-// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs.
+// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs and in src/cli/taskSet.ts (harness eval's copy).
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
   // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
@@ -524,8 +524,14 @@ async function cmdEval(evalArgs) {
     process.stderr.write("harness eval: build it first with npm run build:cli\n");
     return 3;
   }
-  const { runEval } = await import(bundle.href);
-  return runEval(evalArgs);
+  try {
+    const { runEval } = await import(bundle.href);
+    return await runEval(evalArgs);
+  } catch (e) {
+    // Exit 1 would read as "S is below --min-score": a bundle that cannot be loaded is a 3, the eval could not run.
+    process.stderr.write(`harness eval: ${e instanceof Error ? e.message : e}\n`);
+    return 3;
+  }
 }
 
 // ---------------------------------------------------------------------------

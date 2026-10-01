@@ -1,5 +1,8 @@
 // @vitest-environment node
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, statSync,
+  symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -9,7 +12,7 @@ import { AgentRole } from "@/types/agent";
 import type { WorkflowRun } from "@/types/execution";
 import type { AgentNode } from "@/types/workflow";
 import type { CommandScorer, FileScorer, OutputScorer, Scorer } from "@/cli/taskSet";
-import { COMMAND_TIMEOUT_PREFIX, copyTree, scoreTrial, type ScoreContext, type Scored } from "@/cli/trial";
+import { COMMAND_TIMEOUT_PREFIX, copyFixture, copyTree, scoreTrial, type ScoreContext, type Scored } from "@/cli/trial";
 
 const root = resolve(__dirname, "../../..");
 const scratch: string[] = [];
@@ -18,8 +21,9 @@ afterEach(() => {
 });
 const canLink = process.platform !== "win32";
 
+/** A new folder, as its real path (a path through a link is not what these tests are about, unless they make the link). */
 function folder(prefix = "harness-trial-"): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   scratch.push(dir);
   return dir;
 }
@@ -29,13 +33,14 @@ function put(base: string, path: string, text: string): void {
 }
 const read = (base: string, path: string) => readFileSync(join(base, path), "utf8");
 
-/** Every file under `dir` (not .harness), by relative path. */
+/** Every file under `dir` (not .harness), by relative path. A link to a file is the file's text; a link to a folder is "-> its target". */
 function snapshot(dir: string, prefix = ""): Record<string, string> {
   const files: Record<string, string> = {};
   for (const name of readdirSync(join(dir, prefix)).sort()) {
     const rel = prefix ? `${prefix}/${name}` : name;
     if (rel === ".harness") continue;
     if (lstatSync(join(dir, rel)).isDirectory()) Object.assign(files, snapshot(dir, rel));
+    else if (lstatSync(join(dir, rel)).isSymbolicLink() && statSync(join(dir, rel)).isDirectory()) files[rel] = `-> ${readlinkSync(join(dir, rel))}`;
     else files[rel] = read(dir, rel);
   }
   return files;
@@ -112,7 +117,8 @@ function rig(onCommand: (args: Record<string, unknown>) => Answer | Promise<Answ
     return { stdout: "", stderr: "", durationMs: 5, ...answer };
   }) as InvokeFn;
   const ctx: ScoreContext = {
-    invoke, trialDir, fixtureDir, graph, run, allowedCommands: new Set(["npm test", "npm run lint", "node check.js"]),
+    invoke, trialDir, trialRoot: realpathSync.native(trialDir), fixtureDir, graph, run,
+    allowedCommands: new Set(["npm test", "npm run lint", "node check.js"]),
     commandPrefix: "eval-1-laptop-t0", isCancelled: () => cancel.now, activeCommands,
   };
   return { trialDir, fixtureDir, graderDir, calls, active, cancel, score: (scorers, over = {}) => scoreTrial({ ...ctx, ...over }, scorers) };
@@ -265,6 +271,32 @@ describe("the file scorer", () => {
 
       expect(scored(await r.score([file()])).scorers[0].detail).toBe("report.md does not exist");
     });
+
+    it("is followed by the kernel, not by a lexical reading of its target: a chain with .. in it leads out of the folder, and nothing is read there", async () => {
+      const r = rig();
+      put(dirname(r.trialDir), "secret.md", "## Ranking\n"); // beside the trial's folder
+      mkdirSync(join(r.trialDir, "a"));
+      symlinkSync("..", join(r.trialDir, "a", "up"));
+      symlinkSync("a/up/..", join(r.trialDir, "leak")); // as text, inside; to the kernel, the folder above the trial's
+      expect(read(r.trialDir, "leak/secret.md")).toBe("## Ranking\n");
+
+      const result = scored(await r.score([file({ path: "leak/secret.md", contains: ["## Ranking"] })]));
+
+      expect(result.scorers[0]).toMatchObject({ passed: false, detail: "leak/secret.md leads out of the trial's folder" });
+    });
+
+    it("is not the trial's folder when an agent put a link in its place: a file scorer reads nothing through it, and a command scorer does not run", async () => {
+      const r = rig();
+      const elsewhere = folder("harness-elsewhere-");
+      put(elsewhere, "report.md", "## Ranking\n");
+      rmSync(r.trialDir, { recursive: true });
+      symlinkSync(elsewhere, r.trialDir);
+
+      expect(scored(await r.score([file({ contains: ["## Ranking"] })])).scorers[0])
+        .toMatchObject({ passed: false, detail: "report.md leads out of the trial's folder" });
+      expect(await r.score([command()])).toMatchObject({ missing: expect.stringContaining("the trial's folder is not where it was made") });
+      expect(r.calls).toEqual([]);
+    });
   });
 });
 
@@ -321,13 +353,17 @@ describe("the command scorer", () => {
     ["a workspace folder that is gone", "Workspace folder not found: /tmp/x"],
     ["harness-core stopping", "harness-core stopped"],
     ["any other error", "boom"],
-  ])("makes the trial missing for %s, with the reason, and keeps the scorers before it", async (_what, message) => {
+  ])("makes the trial missing for %s, with the reason, and keeps the scorers that ran", async (_what, message) => {
     const r = rig((args) => (args.command === "npm run lint" ? Promise.reject(message) : { exitCode: 0 }));
 
-    const result = await r.score([output({ contains: ["SUP-A"] }), command({ name: "lint", command: "npm run lint" }), output({ name: "never" })]);
+    const result = await r.score([
+      output({ contains: ["SUP-A"] }), command({ name: "lint", command: "npm run lint" }), command({ name: "never", command: "npm test" }),
+    ]);
 
     expect(result).toMatchObject({ missing: `scorer lint: ${message}` });
-    expect((result as { scorers: unknown[] }).scorers).toHaveLength(1); // the output scorer ran; the one after the failure did not
+    // The output scorer ran, as the checks of what the agents left do first; the command scorer after the one that failed did not.
+    expect((result as { scorers: Array<{ name: string }> }).scorers.map((s) => s.name)).toEqual(["answer"]);
+    expect(r.calls.map((c) => c.args.command)).toEqual(["npm run lint"]);
   });
 
   it("runs the command in the trial's folder through execute_command, with consent, the scorer's time limit and an id of its own", async () => {
@@ -398,6 +434,90 @@ describe("the reward", () => {
     const result = scored(await rig().score([output({ contains: ["SUP-A"] })]));
 
     expect(result.scorers[0].ms).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("the order the scorers run in", () => {
+  const PACKAGE = '{"scripts":{"test":"node --test test"}}\n';
+  /** The fixture has the real test script; the agent replaced it with one that always passes. */
+  function rewrittenByTheAgent(r: Rig) {
+    put(r.fixtureDir, "package.json", PACKAGE);
+    copyTree(r.fixtureDir, r.trialDir);
+    put(r.trialDir, "package.json", '{"scripts":{"test":"echo ok"}}\n');
+  }
+
+  it("reads what the agents left, with the output and file scorers, before a command scorer puts files back: a check written after a restore does not grade the restore", async () => {
+    const r = rig();
+    rewrittenByTheAgent(r);
+
+    const result = scored(await r.score([
+      command({ restore: ["package.json"] }),
+      file({ name: "keeps-the-test-script", path: "package.json", contains: ["node --test"] }),
+    ]));
+
+    // Run in the order written, the restore would have made the file check pass: a reward of 1.
+    expect(result.scorers.map((s) => [s.name, s.passed])).toEqual([["tests", true], ["keeps-the-test-script", false]]);
+    expect(result.scorers[1].detail).toBe('does not contain "node --test"');
+    expect(result.reward).toBe(0.5);
+    expect(read(r.trialDir, "package.json")).toBe(PACKAGE); // the restore did happen: after the file check, and the folder stays so
+  });
+
+  it("does not let a file scorer see what a scorer's command made: it checks what the agents left", async () => {
+    const r = rig((args) => { put(String(args.workspacePath), "report.md", "## Ranking\n"); return { exitCode: 0 }; });
+
+    const result = scored(await r.score([command(), file({ contains: ["## Ranking"] })]));
+
+    expect(result.scorers.map((s) => s.passed)).toEqual([true, false]);
+    expect(result.scorers[1].detail).toBe("report.md does not exist");
+  });
+
+  it("keeps the order the scorers were written in, in the result, and numbers a command by its place in that order", async () => {
+    const r = rig();
+
+    const result = scored(await r.score([
+      command({ name: "c1" }), output({ name: "o1", contains: ["SUP-A"] }), command({ name: "c2", command: "npm run lint" }), file({ name: "f1", path: "none.md" }),
+    ]));
+
+    expect(result.scorers.map((s) => s.name)).toEqual(["c1", "o1", "c2", "f1"]);
+    expect(result.scorers.map((s) => s.kind)).toEqual(["command", "output", "command", "file"]);
+    expect(r.calls.map((c) => [c.args.command, c.args.commandId])).toEqual([
+      ["npm test", "eval-1-laptop-t0-score-0"], ["npm run lint", "eval-1-laptop-t0-score-2"],
+    ]);
+  });
+
+  it("runs the command scorers in the order written, each putting its own files in place and seeing what the ones before it left", async () => {
+    const found: Array<Record<string, string>> = [];
+    const r = rig((args) => {
+      found.push(snapshot(String(args.workspacePath)));
+      if (args.command === "npm test") put(String(args.workspacePath), "build/out.js", "// built by the first command\n"); // as a build would
+      return { exitCode: 0 };
+    });
+    rewrittenByTheAgent(r);
+    put(r.graderDir, "check.js", "// the grader's\n");
+
+    scored(await r.score([
+      command({ name: "first", restore: ["package.json"] }),
+      command({ name: "second", command: "node check.js", inject: [{ from: join(r.graderDir, "check.js"), to: "check.js" }] }),
+    ]));
+
+    expect(r.calls.map((c) => c.args.command)).toEqual(["npm test", "node check.js"]);
+    expect(found[0]["package.json"]).toBe(PACKAGE);
+    expect(found[0]).not.toHaveProperty("check.js"); // the second one's files are not in place yet
+    expect(found[1]["build/out.js"]).toBe("// built by the first command\n");
+    expect(found[1]["check.js"]).toBe("// the grader's\n");
+    expect(found[1]["package.json"]).toBe(PACKAGE); // the first one's restore stays
+  });
+
+  it("keeps the scorers that ran, in the order written, when a command cannot start: the output and file scorers did run first", async () => {
+    const r = rig((args) => (args.command === "npm run lint" ? Promise.reject("Could not start the command: nope") : { exitCode: 0 }));
+
+    const result = await r.score([
+      command({ name: "tests" }), command({ name: "lint", command: "npm run lint" }), output({ name: "answer", contains: ["SUP-A"] }), command({ name: "last", command: "node check.js" }),
+    ]);
+
+    expect(result).toMatchObject({ missing: "scorer lint: Could not start the command: nope" });
+    expect((result as { scorers: Array<{ name: string }> }).scorers.map((s) => s.name)).toEqual(["tests", "answer"]);
+    expect(r.calls.map((c) => c.args.command)).toEqual(["npm test", "npm run lint"]); // "last" never started
   });
 });
 
@@ -569,6 +689,41 @@ describe("restore and inject put the grader's files back by replacement", () => 
       expect(read(r.trialDir, "test/a.test.js")).toBe("// pristine a\n");
     });
 
+    it("is followed by the kernel, not by a lexical reading of its target: a chain of links with .. in it leads out, and a restore through it deletes nothing outside", async () => {
+      const r = rig();
+      afterTheAgents(r);
+      // Beside the trial's folder, where nothing of the trial's may be touched.
+      const victim = join(dirname(r.trialDir), "victim");
+      put(dirname(r.trialDir), "victim/precious.txt", "keep\n");
+      // a/up leads to the trial's folder, and test leads to a/up/..: that is the folder above the trial's.
+      rmSync(join(r.trialDir, "test"), { recursive: true });
+      mkdirSync(join(r.trialDir, "a"));
+      symlinkSync("..", join(r.trialDir, "a", "up"));
+      symlinkSync("a/up/..", join(r.trialDir, "test"));
+      expect(read(r.trialDir, "test/victim/precious.txt")).toBe("keep\n"); // the kernel agrees: test is the folder above
+
+      const result = await r.score([command({ restore: ["test/victim"] })]);
+
+      expect(result).toHaveProperty("missing");
+      expect(read(victim, "precious.txt")).toBe("keep\n");
+      expect(r.calls).toEqual([]); // the command did not run
+    });
+
+    it("is followed by the kernel for an inject too: nothing is written to the folder above the trial's", async () => {
+      const r = rig();
+      afterTheAgents(r);
+      rmSync(join(r.trialDir, "test"), { recursive: true });
+      mkdirSync(join(r.trialDir, "a"));
+      symlinkSync("..", join(r.trialDir, "a", "up"));
+      symlinkSync("a/up/..", join(r.trialDir, "test"));
+
+      const result = await r.score([command({ inject: [{ from: join(r.graderDir, "hidden.test.js"), to: "test/hidden.test.js" }] })]);
+
+      expect(result).toHaveProperty("missing");
+      expect(existsSync(join(dirname(r.trialDir), "hidden.test.js"))).toBe(false);
+      expect(r.calls).toEqual([]);
+    });
+
     it("may lead to another place inside the folder", async () => {
       const r = rig();
       afterTheAgents(r);
@@ -576,6 +731,124 @@ describe("restore and inject put the grader's files back by replacement", () => 
       symlinkSync(join(r.trialDir, "real"), join(r.trialDir, "alias"));
 
       expect(scored(await r.score([command({ restore: ["alias/x.txt"] })])).reward).toBe(1);
+    });
+
+    it("is refused as the place of the trial's folder: a restore does nothing when an agent replaced the folder with a link", async () => {
+      const r = rig();
+      afterTheAgents(r);
+      const elsewhere = folder("harness-elsewhere-");
+      put(elsewhere, "package.json", "// elsewhere\n");
+      rmSync(r.trialDir, { recursive: true });
+      symlinkSync(elsewhere, r.trialDir);
+
+      const result = await r.score([command({ restore: ["package.json"] })]);
+
+      expect(result).toMatchObject({ missing: expect.stringContaining("the trial's folder is not where it was made: it was replaced") });
+      expect(read(elsewhere, "package.json")).toBe("// elsewhere\n");
+      expect(r.calls).toEqual([]);
+    });
+
+    describe("that came from the fixture", () => {
+      /** The fixture has a folder of an npm install's kind (a .bin link to a file in a package) and a link to a folder; the trial is its copy. */
+      function withLinks(r: Rig) {
+        put(r.fixtureDir, "node_modules/pkg/bin/x.sh", "#!/bin/sh\necho x\n");
+        mkdirSync(join(r.fixtureDir, "node_modules", ".bin"));
+        symlinkSync("../pkg/bin/x.sh", join(r.fixtureDir, "node_modules", ".bin", "x"));
+        put(r.fixtureDir, "vendor/lib/index.js", "// lib\n");
+        symlinkSync("vendor/lib", join(r.fixtureDir, "deps"));
+        copyTree(r.fixtureDir, r.trialDir, r.fixtureDir);
+      }
+
+      it("is copied as it is by a restore of the folder it is in: the .bin link leads to the restored file, in the trial", async () => {
+        const r = rig(look);
+        withLinks(r);
+        rmSync(join(r.trialDir, "node_modules"), { recursive: true });
+        put(r.trialDir, "node_modules/junk.js", "// the agent's\n");
+
+        scored(await r.score([command({ restore: ["node_modules"] })]));
+
+        expect(readlinkSync(join(r.trialDir, "node_modules", ".bin", "x"))).toBe("../pkg/bin/x.sh");
+        expect(realpathSync.native(join(r.trialDir, "node_modules", ".bin", "x")))
+          .toBe(join(realpathSync.native(r.trialDir), "node_modules", "pkg", "bin", "x.sh")); // the trial's own file, not the fixture's
+        expect(seen[0]["node_modules/.bin/x"]).toBe("#!/bin/sh\necho x\n"); // and the command found it through the link
+        expect(seen[0]).not.toHaveProperty("node_modules/junk.js");
+      });
+
+      it("is put back as the fixture had it when it is the restored path itself: the agent's retargeting is undone, and what it pointed to is left alone", async () => {
+        const r = rig();
+        withLinks(r);
+        const outside = folder("harness-outside-");
+        put(outside, "index.js", "// not the trial's\n");
+        rmSync(join(r.trialDir, "deps"));
+        symlinkSync(outside, join(r.trialDir, "deps")); // the agent points it elsewhere
+
+        const result = scored(await r.score([command({ restore: ["deps"] })]));
+
+        expect(result.reward).toBe(1);
+        expect(readlinkSync(join(r.trialDir, "deps"))).toBe("vendor/lib");
+        expect(read(outside, "index.js")).toBe("// not the trial's\n");
+      });
+
+      it("stays untrusted at run time: when an agent retargets it out of the folder, a restore through it makes the trial missing and deletes nothing outside", async () => {
+        const r = rig();
+        withLinks(r);
+        const outside = folder("harness-outside-");
+        put(outside, "index.js", "// not the trial's\n");
+        rmSync(join(r.trialDir, "deps"));
+        symlinkSync(outside, join(r.trialDir, "deps"));
+
+        const result = await r.score([command({ restore: ["deps/index.js"] })]);
+
+        expect(result).toMatchObject({ missing: expect.stringContaining("deps/index.js leads out of the trial's folder through a link") });
+        expect(read(outside, "index.js")).toBe("// not the trial's\n");
+        expect(r.calls).toEqual([]);
+      });
+
+      it("lets a restore go through it when it stays inside: the file is put back where the link leads, and the link is left as it is", async () => {
+        const r = rig();
+        withLinks(r);
+        put(r.trialDir, "vendor/lib/index.js", "// the agent's edit\n");
+
+        scored(await r.score([command({ restore: ["deps/index.js"] })]));
+
+        expect(read(r.trialDir, "vendor/lib/index.js")).toBe("// lib\n");
+        expect(readlinkSync(join(r.trialDir, "deps"))).toBe("vendor/lib");
+      });
+
+      it("is checked again when a restore copies it: a link that no longer qualifies makes the trial missing", async () => {
+        const r = rig();
+        withLinks(r);
+        // After the task set was read, the link was made absolute: in a copy it would lead to the fixture.
+        rmSync(join(r.fixtureDir, "deps"));
+        symlinkSync(join(r.fixtureDir, "vendor", "lib"), join(r.fixtureDir, "deps"));
+
+        const result = await r.score([command({ restore: ["deps"] })]);
+
+        expect(result).toMatchObject({ missing: expect.stringMatching(/^scorer tests: .*deps is a link with an absolute target/) });
+      });
+    });
+
+    it("is refused for an inject source or a workspace that is no longer the place the task set recorded: a link has taken its place", async () => {
+      const r = rig();
+      put(r.graderDir, "hidden.test.js", "// real\n");
+      const decoy = folder("harness-decoy-");
+      put(decoy, "x.js", "// decoy\n");
+      rmSync(join(r.graderDir, "hidden.test.js"));
+      symlinkSync(join(decoy, "x.js"), join(r.graderDir, "hidden.test.js"));
+
+      const injected = await r.score([command({ inject: [{ from: join(r.graderDir, "hidden.test.js"), to: "test/hidden.test.js" }] })]);
+
+      expect(injected).toMatchObject({ missing: expect.stringContaining("is not the place it was when the task set was read") });
+      expect(existsSync(join(r.trialDir, "test"))).toBe(false);
+
+      put(r.fixtureDir, "package.json", "{}\n");
+      const moved = join(dirname(r.fixtureDir), "fixture-real");
+      renameSync(r.fixtureDir, moved);
+      symlinkSync(moved, r.fixtureDir);
+      const restored = await r.score([command({ restore: ["package.json"] })]);
+
+      expect(restored).toMatchObject({ missing: expect.stringContaining("is not the place it was when the task set was read") });
+      expect(r.calls).toEqual([]);
     });
   });
 
@@ -658,12 +931,115 @@ describe("copyTree", () => {
     expect(existsSync(join(base, "to"))).toBe(false);
   });
 
-  it.skipIf(!canLink)("refuses a link, at the top or inside a folder: a copy of it would still point at the original", () => {
+  it.skipIf(!canLink)("refuses a link when no fixture is given, at the top or inside a folder: a grader folder may not have one", () => {
     const base = folder();
     put(base, "from/a.txt", "a");
     symlinkSync("a.txt", join(base, "from", "alias"));
 
     expect(() => copyTree(join(base, "from"), join(base, "to"))).toThrow(/is a link/);
     expect(() => copyTree(join(base, "from", "alias"), join(base, "to2"))).toThrow(/is a link/);
+  });
+
+  describe.skipIf(!canLink)("a fixture's links", () => {
+    it("are copied as they are, with the target text they had: the copy's link points inside the copy", () => {
+      const base = folder();
+      put(base, "fixture/pkg/bin/x", "#!/bin/sh\n");
+      put(base, "fixture/sub/f.txt", "f\n");
+      mkdirSync(join(base, "fixture", ".bin"));
+      symlinkSync("../pkg/bin/x", join(base, "fixture", ".bin", "x"));
+      symlinkSync("sub", join(base, "fixture", "alias"));
+
+      copyTree(join(base, "fixture"), join(base, "copy"), join(base, "fixture"));
+
+      expect(readlinkSync(join(base, "copy", ".bin", "x"))).toBe("../pkg/bin/x");
+      expect(readlinkSync(join(base, "copy", "alias"))).toBe("sub");
+      // They lead to the copy's own files, not the fixture's.
+      expect(realpathSync.native(join(base, "copy", ".bin", "x"))).toBe(join(base, "copy", "pkg", "bin", "x"));
+      expect(realpathSync.native(join(base, "copy", "alias"))).toBe(join(base, "copy", "sub"));
+      expect(lstatSync(join(base, "copy", "alias")).isSymbolicLink()).toBe(true);
+    });
+
+    it("are checked again as they are copied: a link that was fine when the task set was read and is not now is refused", () => {
+      const fixtureWith = (target: string) => {
+        const base = folder();
+        put(base, "fixture/a.txt", "a");
+        symlinkSync(target, join(base, "fixture", "link"));
+        return base;
+      };
+
+      const absolute = fixtureWith(join(folder(), "elsewhere"));
+      expect(() => copyTree(join(absolute, "fixture"), join(absolute, "copy"), join(absolute, "fixture"))).toThrow(/absolute target/);
+      const out = fixtureWith("../outside");
+      expect(() => copyTree(join(out, "fixture"), join(out, "copy"), join(out, "fixture"))).toThrow(/climbs out of the fixture/);
+      const dangling = fixtureWith("nothing-here");
+      expect(() => copyTree(join(dangling, "fixture"), join(dangling, "copy"), join(dangling, "fixture"))).toThrow(/link to nothing/);
+    });
+
+    it("are read as the kernel reads them: a chain whose text stays inside leads out, and is refused", () => {
+      const base = folder();
+      put(base, "fixture/a/keep.txt", "k");
+      symlinkSync("..", join(base, "fixture", "a", "up"));
+      symlinkSync("a/up/..", join(base, "fixture", "b")); // as text inside; to the kernel, the folder above the fixture
+
+      expect(() => copyTree(join(base, "fixture"), join(base, "copy"), join(base, "fixture"))).toThrow(/b is a link whose target .*climbs out of the fixture/);
+    });
+
+    it("are refused when their walk goes above the fixture and comes back in by its name: in the copy that name is not the fixture", () => {
+      const base = folder();
+      put(base, "fixture/package.json", "{}");
+      mkdirSync(join(base, "fixture", "x"));
+      symlinkSync("..", join(base, "fixture", "x", "a")); // x/a is the fixture's own folder
+      symlinkSync("x/a/../fixture/package.json", join(base, "fixture", "back")); // ends at the fixture's own file, by way of the folder above it
+
+      expect(() => copyTree(join(base, "fixture"), join(base, "copy"), join(base, "fixture"))).toThrow(/back is a link whose target .*climbs out of the fixture/);
+    });
+
+    it("are never entered: a link to the folder it is in is copied as a link, and is no loop", () => {
+      const base = folder();
+      mkdirSync(join(base, "fixture"));
+      symlinkSync(".", join(base, "fixture", "self"));
+
+      copyTree(join(base, "fixture"), join(base, "copy"), join(base, "fixture"));
+
+      expect(readlinkSync(join(base, "copy", "self"))).toBe(".");
+      expect(readdirSync(join(base, "copy"))).toEqual(["self"]);
+    });
+  });
+
+  describe("copyFixture", () => {
+    it("copies the fixture, links and all, when it is the place the task set recorded", () => {
+      const base = folder();
+      put(base, "fixture/a.txt", "a");
+
+      copyFixture(join(base, "fixture"), join(base, "copy"));
+
+      expect(read(base, "copy/a.txt")).toBe("a");
+    });
+
+    it("refuses a fixture that is no longer there", () => {
+      const base = folder();
+
+      expect(() => copyFixture(join(base, "gone"), join(base, "copy"))).toThrow();
+      expect(existsSync(join(base, "copy"))).toBe(false);
+    });
+
+    it.skipIf(!canLink)("refuses a fixture a link has taken the place of, or the place of a folder above it", () => {
+      const base = folder();
+      put(base, "real/fixture/a.txt", "a");
+      put(base, "other/fixture/a.txt", "decoy");
+      const recorded = join(base, "real", "fixture"); // the real path the task set recorded
+      rmSync(recorded, { recursive: true });
+      symlinkSync(join(base, "other", "fixture"), recorded);
+      expect(() => copyFixture(recorded, join(base, "copy1"))).toThrow(/is not the place it was when the task set was read/);
+
+      const above = folder();
+      put(above, "real/fixture/a.txt", "a");
+      put(above, "other/fixture/a.txt", "decoy");
+      const deep = join(above, "real", "fixture");
+      rmSync(join(above, "real"), { recursive: true });
+      symlinkSync(join(above, "other"), join(above, "real"));
+      expect(() => copyFixture(deep, join(above, "copy2"))).toThrow(/is not the place it was/);
+      expect(existsSync(join(above, "copy2"))).toBe(false);
+    });
   });
 });

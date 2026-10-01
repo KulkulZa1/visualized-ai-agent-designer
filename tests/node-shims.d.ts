@@ -66,9 +66,14 @@ declare module "node:fs" {
   export function mkdtempSync(prefix: string): string;
   export function readdirSync(path: string): string[];
   export function readFileSync(path: string, encoding: string): string;
-  export function realpathSync(path: string): string;
+  export function readlinkSync(path: string): string;
+  /** Resolves with the kernel's own realpath(3): a `..` after a link goes up from the link's target. The plain
+   *  function reads `..` in a link's target as text, so it can say a path is inside a folder that it is not. */
+  export const realpathSync: { (path: string): string; native(path: string): string };
   export function renameSync(from: string, to: string): void;
+  export function rmdirSync(path: string): void;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
+  export function statSync(path: string): Stats;
   export function symlinkSync(target: string, path: string, type?: string): void;
   export function writeFileSync(path: string, data: string, encoding?: string): void;
 }
@@ -80,6 +85,7 @@ declare module "node:os" {
 declare module "node:path" {
   export const delimiter: string;
   export const sep: string;
+  export function basename(path: string): string;
   export function dirname(path: string): string;
   export function isAbsolute(path: string): boolean;
   export function join(...paths: string[]): string;
@@ -100,6 +106,7 @@ declare module "node:url" {
 declare const __dirname: string;
 declare const process: {
   cwd(): string;
+  getuid?(): number;
   execPath: string;
   env: Record<string, string | undefined>;
   platform: string;

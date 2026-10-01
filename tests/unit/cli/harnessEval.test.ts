@@ -7,7 +7,9 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -137,7 +139,9 @@ const out = (dir: string) => join(dir, "out");
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Report = any;
 const reportOf = (dir: string, folder = out(dir)): Report =>
-  existsSync(join(folder, "report.json")) ? JSON.parse(readFileSync(join(folder, "report.json"), "utf8")) : undefined;
+  existsSync(join(folder, "report.json")) && statSync(join(folder, "report.json")).isFile()
+    ? JSON.parse(readFileSync(join(folder, "report.json"), "utf8")) : undefined;
+const onWindows = process.platform === "win32";
 const approve = ["--allow-scorer", "npm test --silent"];
 
 /** `harness eval <dir>/tasks.yaml`, with the fake core and an output folder in `dir`; `args` follow. */
@@ -257,7 +261,32 @@ describe("harness eval", { timeout: 60_000 }, () => {
     expect(requestsOf(dir).find((r) => r.cmd === "execute_command")?.args.workspacePath).not.toContain(dir);
   });
 
-  it("writes report.json before the first trial and after each one, and stops on Ctrl+C: cancelled, exit 130, the running scorer command cancelled", async () => {
+  it("reads what the agents left before the command scorers put files back: a file check written after a restore grades the agents' file, and the results keep the order written", () => {
+    // The agent breaks package.json, so that `npm test` passes whatever the code does. The restore of the scorer
+    // before the file check would put the real one back for the check to read.
+    const dir = project({
+      tasks: [laptop({ weight: 1, scorers: [
+        { name: "tests", command: "npm test --silent", restore: ["package.json"] },
+        { name: "has-the-test-script", file: { path: "package.json", contains: ["node --test"] } },
+      ] })],
+      taskSet: { trials: 1 },
+      replies: { Coder: [write("package.json", '{"scripts":{"test":"echo ok"}}\n'), "done"] },
+      commands: { "npm test --silent": { exitCode: 0 } },
+    });
+
+    const run = harnessEval(dir);
+
+    expect(run.status, run.stderr).toBe(0);
+    const trial = run.report.per_task.laptop.trials[0];
+    expect(trial.scorers.map((s: Report) => [s.name, s.passed])).toEqual([["tests", true], ["has-the-test-script", false]]);
+    expect(trial.reward).toBe(0.5);
+    expect(run.report.S).toBe(0.5);
+    expect(jsonIn(out(dir), "trials", "laptop", "t0", "scorers.json").map((s: Report) => s.name)).toEqual(["tests", "has-the-test-script"]);
+    expect(run.stdout).toContain("(tests ✓, has-the-test-script ✗)");
+  });
+
+  // (child.kill("SIGINT") ends the process on Windows: there is no Ctrl+C to send to it.)
+  it.skipIf(onWindows)("writes report.json before the first trial and after each one, and stops on Ctrl+C: cancelled, exit 130, the running scorer command cancelled", async () => {
     const dir = project({
       tasks: [
         { id: "fast", task: "t", scorers: [{ name: "quick", command: "quick cmd" }] },
@@ -453,6 +482,18 @@ describe("harness eval", { timeout: 60_000 }, () => {
       expect(existsSync(out(dir))).toBe(false);
     });
 
+    it("is 2 for a scorer command that was passed only with --allow-command: what agents may run is not what scorers may run", () => {
+      const dir = project();
+
+      const run = harnessEval(dir, ["--allow-command", "npm test --silent"]);
+
+      expect(run.status).toBe(2);
+      expect(run.stderr).toContain("this scorer command is not approved");
+      expect(run.stderr).toContain("  npm test --silent    (laptop/tests)");
+      expect(run.requests).toEqual([]);
+      expect(existsSync(out(dir))).toBe(false);
+    });
+
     it("lists every command that is not approved, once, and only those", () => {
       const dir = project({
         tasks: [laptop(), phone({ scorers: [{ name: "lint", command: "npm run lint" }, { name: "tests", command: "npm test --silent" }] })],
@@ -485,14 +526,25 @@ describe("harness eval", { timeout: 60_000 }, () => {
       expect(run.requests).toEqual([]);
     });
 
-    it("is 2 for a fixture with a link in it, and for a path that leaves the task set's folder", () => {
-      const withLink = project();
-      symlinkSync("package.json", join(withLink, "fixtures", "laptop", "alias.js"));
-      const linked = harnessEval(withLink);
-      expect(linked.status).toBe(2);
-      expect(linked.stderr).toContain("fixtures/laptop/alias.js is a link");
+    it.skipIf(onWindows)("is 2 for a fixture with a link in it that is absolute or leads out of the fixture, naming the link", () => {
+      const absolute = project();
+      symlinkSync(join(absolute, "fixtures", "laptop", "package.json"), join(absolute, "fixtures", "laptop", "alias.js"));
+      const refusedAbsolute = harnessEval(absolute);
+      expect(refusedAbsolute.status).toBe(2);
+      expect(refusedAbsolute.stderr).toContain("fixtures/laptop/alias.js is a link with an absolute target");
+      expect(refusedAbsolute.requests).toEqual([]);
 
+      const leaving = project();
+      symlinkSync("../phone/readme.md", join(leaving, "fixtures", "laptop", "other.md"));
+      const refusedLeaving = harnessEval(leaving);
+      expect(refusedLeaving.status).toBe(2);
+      expect(refusedLeaving.stderr).toContain('fixtures/laptop/other.md is a link whose target ("../phone/readme.md") climbs out of the fixture');
+      expect(refusedLeaving.requests).toEqual([]);
+    });
+
+    it("is 2 for a path that leaves the task set's folder", () => {
       const leaving = harnessEval(project({ tasks: [laptop({ workspace: "../elsewhere" })] }));
+
       expect(leaving.status).toBe(2);
       expect(leaving.stderr).toContain("workspace ../elsewhere leaves the task set's folder");
     });
@@ -559,6 +611,146 @@ describe("harness eval", { timeout: 60_000 }, () => {
       expect(run.requests).toEqual([]);
     });
 
+    describe("an --out, or a folder for the trials, that is inside what the trials copy: every trial would find the results of the ones before it", () => {
+      const refused = (run: { status: number | null; stderr: string; requests: Request[] }, text: string) => {
+        expect(run.status, run.stderr).toBe(2);
+        expect(run.stderr).toContain(text);
+        expect(run.requests).toEqual([]); // harness-core was never started
+      };
+
+      it("is 2 for an --out inside the workspace of a task that runs, and makes no folder there", () => {
+        const dir = project();
+
+        const run = harnessEval(dir, [...approve, "--out", join(dir, "fixtures", "laptop", "results")]);
+
+        refused(run, "is inside the workspace of task laptop");
+        expect(existsSync(join(dir, "fixtures", "laptop", "results"))).toBe(false);
+      });
+
+      it("is 2 for the default output folder when the current folder is inside such a workspace", () => {
+        const dir = project();
+        const here = join(dir, "fixtures", "laptop");
+
+        const run = spawnSync(process.execPath, [cli, "eval", join(dir, "tasks.yaml"), "--core", fakeCore, ...approve], {
+          cwd: here, encoding: "utf8", env: environment(dir), timeout: SPAWN_TIMEOUT_MS,
+        });
+
+        refused({ ...run, requests: requestsOf(dir) }, "(the default; --out puts it elsewhere) is inside the workspace of task laptop");
+        expect(existsSync(join(here, ".harness"))).toBe(false);
+      });
+
+      it.skipIf(onWindows)("is 2 for an --out that reaches the workspace through a link", () => {
+        const dir = project();
+        symlinkSync(join(dir, "fixtures", "laptop"), join(dir, "shortcut"));
+
+        const run = harnessEval(dir, [...approve, "--out", join(dir, "shortcut", "results")]);
+
+        refused(run, "is inside the workspace of task laptop");
+        expect(existsSync(join(dir, "fixtures", "laptop", "results"))).toBe(false);
+      });
+
+      /** The grader files of the scorer are a folder, which every trial gets a copy of. */
+      const withGraderFolder = () => project({
+        tasks: [laptop({ scorers: [{ name: "tests", command: "npm test --silent", inject: [{ from: "grader/suite", to: "test/suite" }] }] })],
+        files: { "grader/suite/one.test.js": "// one\n" },
+      });
+
+      it("is 2 for an --out inside the grader files a scorer injects, which are copied into the trials as well", () => {
+        const dir = withGraderFolder();
+
+        const run = harnessEval(dir, [...approve, "--out", join(dir, "grader", "suite", "results")]);
+
+        refused(run, "is inside the grader files of task laptop, scorer tests");
+        expect(existsSync(join(dir, "grader", "suite", "results"))).toBe(false);
+      });
+
+      it.skipIf(onWindows)("is 2 when the folder for the trials (TMPDIR) is inside a workspace or the grader files", () => {
+        const dir = withGraderFolder();
+
+        refused(harnessEval(dir, approve, { TMPDIR: join(dir, "fixtures", "laptop") }), "is inside the workspace of task laptop");
+        refused(harnessEval(dir, approve, { TMPDIR: join(dir, "grader", "suite") }), "is inside the grader files of task laptop");
+      });
+
+      it("takes an --out beside the grader files, in the same folder", () => {
+        const dir = withGraderFolder();
+
+        const run = harnessEval(dir, [...approve, "-k", "1", "--out", join(dir, "grader", "results")]);
+
+        expect(run.status, run.stderr).toBe(0);
+        expect(reportOf(dir, join(dir, "grader", "results"))).toMatchObject({ status: "done" });
+      });
+
+      it("looks only at the tasks that run: an --out inside the workspace of a task that does not is fine", () => {
+        const dir = project({ tasks: [laptop(), phone({ split: "heldout" })], taskSet: { trials: 1 } });
+        const results = join(dir, "fixtures", "phone", "results");
+
+        const run = harnessEval(dir, [...approve, "--out", results]);
+
+        expect(run.status, run.stderr).toBe(0);
+        expect(reportOf(dir, results)).toMatchObject({ status: "done" });
+      });
+    });
+
+    describe("when something nobody planned for happens: never exit code 1, which says the score was below --min-score", () => {
+      /** The environment of a run in which a scorer command can reach the output folder, and the trials' folders are the test's own. */
+      const sabotage = (dir: string) => {
+        const tmp = join(dir, "trial-folders");
+        mkdirSync(tmp);
+        return { tmp, env: { OUT_DIR: out(dir), TMPDIR: tmp } };
+      };
+
+      it.skipIf(onWindows)("is 3, with the reason, when the folder for the trials cannot be made, and leaves no output folder", () => {
+        const dir = project();
+
+        const run = harnessEval(dir, approve, { TMPDIR: join(dir, "no-such-folder") });
+
+        expect(run.status).toBe(3);
+        expect(run.stderr).toContain(`harness eval: cannot make a folder for the trials in ${join(dir, "no-such-folder")}: ENOENT`);
+        expect(run.stderr).not.toContain("unexpected error");
+        expect(existsSync(out(dir))).toBe(false);
+      });
+
+      it.skipIf(onWindows)("is 3, and the report says error, when what a trial leaves cannot be kept: the eval broke, no other trial starts, nothing is left in the trials' folder", () => {
+        const wreck = 'rm -rf "$OUT_DIR/trials" && touch "$OUT_DIR/trials"'; // a file where the trials' results go
+        const dir = project({
+          tasks: [
+            { id: "first", task: "t", scorers: [{ name: "wreck", command: wreck }] },
+            { id: "never", task: "t", scorers: [{ name: "late", output: { contains: ["SUP-A"] } }] },
+          ],
+          taskSet: { trials: 1 },
+          commands: { [wreck]: { run: true } },
+        });
+        const { tmp, env } = sabotage(dir);
+
+        const run = harnessEval(dir, ["--allow-scorer", wreck, "--min-score", "0.5"], env);
+
+        expect(run.status, run.stderr).toBe(3); // not 1: nothing here says the score is below 0.5
+        expect(run.stderr).toMatch(/harness eval: the eval broke: ENOTDIR/);
+        expect(run.report).toMatchObject({ status: "error", error: expect.stringContaining("the eval broke"), n_done: 0 });
+        expect(run.report.per_task.never.trials).toEqual([]);
+        expect(readdirSync(tmp)).toEqual([]); // the trial's folder was deleted all the same
+      });
+
+      it.skipIf(onWindows)("is 3 when the report cannot be written after a trial, and still prints the results of what ran", () => {
+        const wreck = 'rm -f "$OUT_DIR/report.json" && mkdir "$OUT_DIR/report.json" && touch "$OUT_DIR/report.json/x"'; // a folder where the report goes
+        const dir = project({
+          tasks: [{ id: "first", task: "t", scorers: [{ name: "wreck", command: wreck }] }],
+          taskSet: { trials: 1 },
+          commands: { [wreck]: { run: true } },
+        });
+        const { tmp, env } = sabotage(dir);
+
+        const run = harnessEval(dir, ["--allow-scorer", wreck], env);
+
+        expect(run.status, run.stderr).toBe(3);
+        expect(run.stderr).toMatch(/harness eval: cannot write .*report\.json: /);
+        expect(run.stdout).toContain("[1/1] first t0: reward 1.00 (wreck ✓)");
+        expect(run.stdout).toContain("S 1.000 · C n/a · 1 of 1 trials, 0 missing");
+        expect(readdirSync(out(dir)).sort()).toEqual(["report.json", "trials"]); // and no report.json.tmp
+        expect(readdirSync(tmp)).toEqual([]);
+      });
+    });
+
     it("is 3 and says to build the bundle when cli/dist/harness-run.mjs is not there", () => {
       const bare = mkdtempSync(join(root, "outputs", "eval-bare-"));
       scratch.push(bare);
@@ -569,6 +761,19 @@ describe("harness eval", { timeout: 60_000 }, () => {
 
       expect(run.status).toBe(3);
       expect(run.stderr).toContain("harness eval: build it first with npm run build:cli");
+    });
+
+    it("is 3, never 1, when the bundle cannot be loaded: a broken build is not a score below --min-score", () => {
+      const broken = mkdtempSync(join(root, "outputs", "eval-broken-"));
+      scratch.push(broken);
+      mkdirSync(join(broken, "cli", "dist"), { recursive: true });
+      copyFileSync(join(root, "cli", "harness.mjs"), join(broken, "cli", "harness.mjs"));
+      writeFileSync(join(broken, "cli", "dist", "harness-run.mjs"), 'throw new Error("the bundle is broken");\n');
+
+      const run = spawnSync(process.execPath, [join(broken, "cli", "harness.mjs"), "eval", "tasks.yaml", "--min-score", "0.5"], { encoding: "utf8", timeout: SPAWN_TIMEOUT_MS });
+
+      expect(run.status).toBe(3);
+      expect(run.stderr).toContain("harness eval: the bundle is broken");
     });
 
     it("is 2 for bad usage, and prints the usage with --help", () => {
@@ -691,6 +896,34 @@ describe("harness eval", { timeout: 60_000 }, () => {
       expect(existsSync(dirname(workspaceOf(dropped)))).toBe(false); // the folder of all the trials went too
     });
 
+    it("keeps the trial's folder as it is after scoring: what a command scorer restored is back, and its grader files are in", () => {
+      const dir = project({
+        tasks: [laptop({ weight: 1, scorers: [tests] })],
+        taskSet: { trials: 1 },
+        replies: { Coder: [write("package.json", '{"scripts":{"test":"echo ok"}}\n'), write("test/hidden.test.js", "// the agent's own\n"), "done"] },
+      });
+
+      const run = harnessEval(dir, [...approve, "--keep-workspaces"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      const where = /Trial folders kept in (.+)/.exec(run.stdout)?.[1] ?? "";
+      scratch.push(where);
+      expect(readIn(where, "laptop-t0", "package.json")).toBe(PRISTINE_PACKAGE);
+      expect(readIn(where, "laptop-t0", "test", "hidden.test.js")).toBe(HIDDEN_TEST);
+    });
+
+    it("shows an error that has line breaks in it on one line of progress, and keeps its text whole in the report and the trial's files", () => {
+      const dir = project({ scenario: { healthFails: true, healthPull: "ollama pull qwen2.5-coder:7b" } });
+
+      const run = harnessEval(dir);
+
+      expect(run.status).toBe(3);
+      expect(run.stdout.split("\n")[0]).toMatch(/^\[1\/4\] laptop t0: missing \(Ollama is not running Run: ollama pull qwen2\.5-coder:7b\) · run /);
+      const whole = "Ollama is not running\nRun: ollama pull qwen2.5-coder:7b";
+      expect(run.report.per_task.laptop.trials[0].error).toBe(whole);
+      expect(jsonIn(out(dir), "trials", "laptop", "t0", "outcome.json").error).toBe(whole);
+    });
+
     it("writes to .harness/evals/<evalId>/ in the current folder when --out is not given", () => {
       const dir = project({ taskSet: { trials: 1 }, tasks: [phone()] });
 
@@ -738,6 +971,52 @@ describe("harness eval", { timeout: 60_000 }, () => {
       expect(allowed.status, allowed.stderr).toBe(0);
       expect(readIn(out(other), "trials", "laptop", "t0", "run.log")).toMatch(/\$ Coder ran: npm test --silent \(allowed by --allow-command; exit 1/);
       expect(allowed.requests.filter((r) => r.cmd === "execute_command")).toHaveLength(2); // the agent's, then the scorer's
+    });
+
+    it.skipIf(onWindows)("copies a fixture's relative links as they are, and a scorer command can run through one: an npm install's node_modules/.bin", () => {
+      const tool = "node_modules/.bin/greet";
+      const dir = project({
+        tasks: [laptop({ weight: 1, scorers: [{ name: "run-the-tool", command: tool }] })],
+        taskSet: { trials: 1 },
+        files: { "fixtures/laptop/node_modules/greet-pkg/bin/greet.sh": '#!/bin/sh\necho "greetings from $(basename "$(pwd -P)")"\n' },
+        commands: { [tool]: { run: true } }, // really runs, in the trial's folder
+      });
+      chmodSync(join(dir, "fixtures/laptop/node_modules/greet-pkg/bin/greet.sh"), 0o755);
+      mkdirSync(join(dir, "fixtures/laptop/node_modules/.bin"));
+      symlinkSync("../greet-pkg/bin/greet.sh", join(dir, "fixtures/laptop/node_modules/.bin/greet"));
+
+      const run = harnessEval(dir, ["--allow-scorer", tool, "--keep-workspaces"]);
+
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.report).toMatchObject({ status: "done", S: 1, missing: 0 });
+      expect(jsonIn(out(dir), "trials", "laptop", "t0", "scorers.json")[0])
+        .toMatchObject({ name: "run-the-tool", passed: true, exitCode: 0, stdout: "greetings from laptop-t0\n" }); // the trial's folder, not the fixture
+      const where = /Trial folders kept in (.+)/.exec(run.stdout)?.[1] ?? "";
+      scratch.push(where);
+      expect(readlinkSync(join(where, "laptop-t0", "node_modules", ".bin", "greet"))).toBe("../greet-pkg/bin/greet.sh"); // a link, as it was
+    });
+
+    it.skipIf(onWindows)("keeps a link an agent retargets out of the trial's folder from taking a restore with it: the trial is missing, and nothing outside is deleted", () => {
+      const outside = (dir: string) => join(dir, "precious");
+      const retarget = 'ln -sfn "$PRECIOUS" deps';
+      const dir = project({
+        tasks: [laptop({ weight: 1, scorers: [{ name: "tests", command: "npm test --silent", restore: ["deps/index.js"] }] })],
+        taskSet: { trials: 1 },
+        files: { "fixtures/laptop/vendor/lib/index.js": "// lib\n", "precious/index.js": "// precious\n" },
+        replies: { Coder: [`<tool_call>${JSON.stringify({ name: "bash", args: { command: retarget } })}</tool_call>`, "done"] },
+        commands: { [retarget]: { run: true }, "npm test --silent": { exitCode: 0 } },
+      });
+      symlinkSync("vendor/lib", join(dir, "fixtures/laptop/deps")); // a link of the fixture: allowed, copied as it is
+
+      // The agent runs a command that points the link at a folder outside the trial.
+      const run = harnessEval(dir, [...approve, "--allow-command", retarget], { PRECIOUS: outside(dir) });
+
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.report.per_task.laptop.trials[0]).toMatchObject({
+        missing: true, error: expect.stringContaining("scorer tests: deps/index.js leads out of the trial's folder through a link"),
+      });
+      expect(readIn(dir, "precious", "index.js")).toBe("// precious\n");
+      expect(run.requests.filter((r) => r.cmd === "execute_command" && r.args.command === "npm test --silent")).toEqual([]); // the scorer's command did not run
     });
 
     it("runs a scorer command in the trial's folder, with consent and its time limit", () => {

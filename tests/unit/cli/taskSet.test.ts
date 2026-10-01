@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { AgentRole } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
 import {
-  isInsideDir, loadTaskSet, nodeProblems, relativePathProblem, selectTasks, unapprovedScorerCommands, type TaskDef, type TaskSet,
+  isInsideDir, linkProblem, loadTaskSet, nodeProblems, pathParts, relativePathProblem, selectTasks, unapprovedScorerCommands, type TaskDef, type TaskSet,
 } from "@/cli/taskSet";
 
 const scratch: string[] = [];
@@ -17,9 +17,9 @@ afterEach(() => {
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** A folder holding `files` (path → text), made fresh. */
+/** A folder holding `files` (path → text), made fresh, as its real path (a path through a link is not what these tests are about, unless they make the link). */
 function project(files: Record<string, string> = {}): string {
-  const dir = mkdtempSync(join(tmpdir(), "harness-taskset-"));
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "harness-taskset-")));
   scratch.push(dir);
   const put = (path: string, text: string) => {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
@@ -164,6 +164,11 @@ describe("loadTaskSet", () => {
       ["a timeout on an output scorer", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { contains: ["x"] }, timeoutSecs: 5 }] })] }), /timeoutSecs is for a command scorer/],
       ["an output scorer that checks nothing", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { node: "A" } }] })] }), /at least one of contains, notContains and matches/],
       ["an empty string to look for", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { contains: [""] } }] })] }), /contains/],
+      ["an output check with an empty contains list", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { contains: [] } }] })] }), /scorers\[0\]\.output\.contains/],
+      ["an output check with an empty notContains list", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { notContains: [] } }] })] }), /scorers\[0\]\.output\.notContains/],
+      ["an output check whose lists are all empty", () => taskSet({ tasks: [task({ scorers: [{ name: "o", output: { contains: [], notContains: [], matches: [] } }] })] }), /output\.contains/],
+      ["a file check with an empty matches list", () => taskSet({ tasks: [task({ scorers: [{ name: "f", file: { path: "a", matches: [] } }] })] }), /scorers\[0\]\.file\.matches/],
+      ["more trials than the most", () => taskSet({ trials: 1001 }), /trials/],
     ])("rejects %s", (_what, content, message) => {
       expect(errorsOf(project(), content()).join("\n")).toMatch(message);
     });
@@ -190,6 +195,23 @@ describe("loadTaskSet", () => {
       expect(errorsOf(dir, taskSet({ tasks: [task({ task: "  " })] })).join("\n")).toContain("task laptop: the task text is empty");
       expect(errorsOf(dir, taskSet({ tasks: [{ id: "a", taskFile: "tasks/empty.md", scorers: [scorer()] }] })).join("\n"))
         .toContain("the task text is empty");
+    });
+
+    it("takes the most trials, and not one more", () => {
+      expect(loaded(project(), taskSet({ trials: 1000 })).trials).toBe(1000);
+    });
+
+    it.each(["__proto__", "constructor", "prototype"])("rejects %s as a task id: it is an object's own property, and would vanish from the report", (id) => {
+      expect(errorsOf(project(), taskSet({ tasks: [task({ id })] })).join("\n")).toMatch(/tasks\[0\]\.id: this cannot be a task id: it is the name of an object's own property/);
+    });
+
+    it.each(["con", "CON", "prn", "aux", "nul", "Nul", "com1", "COM9", "lpt1", "LPT9", "con.txt"])("rejects %s as a task id: Windows keeps it for a device", (id) => {
+      const errors = errorsOf(project(), taskSet({ tasks: [task({ id })] })).join("\n");
+      expect(errors).toMatch(/this cannot be a task id: Windows keeps it for a device/);
+    });
+
+    it.each(["console", "com10", "com0", "lpt", "auxiliary", "null", "con-t1", "protoype", "a-con"])("takes %s as a task id: it is not a device or property name", (id) => {
+      expect(() => loaded(project(), taskSet({ tasks: [task({ id })] }))).not.toThrow();
     });
 
     it("rejects a regular expression that does not compile, naming the scorer", () => {
@@ -253,9 +275,16 @@ describe("loadTaskSet", () => {
       }
     });
 
-    it("lets restore and inject.to go up and come back down inside the folder", () => {
-      const content = taskSet({ tasks: [task({ scorers: [scorer({ restore: ["test/../package.json"], inject: [{ from: "grader/hidden.test.js", to: "test/./h.js" }] })] })] });
-      expect(() => loaded(project(), content)).not.toThrow();
+    it("lets restore, inject.to and file.path go up and come back down inside the folder, and keeps them written out: no . or .. is left to be read two ways", () => {
+      const content = taskSet({ tasks: [task({ scorers: [
+        scorer({ restore: ["test/../package.json", "./test"], inject: [{ from: "grader/hidden.test.js", to: "test/./h.js" }] }),
+        { name: "f", file: { path: "docs/../report.md" } },
+      ] })] });
+
+      const [command, file] = loaded(project(), content).tasks[0].scorers;
+
+      expect(command).toMatchObject({ restore: ["package.json", "test"], inject: [{ to: "test/h.js" }] });
+      expect(file).toMatchObject({ path: "report.md" });
     });
 
     it("keeps file.path inside the trial's folder too", () => {
@@ -283,63 +312,130 @@ describe("loadTaskSet", () => {
     });
   });
 
-  describe.skipIf(!canLink)("links, which are refused", () => {
-    it("refuses a link anywhere in a fixture, naming it", () => {
-      const dir = project();
-      symlinkSync("../package.json", join(dir, "fixtures", "laptop", "test", "link.json"));
-      expect(errorsOf(dir, taskSet()).join("\n")).toMatch(/task laptop: workspace: fixtures\/laptop\/test\/link\.json is a link \(a task set may not contain links\)/);
+  describe.skipIf(!canLink)("links in a fixture", () => {
+    /** The fixture's folder, in a new project. */
+    const fixture = (dir: string, ...path: string[]) => join(dir, "fixtures", "laptop", ...path);
+    const problems = (dir: string) => errorsOf(dir, taskSet()).join("\n");
+
+    it("allows a relative link that leads to a place in the fixture, and keeps it as it is: an npm install's node_modules/.bin is one", () => {
+      const dir = project({ "fixtures/laptop/node_modules/pkg/bin/x": "#!/bin/sh\n", "fixtures/laptop/sub/f.txt": "f\n" });
+      mkdirSync(fixture(dir, "node_modules", ".bin"));
+      symlinkSync("../pkg/bin/x", fixture(dir, "node_modules", ".bin", "x")); // the shape npm gives it
+      symlinkSync("../package.json", fixture(dir, "test", "up.json")); // to a file elsewhere in the fixture
+      symlinkSync("sub", fixture(dir, "alias")); // to a folder
+      symlinkSync("alias/f.txt", fixture(dir, "chain")); // a link to a path through another link
+      symlinkSync("..", fixture(dir, "sub", "home")); // to the fixture's own folder
+
+      const set = loaded(dir, taskSet());
+
+      expect(set.tasks[0].workspace).toBe(fixture(dir));
     });
 
-    it("refuses a link even when it leads to something inside the fixture, and a dangling one", () => {
+    it("does not enter a link: a link to the folder it is in, or to a folder above it in the fixture, is no loop", () => {
       const dir = project();
-      symlinkSync("package.json", join(dir, "fixtures", "laptop", "inside"));
-      expect(errorsOf(dir, taskSet()).join("\n")).toContain("fixtures/laptop/inside is a link");
-      const other = project();
-      symlinkSync("nowhere", join(other, "fixtures", "laptop", "dangling"));
-      expect(errorsOf(other, taskSet()).join("\n")).toContain("fixtures/laptop/dangling is a link");
+      symlinkSync(".", fixture(dir, "self"));
+      mkdirSync(fixture(dir, "deep", "er"), { recursive: true });
+      symlinkSync("../..", fixture(dir, "deep", "er", "root"));
+
+      expect(() => loaded(dir, taskSet())).not.toThrow();
+    });
+
+    it("refuses an absolute link, even to a place in the fixture", () => {
+      const dir = project();
+      symlinkSync(fixture(dir, "package.json"), fixture(dir, "test", "abs.json"));
+
+      expect(problems(dir)).toMatch(/task laptop: workspace: fixtures\/laptop\/test\/abs\.json is a link with an absolute target .*a link in a fixture must be relative/);
+    });
+
+    it("refuses a link that leads out of the fixture, whether its target says so or not", () => {
+      const dir = project();
+      symlinkSync("../../grader/hidden.test.js", fixture(dir, "out")); // climbs out
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/out is a link whose target .*climbs out of the fixture/);
+
+      const other = project({ "fixtures/laptop/a/keep.txt": "x\n" });
+      symlinkSync("../../..", fixture(other, "a", "up")); // not a place in the fixture, and its text climbs from a/ by three
+      expect(problems(other)).toMatch(/fixtures\/laptop\/a\/up is a link whose target .*climbs out/);
+    });
+
+    it("refuses a link that climbs out of the fixture and comes back in by its name: in a copy it would lead somewhere else", () => {
+      const dir = project();
+      symlinkSync("../laptop/package.json", fixture(dir, "back")); // lands in the fixture, but through the folder above it
+
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/back is a link whose target .*climbs out of the fixture/);
+    });
+
+    it("reads a link's target as the kernel does, not as text: a .. after a link goes up from the link's target", () => {
+      const dir = project();
+      mkdirSync(fixture(dir, "a"));
+      symlinkSync("..", fixture(dir, "a", "up")); // a/up is the fixture's own folder: fine
+      // As text, a/up/.. is just a: inside. The kernel goes up from a/up, which is the fixture, so it ends above it.
+      symlinkSync("a/up/..", fixture(dir, "b"));
+
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/b is a link whose target .*climbs out of the fixture/);
+    });
+
+    it("refuses a link whose walk goes above the fixture through another link, though neither its text nor where it ends says so: it would come back in by the fixture's own name", () => {
+      const dir = project();
+      mkdirSync(fixture(dir, "x"));
+      symlinkSync("..", fixture(dir, "x", "a")); // x/a is the fixture's own folder: fine
+      // As text, from the fixture's folder: x, a, .., laptop, package.json: it never goes above. Walked: x/a is the fixture,
+      // .. is fixtures/, laptop is the fixture again, so it ends at the fixture's package.json: inside. In a copy, at another
+      // place, that name is not there (or is another folder's): the link would not lead to the copy's own file.
+      symlinkSync("x/a/../laptop/package.json", fixture(dir, "back"));
+
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/back is a link whose target .*climbs out of the fixture: a step of it goes above/);
+    });
+
+    it("refuses a dangling link, a link through a file, and links that loop", () => {
+      const dir = project();
+      symlinkSync("nowhere", fixture(dir, "dangling"));
+      expect(problems(dir)).toMatch(/fixtures\/laptop\/dangling is a link to nothing/);
+
+      const throughFile = project();
+      symlinkSync("package.json/x", fixture(throughFile, "notdir")); // a file is not a folder
+      expect(problems(throughFile)).toMatch(/fixtures\/laptop\/notdir is a link to nothing/);
+
+      const loop = project();
+      symlinkSync("two", fixture(loop, "one"));
+      symlinkSync("one", fixture(loop, "two"));
+      expect(problems(loop)).toMatch(/is a link to nothing .*links loop/);
     });
 
     it("refuses a workspace that is itself a link, and one reached through a link", () => {
       const dir = project();
       symlinkSync("laptop", join(dir, "fixtures", "linked"));
-      expect(errorsOf(dir, taskSet({ tasks: [task({ workspace: "fixtures/linked" })] })).join("\n")).toContain("fixtures/linked is a link");
+      expect(errorsOf(dir, taskSet({ tasks: [task({ workspace: "fixtures/linked" })] })).join("\n"))
+        .toContain("fixtures/linked is a link (a path in a task set may not go through a link)");
       symlinkSync("fixtures", join(dir, "via"));
-      expect(errorsOf(dir, taskSet({ tasks: [task({ workspace: "via/laptop" })] })).join("\n")).toContain("via is a link");
+      expect(errorsOf(dir, taskSet({ tasks: [task({ workspace: "via/laptop" })] })).join("\n")).toContain("via is a link (a path in a task set may not go through a link)");
     });
 
-    it("refuses a link that leads out of the task set's folder", () => {
-      const dir = project();
-      const outside = mkdtempSync(join(tmpdir(), "harness-taskset-outside-"));
-      scratch.push(outside);
-      writeFileSync(join(outside, "secret.txt"), "secret\n");
-      symlinkSync(outside, join(dir, "fixtures", "laptop", "escape"));
-      expect(errorsOf(dir, taskSet()).join("\n")).toContain("fixtures/laptop/escape is a link");
-    });
-
-    it("refuses a task file and an injected file that are links", () => {
+    it("refuses a task file and a grader file that are links, and a link in a grader folder: these may not contain links at all", () => {
       const dir = project();
       symlinkSync("laptop.md", join(dir, "tasks", "alias.md"));
       expect(errorsOf(dir, taskSet({ tasks: [{ id: "a", taskFile: "tasks/alias.md", scorers: [scorer()] }] })).join("\n"))
-        .toMatch(/taskFile: tasks\/alias\.md is a link/);
+        .toMatch(/taskFile: tasks\/alias\.md is a link \(a path in a task set may not go through a link\)/);
       symlinkSync("hidden.test.js", join(dir, "grader", "alias.js"));
       const content = taskSet({ tasks: [task({ scorers: [scorer({ inject: [{ from: "grader/alias.js", to: "x" }] })] })] });
       expect(errorsOf(dir, content).join("\n")).toMatch(/inject\.from: grader\/alias\.js is a link/);
+
+      const folder = project({ "grader/hidden/a.js": "// a\n" });
+      symlinkSync("a.js", join(folder, "grader", "hidden", "b.js")); // even a harmless one
+      const inFolder = taskSet({ tasks: [task({ scorers: [scorer({ inject: [{ from: "grader/hidden", to: "x" }] })] })] });
+      expect(errorsOf(folder, inFolder).join("\n")).toContain("grader/hidden/b.js is a link (grader files and task files may not contain links)");
     });
 
-    it("refuses a link inside an injected folder", () => {
-      const dir = project({ "grader/hidden/a.js": "// a\n" });
-      symlinkSync("a.js", join(dir, "grader", "hidden", "b.js"));
-      const content = taskSet({ tasks: [task({ scorers: [scorer({ inject: [{ from: "grader/hidden", to: "x" }] })] })] });
-      expect(errorsOf(dir, content).join("\n")).toContain("grader/hidden/b.js is a link");
-    });
-
-    it("lets the task set's own folder be reached through a link: only what is inside it counts", () => {
+    it("lets the task set's own folder be reached through a link, and gives the fixture's real path", () => {
       const dir = project();
-      const via = mkdtempSync(join(tmpdir(), "harness-taskset-via-"));
+      const via = realpathSync.native(mkdtempSync(join(tmpdir(), "harness-taskset-via-")));
       scratch.push(via);
       symlinkSync(dir, join(via, "link"));
       writeFileSync(join(dir, "tasks.yaml"), stringify(taskSet()));
-      expect(loadTaskSet(join(via, "link", "tasks.yaml"))).toHaveProperty("taskSet");
+
+      const result = loadTaskSet(join(via, "link", "tasks.yaml"));
+
+      expect(result).toHaveProperty("taskSet");
+      expect((result as { taskSet: TaskSet }).taskSet.tasks[0].workspace).toBe(fixture(dir)); // where the kernel says it is
     });
   });
 
@@ -347,6 +443,69 @@ describe("loadTaskSet", () => {
     const dir = project();
     expect(spawnSync("mkfifo", [join(dir, "fixtures", "laptop", "pipe")]).status).toBe(0);
     expect(errorsOf(dir, taskSet()).join("\n")).toContain("fixtures/laptop/pipe is not a regular file or folder");
+  });
+});
+
+describe.skipIf(!canLink)("linkProblem", () => {
+  /** A fixture with a folder `sub`, a file `sub/f.txt`; returns its real path. */
+  function fixtureRoot(): string {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "harness-link-")));
+    scratch.push(dir);
+    mkdirSync(join(dir, "fixture", "sub"), { recursive: true });
+    writeFileSync(join(dir, "fixture", "sub", "f.txt"), "f\n");
+    return join(dir, "fixture");
+  }
+
+  it("has nothing to say about a relative link that stays in the fixture, however it gets there", () => {
+    const root = fixtureRoot();
+    symlinkSync("sub/f.txt", join(root, "a"));
+    symlinkSync("../sub", join(root, "sub", "up"));
+    symlinkSync("sub/up/f.txt", join(root, "b")); // through another link
+    symlinkSync("sub/up/../sub/f.txt", join(root, "c")); // .. after a link goes up from where the link leads: sub/up is sub, so this is sub/../sub/f.txt
+
+    for (const name of ["a", "b", "c"]) expect(linkProblem(join(root, name), root), name).toBeUndefined();
+    expect(linkProblem(join(root, "sub", "up"), root)).toBeUndefined();
+  });
+
+  it("walks a step at a time: it says what stopped the walk", () => {
+    const root = fixtureRoot();
+    symlinkSync(join(root, "sub"), join(root, "abs"));
+    symlinkSync("abs/f.txt", join(root, "via-abs"));
+    symlinkSync("..", join(root, "sub", "up"));
+    symlinkSync("sub/up/..", join(root, "above"));
+    symlinkSync("sub/f.txt/more", join(root, "through-file"));
+
+    expect(linkProblem(join(root, "abs"), root)).toMatch(/^is a link with an absolute target/);
+    expect(linkProblem(join(root, "via-abs"), root)).toMatch(/^is a link whose target \("abs\/f\.txt"\) goes through a link with an absolute target/);
+    expect(linkProblem(join(root, "above"), root)).toMatch(/^is a link whose target \("sub\/up\/\.\."\) climbs out of the fixture/);
+    expect(linkProblem(join(root, "through-file"), root)).toMatch(/^is a link to nothing/);
+  });
+
+  it("gives up on links that loop, and on a link that cannot be read", () => {
+    const root = fixtureRoot();
+    symlinkSync("two", join(root, "one"));
+    symlinkSync("one", join(root, "two"));
+
+    expect(linkProblem(join(root, "one"), root)).toMatch(/^is a link to nothing/);
+    expect(linkProblem(join(root, "sub", "f.txt"), root)).toMatch(/^is a link that cannot be read/); // not a link
+  });
+});
+
+describe("pathParts", () => {
+  it("gives the names of a path written out, without the empty steps and the dots, and keeps ..", () => {
+    expect(pathParts("a/b/c")).toEqual(["a", "b", "c"]);
+    expect(pathParts("./a//b/./c/")).toEqual(["a", "b", "c"]);
+    expect(pathParts("a/../b")).toEqual(["a", "..", "b"]);
+    expect(pathParts(".")).toEqual([]);
+  });
+
+  it.skipIf(process.platform === "win32")("reads a backslash as part of a name where the platform's own separator is a slash, as the kernel does", () => {
+    expect(pathParts("a\\b/c")).toEqual(["a\\b", "c"]);
+    expect(pathParts("..\\x")).toEqual(["..\\x"]); // one name: no .. in it
+  });
+
+  it.skipIf(process.platform !== "win32")("reads a backslash as a separator on Windows", () => {
+    expect(pathParts("a\\b/c")).toEqual(["a", "b", "c"]);
   });
 });
 

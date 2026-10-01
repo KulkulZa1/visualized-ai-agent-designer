@@ -43,6 +43,12 @@ describe("parseEvalArgs", () => {
     expect(ok(["t.yaml", "--trials", "2", "-k", "7"]).trials).toBe(7); // the later one
   });
 
+  it("takes up to 1000 trials, and no more: a typo of 10000 is not a quiet day of compute", () => {
+    expect(ok(["t.yaml", "--trials", "1000"]).trials).toBe(1000);
+    expect(ok(["t.yaml", "-k", "1000"]).trials).toBe(1000);
+    expect(ok(["t.yaml", "-k", "1"]).trials).toBe(1);
+  });
+
   it("lists a task once however often --only names it", () => {
     expect(ok(["t.yaml", "--only", "a", "--only", "b", "--only", "a"]).only).toEqual(["a", "b"]);
   });
@@ -63,10 +69,12 @@ describe("parseEvalArgs", () => {
     [["t.yaml", "--split", "dev"], /--split must be one of: evolve, heldout, smoke, all/],
     [["t.yaml", "--only", "a b"], /--only a b: a task id has letters, digits/],
     [["t.yaml", "--only", "../x"], /--only \.\.\/x: a task id/],
-    [["t.yaml", "--trials", "0"], /--trials must be a whole number of at least 1/],
-    [["t.yaml", "--trials", "1.5"], /--trials must be a whole number of at least 1/],
-    [["t.yaml", "--trials", "many"], /--trials must be a whole number of at least 1/],
-    [["t.yaml", "-k", "0"], /-k must be a whole number of at least 1/],
+    [["t.yaml", "--trials", "0"], /--trials must be a whole number from 1 to 1000/],
+    [["t.yaml", "--trials", "1.5"], /--trials must be a whole number from 1 to 1000/],
+    [["t.yaml", "--trials", "many"], /--trials must be a whole number from 1 to 1000/],
+    [["t.yaml", "--trials", "1001"], /--trials must be a whole number from 1 to 1000/],
+    [["t.yaml", "-k", "0"], /-k must be a whole number from 1 to 1000/],
+    [["t.yaml", "-k", "1001"], /-k must be a whole number from 1 to 1000/],
     [["t.yaml", "--max-parallel-trials", "0"], /--max-parallel-trials must be a whole number of at least 1/],
     [["t.yaml", "--min-score", "1.5"], /--min-score must be a number from 0 to 1/],
     [["t.yaml", "--min-score", "-0.1"], /--min-score must be a number from 0 to 1/],
@@ -147,6 +155,11 @@ describe("EVAL_USAGE", () => {
     expect(EVAL_USAGE).toContain(PROVIDER_ENV_USAGE);
     expect(RUN_USAGE).toContain(PROVIDER_OPTIONS_USAGE);
     expect(RUN_USAGE).toContain(PROVIDER_ENV_USAGE);
+  });
+
+  it("says the number of trials is bounded, and what --keep-workspaces keeps: the folder as it is after scoring", () => {
+    expect(EVAL_USAGE).toMatch(/--trials <n> +Trials per task, 1 to 1000, also -k <n>/);
+    expect(EVAL_USAGE).toMatch(/--keep-workspaces +Keep each trial's folder, as it is after scoring: restored files back, grader files in/);
   });
 
   it("says which scorer commands run, how the exit codes read, and that every trial checks the provider", () => {

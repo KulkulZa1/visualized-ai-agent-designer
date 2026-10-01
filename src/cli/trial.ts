@@ -3,8 +3,10 @@
  * (the engine of `harness run`, in this process), the scorers, and what is kept of it. The task
  * set, the fixtures and the grader files are never in the trial's folder: only copies are.
  */
-import { copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import {
+  copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
 import { runWorkflow, type ProviderSettings, type RunHost, type RunOutcome } from "@/engine/runWorkflow";
 import { runRecordPath, writeRunRecord } from "@/engine/runRecord";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
@@ -13,7 +15,7 @@ import type { WorkflowRun } from "@/types/execution";
 import type { HookResult } from "@/types/hookResult";
 import { createReporter, finalOutputs } from "@/cli/report";
 import {
-  isInsideDir, kindOf, relativePathProblem, type CommandScorer, type FileScorer, type OutputScorer, type Scorer, type TaskDef,
+  isInsideDir, kindOf, linkProblem, pathParts, relativePathProblem, type CommandScorer, type FileScorer, type OutputScorer, type Scorer, type TaskDef,
 } from "@/cli/taskSet";
 
 // [KEEP-IN-SYNC] with execute_command in src-tauri/src/commands/process_commands.rs. Its timeout error reads
@@ -70,34 +72,64 @@ export interface TrialResult {
 
 // ── Files ─────────────────────────────────────────────────────────────────────
 
-/** Copies the file or folder at `source` to `target`. A link, or anything that is not a regular file or
- *  folder, is refused: a copy of a link would still point at the original. */
-export function copyTree(source: string, target: string): void {
+/** Copies the file, folder or link at `source` to `target`. `source` is a real path, and nothing is followed: a link
+ *  is looked at where it is and never entered. A link is refused, unless `fixture` (the fixture's real path) is
+ *  given: then a link that is fine in a fixture (`linkProblem`, checked again here) is copied as it is, with its
+ *  relative target text, so that it points inside the copy as it pointed inside the fixture. A pipe, a device
+ *  or a socket is refused: copying it would block. */
+export function copyTree(source: string, target: string, fixture?: string): void {
   const kind = kindOf(source);
   if (kind === "folder") {
     mkdirSync(target, { recursive: true });
-    for (const name of readdirSync(source)) copyTree(join(source, name), join(target, name));
+    for (const name of readdirSync(source)) copyTree(join(source, name), join(target, name), fixture);
   } else if (kind === "file") {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
+  } else if (kind === "link" && fixture !== undefined) {
+    const problem = linkProblem(source, fixture);
+    if (problem) throw new Error(`${source} ${problem}`);
+    mkdirSync(dirname(target), { recursive: true });
+    // (The type is for Windows, which makes a link to a folder and a link to a file differently.)
+    symlinkSync(readlinkSync(source), target, lstatSync(realpathSync.native(source)).isDirectory() ? "dir" : "file");
   } else {
-    throw new Error(`${source} ${kind === "missing" ? "does not exist" : kind === "link" ? "is a link" : "is not a regular file or folder"}`);
+    const why = kind === "missing" ? "does not exist" : kind === "link" ? "is a link" : kind === "unreadable"
+      ? "cannot be looked at" : "is not a regular file or folder";
+    throw new Error(`${source} ${why}`);
   }
 }
 
-/** A path in the trial's folder, checked before anything is deleted or written there: it stays inside
- *  the folder, and no link on the way leads out (an agent with a shell can make one: through it, a
- *  restore would delete files outside). */
-function trialPath(trialDir: string, path: string): string {
-  const problem = relativePathProblem(path, "the trial's folder");
+/** `path`, a real path the task set recorded when it was read, is still that place: no link has taken its
+ *  place, or the place of a folder above it. */
+function assertUnmoved(path: string): void {
+  if (realpathSync.native(path) !== path) throw new Error(`${path} is not the place it was when the task set was read`);
+}
+
+/** The fixture, copied into the trial's folder `dir`. `workspace` is its real path as the task set recorded it:
+ *  it must still be that place, and every link in it is checked again as it is copied. */
+export function copyFixture(workspace: string, dir: string): void {
+  assertUnmoved(workspace);
+  copyTree(workspace, dir, workspace);
+}
+
+/** Where `path` physically is below the folder `dir`, to delete or write it there. `path` is written out (no "."
+ *  or ".." in it). The kernel resolves the nearest folder on the way that exists, links and all (`realpathSync.native`:
+ *  a `..` after a link goes up from the link's target, which reading the text would not see), and the names below
+ *  it are plain. What is returned is that real place, so that what is done to it cannot go through a link again.
+ *  `root` is the real path of `dir` as it was recorded when it was made (not looked up now: an agent with a shell can
+ *  replace the folder with a link, and a root looked up again would move with it). `folder` names the folder in the
+ *  messages. Throws when the place is outside `root`, or a link on the way leads nowhere. */
+function physicalTarget(dir: string, root: string, path: string, folder: string): string {
+  const problem = relativePathProblem(path, folder);
   if (problem) throw new Error(`${path} ${problem}`);
-  const target = resolve(trialDir, path);
-  const root = realpathSync(trialDir);
-  // The nearest folder that exists on the way to the target decides where it would land.
-  let ancestor = dirname(target);
-  while (kindOf(ancestor) === "missing" && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
-  if (!isInsideDir(root, realpathSync(ancestor))) throw new Error(`${path} leads out of the trial's folder through a link`);
-  return target;
+  const parts = pathParts(path);
+  if (parts.includes("..")) throw new Error(`${path} is not written out: it has .. in it`);
+  const name = parts.pop() as string; // there is one: the folder itself was refused above
+  let known = parts.length;
+  let ancestor = join(dir, ...parts);
+  while (known > 0 && kindOf(ancestor) === "missing") ancestor = join(dir, ...parts.slice(0, --known));
+  const real = realpathSync.native(ancestor);
+  if (!isInsideDir(root, real)) throw new Error(`${path} leads out of ${folder} through a link`);
+  return join(real, ...parts.slice(known), name);
 }
 
 // ── Scorers ───────────────────────────────────────────────────────────────────
@@ -106,7 +138,10 @@ export interface ScoreContext {
   invoke: InvokeFn;
   /** The trial's folder, where the scorers' commands run and the file scorers look. */
   trialDir: string;
-  /** The task's workspace, which `restore` puts files back from. */
+  /** Where the trial's folder physically is (`realpathSync.native`), recorded once when it was made. Whether a
+   *  path is inside the trial is decided against this, never against the folder looked up again. */
+  trialRoot: string;
+  /** The task's workspace as the task set recorded it (a real path), which `restore` puts files back from. */
   fixtureDir?: string;
   graph: WorkflowGraph;
   /** The run's result, in memory: an agent with a shell could have changed the run record on disk. */
@@ -161,16 +196,22 @@ function checkOutput(ctx: ScoreContext, scorer: OutputScorer): Verdict {
   return verdict(textFailures(text, scorer.contains, scorer.notContains, scorer.matches));
 }
 
-/** A file scorer: the file exists in the trial's folder, and its text holds the checks. A link, a pipe or a
- *  file too large to read counts as failing: it is what the agent left. */
+/** A file scorer: the file exists in the trial's folder, and its text holds the checks. The path is followed to
+ *  the file it leads to, the way the kernel does (a link in the trial that leads to a file in the trial is that
+ *  file). It fails when it leads out of the trial's folder or to nothing, is not a regular file (a folder, a
+ *  pipe), or is too large to read. */
 function checkFile(ctx: ScoreContext, scorer: FileScorer): Verdict {
+  const parts = pathParts(scorer.path);
+  if (parts.includes("..") || relativePathProblem(scorer.path, "the trial's folder")) {
+    return { passed: false, detail: `${scorer.path} is not a path inside the trial's folder` };
+  }
   let real: string;
   try {
-    real = realpathSync(resolve(ctx.trialDir, scorer.path));
+    real = realpathSync.native(join(ctx.trialDir, ...parts));
   } catch {
     return { passed: false, detail: `${scorer.path} does not exist` };
   }
-  if (!isInsideDir(realpathSync(ctx.trialDir), real)) return { passed: false, detail: `${scorer.path} leads out of the trial's folder` };
+  if (!isInsideDir(ctx.trialRoot, real)) return { passed: false, detail: `${scorer.path} leads out of the trial's folder` };
   if (kindOf(real) !== "file") return { passed: false, detail: `${scorer.path} is not a file` };
   if (lstatSync(real).size > MAX_FILE_CHECK_BYTES) return { passed: false, detail: `${scorer.path} is over ${MAX_FILE_CHECK_BYTES} bytes` };
   return verdict(textFailures(readFileSync(real, "utf8"), scorer.contains, [], scorer.matches));
@@ -178,16 +219,24 @@ function checkFile(ctx: ScoreContext, scorer: FileScorer): Verdict {
 
 /** Puts the files of a command scorer in place. Each restore path is deleted, then copied back from the
  *  pristine workspace if it has it; each inject is deleted at its target, then copied in. Replacement, not
- *  overlay: a test file the agent added under a restored folder is gone. */
+ *  overlay: a test file the agent added under a restored folder is gone. Every link in the trial is the agents'
+ *  to have made or changed, so nothing is done through one: the place is resolved first (`physicalTarget`),
+ *  and what is deleted and written is that place. */
 function prepareFiles(ctx: ScoreContext, scorer: CommandScorer): void {
   for (const path of scorer.restore) {
-    const target = trialPath(ctx.trialDir, path);
+    const target = physicalTarget(ctx.trialDir, ctx.trialRoot, path, "the trial's folder");
+    let source: string | undefined;
+    if (ctx.fixtureDir !== undefined) {
+      assertUnmoved(ctx.fixtureDir);
+      source = physicalTarget(ctx.fixtureDir, ctx.fixtureDir, path, "the workspace");
+      if (kindOf(source) === "missing") source = undefined; // the pristine workspace has none: it is only deleted
+    }
     rmSync(target, { recursive: true, force: true });
-    const source = ctx.fixtureDir === undefined ? undefined : join(ctx.fixtureDir, path);
-    if (source !== undefined && kindOf(source) !== "missing") copyTree(source, target);
+    if (source !== undefined) copyTree(source, target, ctx.fixtureDir);
   }
   for (const { from, to } of scorer.inject) {
-    const target = trialPath(ctx.trialDir, to);
+    const target = physicalTarget(ctx.trialDir, ctx.trialRoot, to, "the trial's folder");
+    assertUnmoved(from);
     rmSync(target, { recursive: true, force: true });
     copyTree(from, target);
   }
@@ -202,6 +251,8 @@ const tail = (text: string) =>
 async function runCommandScorer(ctx: ScoreContext, scorer: CommandScorer, index: number): Promise<Verdict> {
   // AGENT.md rule 6: no command runs without the user's approval of that exact command.
   if (!ctx.allowedCommands.has(scorer.command)) throw new Error(`the command was not approved with --allow-scorer: ${scorer.command}`);
+  // The command runs in the trial's folder: the one that was made, not a link an agent put in its place.
+  if (realpathSync.native(ctx.trialDir) !== ctx.trialRoot) throw new Error("the trial's folder is not where it was made: it was replaced");
   prepareFiles(ctx, scorer);
   const commandId = `${ctx.commandPrefix}-score-${index}`;
   ctx.activeCommands.add(commandId);
@@ -223,25 +274,32 @@ async function runCommandScorer(ctx: ScoreContext, scorer: CommandScorer, index:
   }
 }
 
-/** Runs the scorers in order and gives the trial's reward: the weighted share that passed. */
+/** Runs the scorers and gives the trial's reward: the weighted share that passed. What the agents left is read
+ *  first, by the output and file scorers; then the command scorers run, in the order they were written, each one
+ *  putting its own files in place and seeing what the ones before it did. (A check that came after a restore
+ *  would grade the restored files, not the agents' work.) The results are in the order the scorers were written. */
 export async function scoreTrial(ctx: ScoreContext, scorers: Scorer[]): Promise<Scored> {
-  const records: ScorerRecord[] = [];
-  for (const [index, scorer] of scorers.entries()) {
+  const records: Array<ScorerRecord | undefined> = scorers.map(() => undefined);
+  const indexes = scorers.map((_, index) => index);
+  const order = [...indexes.filter((i) => scorers[i].kind !== "command"), ...indexes.filter((i) => scorers[i].kind === "command")];
+  for (const index of order) {
+    const scorer = scorers[index];
     if (ctx.isCancelled()) return { cancelled: true };
     const started = Date.now();
     try {
       const checked = scorer.kind === "command" ? await runCommandScorer(ctx, scorer, index)
         : scorer.kind === "output" ? checkOutput(ctx, scorer) : checkFile(ctx, scorer);
       const { passed, ...rest } = checked;
-      records.push({ name: scorer.name, kind: scorer.kind, passed, weight: scorer.weight, ...rest, ms: Date.now() - started });
+      records[index] = { name: scorer.name, kind: scorer.kind, passed, weight: scorer.weight, ...rest, ms: Date.now() - started };
     } catch (e) {
       if (ctx.isCancelled()) return { cancelled: true };
-      return { scorers: records, missing: `scorer ${scorer.name}: ${messageOf(e)}` };
+      return { scorers: records.filter((r): r is ScorerRecord => r !== undefined), missing: `scorer ${scorer.name}: ${messageOf(e)}` };
     }
   }
   if (ctx.isCancelled()) return { cancelled: true }; // the last command may have been stopped, not failed
-  const total = records.reduce((sum, r) => sum + r.weight, 0);
-  return { scorers: records, reward: records.reduce((sum, r) => sum + (r.passed ? r.weight : 0), 0) / total };
+  const done = records.filter((r): r is ScorerRecord => r !== undefined);
+  const total = done.reduce((sum, r) => sum + r.weight, 0);
+  return { scorers: done, reward: done.reduce((sum, r) => sum + (r.passed ? r.weight : 0), 0) / total };
 }
 
 // ── The trial ─────────────────────────────────────────────────────────────────
@@ -314,10 +372,14 @@ function tokenEstimateOf(outcome: RunOutcome | undefined): number | null {
 
 /** One trial, up to what is kept: a fresh folder with the fixture in it, the run, the scorers.
  *  undefined when the eval was interrupted. */
-async function attemptTrial(env: TrialEnv, task: TaskDef, trial: number, dir: string, log: string[]): Promise<Attempt | undefined> {
+async function attemptTrial(
+  env: TrialEnv, task: TaskDef, trial: number, dir: string, log: string[], made: { root?: string },
+): Promise<Attempt | undefined> {
   try {
     mkdirSync(dir, { recursive: true });
-    if (task.workspace !== undefined) copyTree(task.workspace, dir);
+    // Where the folder physically is, recorded once and kept: nothing later looks the root up again.
+    made.root = realpathSync.native(dir);
+    if (task.workspace !== undefined) copyFixture(task.workspace, dir);
   } catch (e) {
     return missingTrial(trial, `a file could not be copied: ${messageOf(e)}`);
   }
@@ -361,8 +423,9 @@ async function attemptTrial(env: TrialEnv, task: TaskDef, trial: number, dir: st
 
   const scoreStarted = Date.now();
   const scored = await scoreTrial({
-    invoke: env.invoke, trialDir: dir, fixtureDir: task.workspace, graph: env.graph, run: outcome.run,
-    allowedCommands: env.allowScorers, commandPrefix: `${env.evalId}-${task.id}-t${trial}`, isCancelled: env.isCancelled, activeCommands: env.activeCommands,
+    invoke: env.invoke, trialDir: dir, trialRoot: made.root, fixtureDir: task.workspace, graph: env.graph, run: outcome.run,
+    allowedCommands: env.allowScorers, commandPrefix: `${env.evalId}-${task.id}-t${trial}`, isCancelled: env.isCancelled,
+    activeCommands: env.activeCommands,
   }, task.scorers);
   const scoreMs = Date.now() - scoreStarted;
   if ("cancelled" in scored) return undefined;
@@ -378,7 +441,7 @@ async function attemptTrial(env: TrialEnv, task: TaskDef, trial: number, dir: st
 
 /** Keeps the trial under trials/<task>/t<i>/ in the eval's output folder: the outcome, each scorer's
  *  result, run.log and a copy of the run record (only if the agents left it a plain file). */
-function keepTrial(env: TrialEnv, task: TaskDef, dir: string, { result, outcome, scorers }: Attempt, log: string[]): void {
+function keepTrial(env: TrialEnv, task: TaskDef, dir: string, root: string | undefined, { result, outcome, scorers }: Attempt, log: string[]): void {
   const keep = join(env.outDir, "trials", task.id, `t${result.trial}`);
   mkdirSync(keep, { recursive: true });
   const run = outcome?.started ? outcome.run : undefined;
@@ -395,9 +458,9 @@ function keepTrial(env: TrialEnv, task: TaskDef, dir: string, { result, outcome,
   writeFileSync(join(keep, "outcome.json"), `${JSON.stringify(outcomeFile, null, 2)}\n`);
   writeFileSync(join(keep, "scorers.json"), `${JSON.stringify(scorers, null, 2)}\n`);
   writeFileSync(join(keep, "run.log"), log.length > 0 ? `${log.join("\n")}\n` : "");
-  if (run) {
+  if (run && root !== undefined) {
     try {
-      const record = trialPath(dir, runRecordPath(run.id));
+      const record = physicalTarget(dir, root, runRecordPath(run.id), "the trial's folder");
       if (kindOf(record) === "file") copyFileSync(record, join(keep, "run.json"));
     } catch {
       // not there, or not a plain file: the outcome and the log say what happened
@@ -411,10 +474,11 @@ function keepTrial(env: TrialEnv, task: TaskDef, dir: string, { result, outcome,
 export async function runTrial(env: TrialEnv, task: TaskDef, trial: number): Promise<TrialResult | undefined> {
   const dir = join(env.tempDir, `${task.id}-t${trial}`);
   const log: string[] = [];
+  const made: { root?: string } = {};
   try {
-    const attempt = await attemptTrial(env, task, trial, dir, log);
+    const attempt = await attemptTrial(env, task, trial, dir, log, made);
     if (attempt === undefined) return undefined;
-    keepTrial(env, task, dir, attempt, log);
+    keepTrial(env, task, dir, made.root, attempt, log);
     return attempt.result;
   } finally {
     if (!env.keepWorkspaces) {

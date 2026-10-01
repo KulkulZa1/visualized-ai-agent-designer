@@ -4,7 +4,7 @@
  * rewards, the tokens and the missing trials. The aggregation is pure; the report is written
  * after every trial, atomically.
  */
-import { renameSync, writeFileSync } from "node:fs";
+import { renameSync, rmSync, writeFileSync } from "node:fs";
 import type { RunRecord } from "@/engine/runRecord";
 import type { EvalSplit } from "@/cli/evalArgs";
 import type { TrialResult } from "@/cli/trial";
@@ -122,20 +122,33 @@ export const reportText = (report: EvalReport): string => `${JSON.stringify(repo
  *  crash) never sees half of it. */
 export function writeReport(file: string, report: EvalReport): void {
   const temp = `${file}.tmp`;
-  writeFileSync(temp, reportText(report));
-  renameSync(temp, file);
+  try {
+    writeFileSync(temp, reportText(report));
+    renameSync(temp, file);
+  } catch (e) {
+    try {
+      rmSync(temp, { force: true }); // no half of a report is left in the folder
+    } catch {
+      // the first error is the one to report
+    }
+    throw e;
+  }
 }
 
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 const num = (n: number | null, digits: number) => (n === null ? "n/a" : n.toFixed(digits));
 
-/** The line printed when a trial finishes. */
+/** `text` on one line: a provider's error can have a line break in it ("…try again.\nRun: ollama pull …"), which would split
+ *  the line of a trial in two. The report and the trial's files keep the text as it was. */
+const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
+
+/** The line printed when a trial finishes. An error text on it is put on one line. */
 export function trialLine(done: number, total: number, task: string, trial: TrialResult): string {
   const head = `[${done}/${total}] ${task} t${trial.trial}:`;
   const timing = `run ${seconds(trial.runMs)}${trial.scorers.length > 0 ? `, scoring ${seconds(trial.scoreMs)}` : ""}`;
   const scorers = trial.scorers.map((s) => `${s.name} ${s.passed ? "✓" : "✗"}${s.timedOut ? " (timed out)" : ""}`).join(", ");
-  if (trial.missing) return `${head} missing (${trial.error ?? "no reason given"}) · ${timing}`;
-  return `${head} reward ${trial.reward.toFixed(2)} (${scorers}) · ${timing}${trial.error ? ` · ${trial.runStatus}: ${trial.error}` : ""}`;
+  if (trial.missing) return `${head} missing (${oneLine(trial.error ?? "no reason given")}) · ${timing}`;
+  return `${head} reward ${trial.reward.toFixed(2)} (${scorers}) · ${timing}${trial.error ? ` · ${trial.runStatus}: ${oneLine(trial.error)}` : ""}`;
 }
 
 /** The lines printed at the end: the score and the cost, and each task's rewards. */

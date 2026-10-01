@@ -5,20 +5,24 @@
  * FAKE_CORE_SCENARIO: a JSON file { replies: { <agent>: string[] }, healthFails?: true, healthFailsOn?: number[], olderCore?: true }.
  *   An agent's replies are used in order, and the last one repeats. A reply that
  *   starts with "ERROR:" is returned as that call's error. healthFails: every provider check fails;
- *   healthFailsOn: only the checks with these numbers (1 is the first) do. olderCore: a harness-core from
- *   before hook_fingerprint, which answers that command with "Unknown command".
+ *   healthFailsOn: only the checks with these numbers (1 is the first) do. healthPull: the pull_command the failing
+ *   checks carry (the engine adds "\nRun: <it>" to the error of a run that cannot start). olderCore: a harness-core
+ *   from before hook_fingerprint, which answers that command with "Unknown command".
  *   hookRewrites: { <hook path>: { path, content } }: that hook, when it runs, writes `content` to
  *   the workspace file `path`, as an approved shell command in an agent would.
- *   commands: { <command line>: { exitCode?, stdout?, stderr?, timeout?: true, fail?: string, delayMs?, snapshot?: true } }:
+ *   commands: { <command line>: { exitCode?, stdout?, stderr?, timeout?: true, fail?: string, delayMs?, snapshot?: true, run?: true } }:
  *   what execute_command answers for that exact command; a command not listed answers exit 0 and
  *   `commandOutput` ("5 passed"). timeout: the error harness-core gives when the command runs out of time
  *   ("Command timed out after N s"); fail: "Could not start the command: <fail>"; delayMs: the answer
  *   comes after that long, or at once when cancel_command is given the command's id (a killed command
  *   answers exit 137); snapshot: stdout is a JSON object of every file in the workspace (not .harness)
- *   and its text, as it is when the command runs; die: harness-core exits when it is asked to run it.
+ *   and its text, as it is when the command runs; die: harness-core exits when it is asked to run it;
+ *   run: the command really runs, as `sh -c <command>` in the workspace (POSIX only), and its exit code and
+ *   output are the answer.
  * FAKE_CORE_LOG: a file each request is appended to as a JSON line.
  * Test-only commands: "echo" (replies with its args), "fail", "slow", "die".
  */
+import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -63,6 +67,11 @@ async function executeCommand(a) {
   if (scripted.die) process.exit(1);
   if (scripted.timeout) throw `Command timed out after ${a.timeoutSecs} s`;
   if (scripted.fail !== undefined) throw `Could not start the command: ${scripted.fail}`;
+  if (scripted.run) {
+    const ran = spawnSync("sh", ["-c", a.command], { cwd: a.workspacePath, encoding: "utf8", timeout: (a.timeoutSecs ?? 60) * 1000 });
+    if (ran.error) throw `Could not start the command: ${ran.error.message}`;
+    return { exitCode: ran.status ?? 1, stdout: ran.stdout, stderr: ran.stderr, durationMs: answer.durationMs };
+  }
   if (scripted.delayMs) {
     const killed = await new Promise((resolve) => {
       const timer = setTimeout(() => { waiting.delete(a.commandId); resolve(false); }, scripted.delayMs);
@@ -98,7 +107,7 @@ const commands = {
     ollama_api_key_configured: false, suggested_ollama_models: [],
   }),
   check_provider_health: (a) => (scenario.healthFails || scenario.healthFailsOn?.includes(++healthChecks)
-    ? { ok: false, provider: a.provider, latency_ms: 0, message: "Ollama is not running", model_available: false, pull_command: null }
+    ? { ok: false, provider: a.provider, latency_ms: 0, message: "Ollama is not running", model_available: false, pull_command: scenario.healthPull ?? null }
     : { ok: true, provider: a.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null }),
   call_ollama_api: (a) => modelReply(a.system),
   call_openai_api: (a) => modelReply(a.system),

@@ -6,7 +6,7 @@
  * eval. Bundled by `npm run build:cli` (src/cli/runCli.ts re-exports `runEval`).
  */
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { defToGraph } from "@/engine/workflowGraph";
@@ -17,7 +17,9 @@ import {
 import type { Write } from "@/cli/report";
 import { providerSettings } from "@/cli/runArgs";
 import { checkWorkflowGraph, createInterrupt, EXIT, loadWorkflow, openCore } from "@/cli/shared";
-import { kindOf, loadTaskSet, nodeProblems, selectTasks, unapprovedScorerCommands } from "@/cli/taskSet";
+import {
+  isInsideDir, kindOf, loadTaskSet, nearestExisting, nodeProblems, physicalPath, selectTasks, unapprovedScorerCommands, type TaskDef,
+} from "@/cli/taskSet";
 import { runTrial, type TrialEnv, type TrialResult } from "@/cli/trial";
 
 /** The exit code of a finished eval: 130 interrupted, 3 stopped early (harness-core stopped, or the first
@@ -29,12 +31,54 @@ export function evalExitCode(report: Pick<EvalReport, "status" | "S">, minScore:
   return minScore !== undefined && report.S !== null && report.S < minScore - 1e-9 ? EXIT.failed : EXIT.done;
 }
 
-/** Why `--out` cannot be used, or undefined: it may be new, or an empty folder. */
-function outDirProblem(dir: string): string | undefined {
-  const kind = kindOf(dir);
-  if (kind === "missing") return undefined;
-  if (kind !== "folder") return `--out ${dir} exists and is not a folder`;
-  return readdirSync(dir).length > 0 ? `--out ${dir} is not empty: give a new or an empty folder` : undefined;
+const messageOf = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/** What a trial is a copy of, or has copied into it, as real paths: the workspace of each selected task and each source
+ *  of its grader files (`inject.from`). */
+function copiedPlaces(tasks: TaskDef[]): Array<{ path: string; label: string; copied: string }> {
+  return tasks.flatMap((task) => [
+    ...(task.workspace === undefined ? [] : [{ path: task.workspace, label: `the workspace of task ${task.id} (${task.workspace})`, copied: "starts as a copy of it" }]),
+    ...task.scorers.flatMap((scorer) => (scorer.kind !== "command" ? [] : scorer.inject.map(({ from }) => ({
+      path: from, label: `the grader files of task ${task.id}, scorer ${scorer.name} (${from})`, copied: "is given a copy of it",
+    })))),
+  ]);
+}
+
+/** The first of those places that holds `path`, if any. */
+const placeHolding = (tasks: TaskDef[], path: string) => copiedPlaces(tasks).find((place) => isInsideDir(place.path, path));
+
+/** Why the output folder cannot be used, or undefined: it may be new, or an empty folder (the way there may go
+ *  through links). And it may not be inside what the trials of the eval copy (`copiedPlaces`): every trial would
+ *  find the results of the trials before it. `explicit` is whether --out gave it. */
+function outDirProblem(dir: string, explicit: boolean, tasks: TaskDef[]): string | undefined {
+  const name = explicit ? `--out ${dir}` : `the output folder ${dir} (the default; --out puts it elsewhere)`;
+  try {
+    const { existing, rest } = nearestExisting(dir);
+    const real = realpathSync.native(existing);
+    if (kindOf(real) !== "folder") return rest.length === 0 ? `${name} exists and is not a folder` : `${name} cannot be made: ${existing} is not a folder`;
+    if (rest.length === 0 && readdirSync(real).length > 0) return `${name} is not empty: give a new or an empty folder`;
+    const inside = placeHolding(tasks, join(real, ...rest));
+    if (inside) {
+      return `${name} is inside ${inside.label}: every trial ${inside.copied}, so it would find the results of the trials before it. ` +
+        "Use a folder outside it";
+    }
+  } catch (e) {
+    return `${name} cannot be looked at: ${messageOf(e)}`;
+  }
+  return undefined;
+}
+
+/** The same for the folder the trials are made in (TMPDIR): a trial's folder inside what it is a copy of, or has copied into it. */
+function tempDirProblem(tasks: TaskDef[]): string | undefined {
+  let inside: ReturnType<typeof placeHolding>;
+  try {
+    inside = placeHolding(tasks, physicalPath(tmpdir()));
+  } catch {
+    return undefined; // it cannot be looked at: making a folder in it says so
+  }
+  return inside === undefined ? undefined
+    : `the folder for the trials (${tmpdir()}) is inside ${inside.label}, which every trial copies: a trial's folder would be inside what is ` +
+      "copied into it. Set TMPDIR to a folder outside it";
 }
 
 /** Runs `work` on each item in order, up to `limit` at once, and starts no new item once `stopped()`. */
@@ -49,8 +93,18 @@ async function runPool<T>(items: T[], limit: number, stopped: () => boolean, wor
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 
-/** `harness eval <tasks.yaml> …`; returns the exit code. */
+/** `harness eval <tasks.yaml> …`; returns the exit code. It never ends with an exception: exit 1 means "S is below
+ *  --min-score" to whoever reads the code, so what nobody foresaw is a 3 (the eval could not run to its end). */
 export async function runEval(argv: string[]): Promise<number> {
+  try {
+    return await evaluate(argv);
+  } catch (e) {
+    process.stderr.write(`harness eval: unexpected error: ${messageOf(e)}\n`);
+    return EXIT.notStarted;
+  }
+}
+
+async function evaluate(argv: string[]): Promise<number> {
   const out: Write = (line) => { process.stdout.write(`${line}\n`); };
   const err: Write = (line) => { process.stderr.write(`${line}\n`); };
   if (argv.includes("--help") || argv.includes("-h")) {
@@ -107,9 +161,9 @@ export async function runEval(argv: string[]): Promise<number> {
   const k = args.trials ?? taskSet.trials ?? 1;
   const evalId = `eval-${Date.now()}`;
   const outDir = args.out !== undefined ? resolve(args.out) : join(process.cwd(), ".harness", "evals", evalId);
-  const outProblem = outDirProblem(outDir);
-  if (outProblem) {
-    err(`harness eval: ${outProblem}`);
+  const folderProblem = outDirProblem(outDir, args.out !== undefined, tasks) ?? tempDirProblem(tasks);
+  if (folderProblem) {
+    err(`harness eval: ${folderProblem}`);
     return EXIT.usage;
   }
 
@@ -124,14 +178,22 @@ export async function runEval(argv: string[]): Promise<number> {
   };
   process.on("SIGINT", onSigint);
   let tempDir: string | undefined;
+  let outMade = false;
   try {
+    // The folders are made only now, after every check and with harness-core up: a failure here leaves nothing behind.
     try {
+      tempDir = mkdtempSync(join(tmpdir(), "harness-eval-"));
+    } catch (e) {
+      err(`harness eval: cannot make a folder for the trials in ${tmpdir()}: ${messageOf(e)}`);
+      return EXIT.notStarted;
+    }
+    try {
+      outMade = kindOf(outDir) === "missing";
       mkdirSync(outDir, { recursive: true });
     } catch (e) {
-      err(`harness eval: cannot make the output folder ${outDir}: ${String(e)}`);
-      return EXIT.usage;
+      err(`harness eval: cannot make the output folder ${outDir}: ${messageOf(e)}`);
+      return EXIT.notStarted;
     }
-    tempDir = mkdtempSync(join(tmpdir(), "harness-eval-"));
     // Progress goes to stdout, or with --json to stderr, which leaves stdout to the report.
     const progress: Write = args.json ? err : out;
     const warned = new Set<string>();
@@ -167,7 +229,12 @@ export async function runEval(argv: string[]): Promise<number> {
       writeReport(reportFile, report);
       return report;
     };
-    write("running");
+    try {
+      write("running");
+    } catch (e) {
+      err(`harness eval: cannot write ${reportFile}: ${messageOf(e)}`);
+      return EXIT.notStarted;
+    }
 
     // The trials, in task order and then trial order.
     const planned = tasks.flatMap((task) => Array.from({ length: k }, (_, trial) => ({ task, trial })));
@@ -187,16 +254,33 @@ export async function runEval(argv: string[]): Promise<number> {
           stoppedEarly = "harness-core stopped during the eval";
         }
       } catch (e) {
-        stoppedEarly ??= `the eval broke: ${e instanceof Error ? e.message : String(e)}`;
+        stoppedEarly ??= `the eval broke: ${messageOf(e)}`;
       }
     });
 
     const status: EvalStatus = stop.interrupted() && done < planned.length ? "cancelled" : stoppedEarly !== undefined ? "error" : "done";
-    const report = write(status, { finishedAt: new Date().toISOString(), error: stoppedEarly });
+    const end = { finishedAt: new Date().toISOString(), error: stoppedEarly };
+    const report = buildReport(header, taskTrials(), status, end);
+    let writeFailed: string | undefined;
+    try {
+      writeReport(reportFile, report);
+    } catch (e) {
+      // The results are in memory: they are still printed. The file is tried once more, saying it is an error.
+      writeFailed = `cannot write ${reportFile}: ${messageOf(e)}`;
+      try {
+        writeReport(reportFile, buildReport(header, taskTrials(), "error", { finishedAt: end.finishedAt, error: writeFailed }));
+      } catch {
+        // the disk will not take it
+      }
+    }
     for (const line of summaryLines(report)) progress(line);
     progress(`Report: ${reportFile}`);
     if (args.keepWorkspaces) progress(`Trial folders kept in ${tempDir}`);
     if (args.json) out(reportText(report).trimEnd());
+    if (writeFailed) {
+      err(`harness eval: ${writeFailed}`);
+      return EXIT.notStarted;
+    }
     if (status === "error" && stoppedEarly) err(`harness eval: ${stoppedEarly}`);
     const code = evalExitCode(report, args.minScore);
     if (code === EXIT.failed) err(`harness eval: S ${report.S?.toFixed(3)} is below --min-score ${args.minScore}`);
@@ -204,11 +288,18 @@ export async function runEval(argv: string[]): Promise<number> {
   } finally {
     process.off("SIGINT", onSigint);
     await core.close();
+    if (outMade) {
+      try {
+        if (readdirSync(outDir).length === 0) rmdirSync(outDir); // nothing was written to the folder this eval made: it leaves none
+      } catch {
+        // it is not ours to worry about
+      }
+    }
     if (tempDir !== undefined && !args.keepWorkspaces) {
       try {
         rmSync(tempDir, { recursive: true, force: true });
       } catch (e) {
-        err(`warning: could not delete ${tempDir}: ${String(e)}`);
+        err(`warning: could not delete ${tempDir}: ${messageOf(e)}`);
       }
     }
   }
