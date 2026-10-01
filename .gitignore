@@ -19,6 +19,7 @@ api-keys.*
 .harness/trajectories/
 .harness/snapshots/
 .harness/runs/
+.harness/evals/
 .harness/artifacts/
 .agent-audit/
 audit-log.db
@@ -29,6 +30,7 @@ audit-log.db-wal
 **/.harness/trajectories/
 **/.harness/snapshots/
 **/.harness/runs/
+**/.harness/evals/
 **/.harness/artifacts/
 
 # =====================================================

@@ -5,7 +5,7 @@
  */
 import type { AgentNodeData } from "@/types/agent";
 import type { AuditEntry } from "@/types/audit";
-import type { AgentStatus, FileChange, SubAgentRecord, WorkflowRun } from "@/types/execution";
+import type { AgentStatus, FileChange, NodeUsage, SubAgentRecord, WorkflowRun } from "@/types/execution";
 import type { InvokeFn } from "@/services/model-providers/providerAdapter";
 import { isForwardEdge } from "@/services/execution/parallelScheduler";
 import type { WorkflowGraph } from "@/engine/workflowGraph";
@@ -30,6 +30,10 @@ export interface NodeRecord {
   modelUsed?: string;
   providerUsed?: string;
   tokenEstimate?: number;
+  /** The tokens the node's model calls used, as the providers reported them (see NodeUsage). Set on an agent
+   *  node that ran; absent in a record from before it existed (it is additive: the record's version stays 1),
+   *  and on a node that made no model call. A resume carries a reused node's on. */
+  usage?: NodeUsage;
   revision?: number;
   subAgents?: SubAgentRecord[];
   /** What shapes the node's work; resume re-runs the node when it changes. */

@@ -4,7 +4,7 @@
  * cli/harness.mjs, against the fake harness-core with canned model replies.
  */
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -93,6 +93,46 @@ describe("harness run", { timeout: 60_000 }, () => {
     expect(events.filter((e) => e.type === "node_finished").map((e) => [e.agent, e.status]))
       .toEqual([["Coder", "done"], ["Reviewer", "done"]]);
     expect(events.at(-1)).toMatchObject({ type: "run_finished", status: "done", outputs: { "agent-1": "fine" } });
+  });
+
+  it("saves each agent's usage in the run record and prints nothing more for it", () => {
+    const usage = { Coder: { input: 100, output: 10 }, Reviewer: { input: 200, output: 20 } };
+    const replies = { Coder: ["wrote the fix"], Reviewer: ["Looks good."] };
+    const counted = workspace(replies, { usage });
+    const bare = workspace(replies);
+    // What differs between two runs anyway, the run id and the times, is made alike.
+    const alike = (text: string) => text.replace(/run-\d+/g, "run-ID").replace(/\d+\.\d s/g, "N s");
+    const recordOf = (dir: string) => {
+      const runs = join(dir, ".harness", "runs");
+      return JSON.parse(readFileSync(join(runs, readdirSync(runs)[0], "run.json"), "utf8")) as {
+        version: number; nodes: Record<string, { usage?: unknown }>;
+      };
+    };
+
+    const withCounts = harnessRun(counted, ["--task", "Fix the bug"]);
+    const without = harnessRun(bare, ["--task", "Fix the bug"]);
+
+    expect(withCounts.status, withCounts.stderr).toBe(0);
+    expect(without.status, without.stderr).toBe(0);
+    // The same lines, whether or not the providers sent counts: no new line for them.
+    expect(alike(withCounts.stdout)).toBe(alike(without.stdout));
+    expect(alike(withCounts.stderr)).toBe(alike(without.stderr));
+    expect(withCounts.stdout).not.toMatch(/usage/i);
+    // The record has them. It stays version 1.
+    expect(recordOf(counted)).toMatchObject({
+      version: 1,
+      nodes: {
+        "agent-0": { usage: { input: 100, output: 10, calls: 1, callsWithoutUsage: 0 } },
+        "agent-1": { usage: { input: 200, output: 20, calls: 1, callsWithoutUsage: 0 } },
+      },
+    });
+    // A harness-core that answers a bare string (an older one) sends no counts: its calls are calls without usage.
+    expect(recordOf(bare).nodes["agent-0"].usage).toEqual({ input: 0, output: 0, calls: 1, callsWithoutUsage: 1 });
+
+    // And with --json: the events carry no usage either.
+    const json = harnessRun(workspace(replies, { usage }), ["--task", "Fix the bug", "--json"]);
+    expect(json.status, json.stderr).toBe(0);
+    expect(json.stdout).not.toContain('"usage"');
   });
 
   it("denies an agent's command unless it was allowed exactly with --allow-command", () => {

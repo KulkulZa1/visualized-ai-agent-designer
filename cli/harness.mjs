@@ -7,6 +7,7 @@
  *   node cli/harness.mjs workflow validate <path>
  *   node cli/harness.mjs provider list                    [--json]
  *   node cli/harness.mjs run <workflow> --task "…"        (see run --help)
+ *   node cli/harness.mjs eval <tasks.yaml>                (see eval --help)
  *
  * project, workflow and provider are read-only: no Tauri runtime, no API calls.
  * Their schemas are duplicated from src/schemas/ — see comments marked [KEEP-IN-SYNC].
@@ -14,6 +15,11 @@
  * run executes a workflow headless (docs/HEADLESS.md): model calls, workspace
  * files, and only the agent commands passed with --allow-command. It loads
  * cli/dist/harness-run.mjs (npm run build:cli) and needs harness-core (npm run build:core).
+ *
+ * eval runs a workflow on each task of a task set, k times each in a fresh copy of the task's
+ * workspace, and scores every trial: the agents' commands as for run (--allow-command), and the
+ * scorers' commands only when passed exactly with --allow-scorer. It uses the same bundle and
+ * harness-core as run.
  */
 
 import { readFileSync, readdirSync, lstatSync, realpathSync, existsSync } from "node:fs";
@@ -251,7 +257,7 @@ function isRealDirectory(path) {
   }
 }
 
-// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs.
+// [KEEP-IN-SYNC] with isInsideDir in mcp/server.mjs and in src/cli/taskSet.ts (harness eval's copy).
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
   // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes
@@ -511,6 +517,23 @@ async function cmdRun(runArgs) {
   return runHarness(runArgs);
 }
 
+// harness eval: the same bundle and engine as run (src/cli/evalCli.ts).
+async function cmdEval(evalArgs) {
+  const bundle = new URL("./dist/harness-run.mjs", import.meta.url);
+  if (!existsSync(bundle)) {
+    process.stderr.write("harness eval: build it first with npm run build:cli\n");
+    return 3;
+  }
+  try {
+    const { runEval } = await import(bundle.href);
+    return await runEval(evalArgs);
+  } catch (e) {
+    // Exit 1 would read as "S is below --min-score": a bundle that cannot be loaded is a 3, the eval could not run.
+    process.stderr.write(`harness eval: ${e instanceof Error ? e.message : e}\n`);
+    return 3;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -525,6 +548,8 @@ const [cmd, sub, arg] = positionals;
 
 if (args[0] === "run") {
   process.exitCode = await cmdRun(args.slice(1));
+} else if (args[0] === "eval") {
+  process.exitCode = await cmdEval(args.slice(1));
 } else if (cmd === "project" && sub === "status") {
   cmdProjectStatus();
 } else if (cmd === "workflow" && sub === "validate") {
@@ -540,6 +565,7 @@ Commands:
   workflow validate <path>            Validate a .harness.yaml file
   provider list                       Show the provider catalog
   run <workflow> --task "…"           Run a workflow headless (run --help for options)
+  eval <tasks.yaml>                   Score a workflow on a task set (eval --help for options)
 
 Options:
   --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env);

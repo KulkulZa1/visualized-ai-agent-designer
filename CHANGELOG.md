@@ -6,6 +6,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (harness eval)
+- **`harness eval <tasks.yaml>`** (`docs/EVAL.md`) runs a workflow on each task of a task set k times (`--trials`, `-k`), each in a fresh copy of the task's folder, and scores each run.
+  - **Task sets** are YAML files with a strict schema (an unknown key is an error), with evolve, held-out and smoke splits.
+  - **Scorers:** a command (exit 0 passes), checks on the output, and checks on a file. Before a command scorer runs, its `restore` files are put back from the fixture and its `inject` files copied in, both as replacements, so agents cannot change their own grader. Output and file scorers run first, on what the agents left.
+  - **Scorer commands** run only when approved exactly with `--allow-scorer`, a list separate from the agents' `--allow-command`.
+  - **The report** (`.harness/evals/<evalId>/report.json`) is written after every run: a pooled score `S` (missing runs count 0), `C` (the average tokens of a run), per-task rewards, and each run's times, tokens and scorer results. It is shaped the way RRSI's selection reads an evaluation.
+  - **Containment** is checked against the run folder's real path, so a link an agent makes cannot lead a restore outside it. A fixture may hold relative links that stay inside it, such as an npm `node_modules/.bin`.
+  - **The limits:** no sandbox; a process an approved agent command leaves running can change files during scoring.
+  - An example: `examples/evals/research-synthesis.tasks.yaml`.
+- **Token counts from the providers**: every model call reads the provider's own counts (OpenAI-style `usage`, Anthropic `usage`, Ollama `prompt_eval_count` and `eval_count`). Each agent's `usage` `{ input, output, calls, callsWithoutUsage }` is in the run record. The `call_*` commands return `{ text, usage }`; callers still accept a plain string. Rebuild `harness-core` after updating: an older one reports none.
+- Checked on Linux with the project's tests and, end to end, with the real CLI and `harness-core` against fake model servers in a network namespace (533 of 534 checks; the one failure is the limit above). Not run against a real model server, on Windows or on macOS.
+
+### Security (harness eval)
+- **`HARNESS_CUSTOM_API_KEY`** is no longer passed to agents' commands, hooks and scorer commands; the other provider keys already were not.
+
 ### Added (local models)
 - **Ollama's context window** (`docs/AIRGAPPED.md` §5): every Ollama `/api/chat` request (the text-protocol call, a native tool-calling turn and the app's streaming turn) sends `options.num_ctx`. What this says of Ollama's own behavior was not tested against a real Ollama (§5).
   - The default is 16384 tokens. Ollama's own default is small, and Ollama may cut off a prompt that does not fit, without saying so. `0` sends none, so the server's own default and the model's own `num_ctx` stand. It is never sent to ollama.com and its subdomains, and a server on this machine or the LAN always gets it. One value per run.

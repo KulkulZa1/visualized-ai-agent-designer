@@ -220,7 +220,7 @@ function findFiles(dir, ext, max = 50) {
   return result;
 }
 
-// [KEEP-IN-SYNC] with isInsideDir in cli/harness.mjs.
+// [KEEP-IN-SYNC] with isInsideDir in cli/harness.mjs and in src/cli/taskSet.ts (harness eval's copy).
 function isInsideDir(rootPath, absPath) {
   const rel = relative(rootPath, absPath);
   // Only ".." itself, or ".." and a separator first, leads out: a folder named "..data" (a Kubernetes

@@ -5,6 +5,7 @@ import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
 import { UNVERIFIABLE_HOOK, type RunRecord } from "@/engine/runRecord";
 import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
+import { SUMMARY_INSTRUCTIONS } from "@/services/execution/compaction";
 import { hookFingerprint } from "../../fixtures/hookFingerprint.mjs";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
@@ -1506,6 +1507,9 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     ({ id: `${source}-${target}`, source, target, ...(label ? { data: { label } } : {}) });
   const feedback = (source: string, target: string): Edge =>
     ({ id: `fb-${source}-${target}`, source, target, data: { edgeKind: "feedback", label: "revise" } });
+  // A dropped node shows as one that did not run, but what its model calls used stays on it: the tokens were spent
+  // (these mocks answer with no counts, so a call it made is a call without usage).
+  const ranOnce = { input: 0, output: 0, calls: 1, callsWithoutUsage: 1 };
 
   /** Runs the graph; every agent answers "<name>-out <its n-th call>" (or its entry in `replies`), Gate routes by
    *  `routes` (one per call; a call past the end repeats the last; a record names the routes of several gateways),
@@ -1562,7 +1566,7 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(messages.Review[1]).toContain("[From: Slow]\nslow-out 1");
     expect(messages.Review[1]).not.toContain("fast-out");
     // The dropped branch shows as a node that did not run.
-    expect(outcome.run.agents.Fast).toEqual({ agentId: "Fast", agentName: "Fast", status: "skipped" });
+    expect(outcome.run.agents.Fast).toEqual({ agentId: "Fast", agentName: "Fast", status: "skipped", usage: ranOnce });
     expect(outcome.run.agents.Slow).toMatchObject({ status: "done", output: "slow-out 1" });
     expect(outcome.run.status).toBe("done");
     expect(log.agents.filter(([id, partial]) => id === "Fast" && partial.status === "skipped")).toHaveLength(1);
@@ -1642,7 +1646,7 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
 
     expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 1, Slow: 0, Review: 1 });
     expect(outcome.run.agents.Fast.status).toBe("skipped");
-    expect(outcome.run.agents.Review).toEqual({ agentId: "Review", agentName: "Review", status: "skipped" });
+    expect(outcome.run.agents.Review).toEqual({ agentId: "Review", agentName: "Review", status: "skipped", usage: ranOnce });
     expect(outcome.run.agents.Slow.status).toBe("skipped"); // live now, but off the path: it did not run
     // The run says so: the chosen branch is empty, and the record should not leave that unexplained.
     const offPath = log.audit.filter((e) => /not on the revision path/.test(e.details ?? ""));
@@ -1666,7 +1670,7 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     const { outcome, messages, counts } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}']);
 
     expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 1, Slow: 1, Review: 2, Extra: 1, Join: 1 });
-    expect(outcome.run.agents.Extra).toEqual({ agentId: "Extra", agentName: "Extra", status: "skipped" });
+    expect(outcome.run.agents.Extra).toEqual({ agentId: "Extra", agentName: "Extra", status: "skipped", usage: ranOnce });
     expect(messages.Join[0]).toContain("[From: Review]\nPASS");
     expect(messages.Join[0]).not.toContain("extra-out");
     expect(outcome.run.agents.Join.status).toBe("done");
@@ -1699,7 +1703,10 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     const { outcome, messages, log } = await run(nodes, edges, ['{"route":"fast"}', '{"route":"slow"}'], { fail: ["Fast"] });
 
     expect(messages.Review[0]).not.toContain("[From: Fast]"); // Fast never answered
-    expect(outcome.run.agents.Fast).toEqual({ agentId: "Fast", agentName: "Fast", status: "skipped" }); // no error left on it
+    // No error left on it, and nothing counted: the call that crashed had no reply, so no counts to add.
+    expect(outcome.run.agents.Fast).toEqual({
+      agentId: "Fast", agentName: "Fast", status: "skipped", usage: { input: 0, output: 0, calls: 0, callsWithoutUsage: 0 },
+    });
     expect(outcome.run.status).toBe("done"); // the failure belonged to a branch that is no longer part of the run
     expect(log.audit.some((e) => e.agentId === "Fast" && !e.success && /model crashed/.test(e.details ?? ""))).toBe(true);
   });
@@ -2165,6 +2172,265 @@ describe("the run record's provider block", () => {
 
     expect(outcome.started && outcome.run.status).toBe("done");
     expect(calls).toEqual(["B"]); // A was reused
+  });
+});
+
+describe("token usage", () => {
+  type Counts = { input: number; output: number };
+  /** The usage of a node that made `calls` model calls, the first `calls - withoutUsage` of them with counts. */
+  const used = (input: number, output: number, calls: number, callsWithoutUsage = 0) => ({ input, output, calls, callsWithoutUsage });
+  /** A native turn that ends the node. */
+  const answer = (text: string, usage?: Counts) =>
+    ({ text, toolCalls: [], finishReason: "stop", nativeToolsSupported: true, ...(usage ? { usage } : {}) });
+  /** A native turn that calls a tool. */
+  const callTool = (name: string, args: Record<string, unknown>, usage?: Counts) => ({
+    text: "", toolCalls: [{ id: `call-${name}`, name, args }], finishReason: "tool_use", nativeToolsSupported: true,
+    ...(usage ? { usage } : {}),
+  });
+  const reader = (name = "A") => makeNode(name, [ToolPermission.ReadFile]);
+  /** Runs the graph; `handlers` answer the Rust commands (the host's defaults refuse native tool calls). */
+  async function run(nodes: AgentNode[], handlers: Record<string, Handler>, edges: Edge[] = [], host: Partial<RunHost> = {}) {
+    const fake = fakeHost(handlers, host);
+    const outcome = await runWorkflow(runInput(nodes, edges), fake.host);
+    if (!outcome.started) throw new Error(outcome.error);
+    return { outcome, ...fake };
+  }
+
+  it("adds up the usage of each native turn of a node, and tells the host with the node's last update", async () => {
+    const turns = [callTool("read_file", { path: "a.md" }, { input: 100, output: 10 }), answer("Done.", { input: 150, output: 20 })];
+
+    const { outcome, log } = await run([reader()], { chat_turn: () => turns.shift(), read_workspace_file: () => "text" });
+
+    expect(outcome.run.agents.A).toMatchObject({ status: "done", output: "Done.", usage: used(250, 30, 2) });
+    const finished = log.agents.find(([id, partial]) => id === "A" && partial.status === "done");
+    expect(finished?.[1].usage).toEqual(used(250, 30, 2));
+  });
+
+  it("counts a turn whose reply has no usage as a call without usage, and adds nothing for it", async () => {
+    const turns = [callTool("read_file", { path: "a.md" }, { input: 100, output: 10 }), answer("Done.")];
+
+    const { outcome } = await run([reader()], { chat_turn: () => turns.shift(), read_workspace_file: () => "text" });
+
+    expect(outcome.run.agents.A.usage).toEqual(used(100, 10, 2, 1));
+  });
+
+  it("counts a text call, with the usage its reply carries or without", async () => {
+    const counted = await run([makeNode("A")], { call_ollama_api: () => ({ text: "ok", usage: { input: 40, output: 5 } }) });
+    expect(counted.outcome.run.agents.A).toMatchObject({ output: "ok", usage: used(40, 5, 1) });
+
+    // A bare string is what an older harness-core, the VS Code extension and plain test mocks answer: no usage.
+    const bare = await run([makeNode("A")], { call_ollama_api: () => "ok" });
+    expect(bare.outcome.run.agents.A).toMatchObject({ output: "ok", usage: used(0, 0, 1, 1) });
+
+    // An object reply with no counts is the same as a string.
+    const without = await run([makeNode("A")], { call_ollama_api: () => ({ text: "ok" }) });
+    expect(without.outcome.run.agents.A.usage).toEqual(used(0, 0, 1, 1));
+  });
+
+  it("does not count a native turn the server refused: nothing was generated, and the node goes on as text", async () => {
+    const replies = [
+      { text: '<tool_call>{"name":"read_file","args":{"path":"a.md"}}</tool_call>', usage: { input: 60, output: 12 } },
+      { text: "Done.", usage: { input: 90, output: 8 } },
+    ];
+
+    const { outcome, commands } = await run([reader()], { call_ollama_api: () => replies.shift(), read_workspace_file: () => "text" });
+
+    expect(commands.filter((c) => c === "chat_turn")).toHaveLength(1); // asked once, and refused
+    expect(outcome.run.agents.A).toMatchObject({ output: "Done.", usage: used(150, 20, 2) });
+  });
+
+  it("counts the summary that compacts a node's conversation, as a call of its own", async () => {
+    const node = reader();
+    node.data.tokens = { used: 0, budget: 200 }; // 75% of it, 150 tokens, is passed after the first file read
+    const turns = [
+      callTool("read_file", { path: "a.md" }, { input: 100, output: 10 }),
+      callTool("read_file", { path: "b.md" }, { input: 200, output: 10 }),
+      answer("Done.", { input: 300, output: 20 }),
+    ];
+    const summaries: string[] = [];
+
+    const { outcome, log } = await run([node], {
+      chat_turn: () => turns.shift(),
+      read_workspace_file: () => "x".repeat(2000),
+      call_ollama_api: (args) => {
+        summaries.push(String(args.system));
+        return { text: "Read a.md.", usage: { input: 50, output: 8 } };
+      },
+    });
+
+    expect(summaries).toEqual([SUMMARY_INSTRUCTIONS]);
+    expect(log.audit.some((e) => e.action === "compaction" && e.success && !e.warning)).toBe(true);
+    // The three turns and the summary.
+    expect(outcome.run.agents.A.usage).toEqual(used(650, 48, 4));
+  });
+
+  it("counts the calls of the helpers a node starts, with the node's own", async () => {
+    const lead = makeNode("Lead", [ToolPermission.ReadFile, ToolPermission.SubagentDispatch]);
+    const leadTurns = [
+      callTool("subagent_dispatch", { task: "Look at a.md", name: "Reader" }, { input: 100, output: 10 }),
+      answer("Summary.", { input: 150, output: 20 }),
+    ];
+
+    const { outcome } = await run([lead], {
+      chat_turn: (args) => (who(args) === "Reader" ? answer("It says hi.", { input: 30, output: 5 }) : leadTurns.shift()),
+    });
+
+    expect(outcome.run.agents.Lead.subAgents).toMatchObject([{ name: "Reader", status: "done", output: "It says hi." }]);
+    expect(outcome.run.agents.Lead.usage).toEqual(used(280, 35, 3));
+  });
+
+  it("counts a helper's call that came back without usage, in the node's calls without usage", async () => {
+    const lead = makeNode("Lead", [ToolPermission.ReadFile, ToolPermission.SubagentDispatch]);
+    const leadTurns = [
+      callTool("subagent_dispatch", { task: "Look at a.md", name: "Reader" }, { input: 100, output: 10 }),
+      answer("Summary.", { input: 150, output: 20 }),
+    ];
+
+    const { outcome } = await run([lead], {
+      chat_turn: (args) => (who(args) === "Reader" ? answer("It says hi.") : leadTurns.shift()),
+    });
+
+    expect(outcome.run.agents.Lead.usage).toEqual(used(250, 30, 3, 1));
+  });
+
+  it("goes on from the first attempt's usage when a revision runs the node again: those tokens were spent", async () => {
+    let reviews = 0;
+
+    const { outcome } = await run([makeNode("Draft"), makeNode("Review")], {
+      call_ollama_api: (args) => (who(args) === "Review"
+        ? { text: ++reviews === 1 ? "REVISE" : "PASS", usage: { input: 20, output: 2 } }
+        : { text: "draft", usage: { input: 10, output: 1 } }),
+    }, [
+      { id: "d-r", source: "Draft", target: "Review" },
+      { id: "fb", source: "Review", target: "Draft", data: { edgeKind: "feedback", label: "revise" } },
+    ]);
+
+    expect(reviews).toBe(2);
+    expect(outcome.run.agents.Draft.usage).toEqual(used(20, 2, 2));
+    expect(outcome.run.agents.Review.usage).toEqual(used(40, 4, 2));
+  });
+
+  it("keeps what a failed node's calls used before it failed, and does not count the call that failed", async () => {
+    let turns = 0;
+
+    const { outcome } = await run([reader()], {
+      chat_turn: () => {
+        if (++turns === 1) return callTool("read_file", { path: "a.md" }, { input: 100, output: 10 });
+        throw new Error("model crashed");
+      },
+      read_workspace_file: () => "text",
+    });
+
+    expect(outcome.run.agents.A).toMatchObject({ status: "error", usage: used(100, 10, 1) });
+  });
+
+  it("keeps it on a node that was stopped, too", async () => {
+    let stopped = false;
+
+    const { outcome } = await run([reader()], {
+      chat_turn: () => callTool("read_file", { path: "a.md" }, { input: 100, output: 10 }),
+      // Stop is pressed as the agent's file tool runs (the engine itself reads AGENTS.md first: not there).
+      read_workspace_file: (args) => {
+        if (args.relativePath !== "a.md") throw new Error("IO error: not found (os error 2)");
+        stopped = true;
+        return "text";
+      },
+    }, [], { isCancelled: () => stopped });
+
+    expect(outcome.run.agents.A).toMatchObject({ status: "stopped", usage: used(100, 10, 1) });
+  });
+
+  it("gives a node that failed before any model call a usage of nothing, so that it can be told from one with no usage at all", async () => {
+    const node = makeNode("A");
+    node.data.promptSource = { type: "file", path: "prompts/a.md" };
+
+    const { outcome } = await run([node], { read_workspace_file: () => { throw new Error("IO error: not found"); } });
+
+    expect(outcome.run.agents.A).toMatchObject({ status: "error", usage: used(0, 0, 0) });
+  });
+
+  describe("in the run record", () => {
+    const chain = (): [AgentNode[], Edge[]] => {
+      const notes = makeNode("Notes");
+      notes.data.role = AgentRole.Memory;
+      notes.data.memoryWrite = ["notes"];
+      return [[makeNode("A"), notes], [{ id: "a-n", source: "A", target: "Notes" }]];
+    };
+    const saving = () => {
+      const records: RunRecord[] = [];
+      return { records, saveRun: async (r: RunRecord) => { records.push(JSON.parse(JSON.stringify(r))); } };
+    };
+
+    it("is each agent node's usage, and nothing for a node that makes no model call; the version stays 1", async () => {
+      const { records, saveRun } = saving();
+
+      const { outcome } = await run(chain()[0], { call_ollama_api: () => ({ text: "ok", usage: { input: 12, output: 3 } }) }, chain()[1], { saveRun });
+
+      const last = records.at(-1)!;
+      expect(last.version).toBe(1);
+      expect(last.nodes["agent-0"].usage).toEqual(used(12, 3, 1));
+      expect(last.nodes["agent-1"]).not.toHaveProperty("usage");
+      expect(outcome.run.agents.Notes.usage).toBeUndefined();
+    });
+
+    /** A first run in which A answers with usage and B fails. */
+    async function firstRun(usage?: Counts): Promise<RunRecord> {
+      const { records, saveRun } = saving();
+      const a = makeNode("A");
+      const b = makeNode("B");
+      await run([a, b], {
+        call_ollama_api: (args) => {
+          if (who(args) === "B") throw new Error("model crashed");
+          return usage ? { text: "first-A", usage } : "first-A";
+        },
+      }, [{ id: "a-b", source: "A", target: "B" }], { saveRun });
+      return records.at(-1)!;
+    }
+
+    /** Resumes `record`: A is reused, B runs and answers with its own usage. */
+    async function resume(record: RunRecord) {
+      const { records, saveRun } = saving();
+      const fake = fakeHost({ call_ollama_api: () => ({ text: "second-B", usage: { input: 7, output: 1 } }) }, { saveRun });
+      const outcome = await runWorkflow(
+        runInput([makeNode("A"), makeNode("B")], [{ id: "a-b", source: "A", target: "B" }], { resume: record }), fake.host);
+      if (!outcome.started) throw new Error(outcome.error);
+      return { outcome, saved: records.at(-1)! };
+    }
+
+    it("is carried on for a node a resume reuses, and the nodes it runs again have their own", async () => {
+      const record = await firstRun({ input: 11, output: 4 });
+      expect(record.nodes["agent-0"].usage).toEqual(used(11, 4, 1));
+
+      const { outcome, saved } = await resume(record);
+
+      expect(outcome.run.agents.A.usage).toEqual(used(11, 4, 1));
+      expect(saved.nodes["agent-0"].usage).toEqual(used(11, 4, 1));
+      expect(saved.nodes["agent-1"].usage).toEqual(used(7, 1, 1));
+    });
+
+    it("loads when it is from before usage was kept: the reused node has none, and nothing breaks", async () => {
+      const record = await firstRun({ input: 11, output: 4 });
+      for (const node of Object.values(record.nodes)) delete node.usage;
+
+      const { outcome, saved } = await resume(record);
+
+      expect(outcome.run.status).toBe("done");
+      expect(outcome.run.agents.A).toMatchObject({ status: "done", output: "first-A" });
+      expect(outcome.run.agents.A.usage).toBeUndefined();
+      expect(saved.nodes["agent-0"]).not.toHaveProperty("usage");
+      expect(saved.nodes["agent-1"].usage).toEqual(used(7, 1, 1));
+    });
+
+    it("is dropped when the record's field is not four token counts: it was edited, or is not ours", async () => {
+      for (const bad of [{ input: "11", output: 4, calls: 1, callsWithoutUsage: 0 }, { input: 11 }, 7, null, [], { input: -1, output: 4, calls: 1, callsWithoutUsage: 0 }]) {
+        const record = await firstRun();
+        (record.nodes["agent-0"] as { usage?: unknown }).usage = bad;
+
+        const { outcome } = await resume(record);
+
+        expect(outcome.run.agents.A.usage, JSON.stringify(bad)).toBeUndefined();
+      }
+    });
   });
 });
 

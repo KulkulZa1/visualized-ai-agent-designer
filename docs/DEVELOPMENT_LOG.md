@@ -1,5 +1,45 @@
 ﻿# Development Log
 
+## 2026-10-01 - harness eval: measure a workflow on a task set
+
+- **Goal:** the measurement step of the air-gapped self-improvement plan
+  (`docs/superpowers/specs/2026-10-01-airgapped-self-improvement-design.md`, after Google's
+  RRSI): score a workflow on a task set offline, in the shape RRSI's selection reads. PR #15;
+  design in `docs/superpowers/specs/2026-10-01-harness-eval-design.md`.
+- **Built:**
+  - `harness eval` (`src/cli/evalCli.ts`, `taskSet.ts`, `trial.ts`, `evalReport.ts`): strict
+    task sets; k runs per task in fresh copies; command, output and file scorers; restore and
+    inject before a command scorer; `--allow-scorer`; a report after every run with a pooled
+    `S` and `C`.
+  - Token counts from every provider response, summed per agent into `AgentRun.usage` and the
+    run record (`src/services/execution/usage.ts`).
+  - `HARNESS_CUSTOM_API_KEY` stripped from commands' environment.
+  - `docs/EVAL.md` and an example task set (`examples/evals/research-synthesis.tasks.yaml`).
+- **Found in review and fixed:**
+  - containment checked with a lexical path resolution, so a link chain an agent made
+    (`a/up -> ..`, `test -> a/up/..`) led a restore or inject outside the run's folder; now the
+    operating system's own resolution against the folder's recorded real path;
+  - a file scorer listed after a restore graded the restored fixture; output and file scorers
+    now run first;
+  - an `--out` inside a task's fixture leaked earlier runs' results into later runs;
+  - file-system errors escaping as exit 1 (the `--min-score` verdict);
+  - a `__proto__` task id vanishing from the report;
+  - a restored fixture link that an agent's link made shallower, pointing out of the folder.
+- **Verification** (Linux):
+  - `npx tsc --noEmit` clean; `npx vitest run` 1931 tests / 84 files and 2 skipped;
+    `cargo test` 191, and 191 + 2 with `--no-default-features --features core`.
+  - Part 1 (the eval): two independent reviews (the second found nothing blocking), and an
+    end-to-end check of the real CLI and `harness-core` against fake model servers in a network
+    namespace, on the code after review: 52 scenarios, 533 of 534 checks passed. The failure is
+    a documented limit: a process an approved agent command left running raced a restore and
+    deleted files outside the run's folder (4 of 30 runs).
+  - Part 2 (token counts): the project's checks above, run by the director, and the
+    implementer's runs of the real `harness-core` against scripted local servers (usage present,
+    absent and partial; an older core). At the user's request, no further agent review or
+    verification was spent on it; live checks are to use free Ollama Cloud models.
+- **Not verified:** a real model server (Ollama Cloud was not reachable from this environment:
+  its network policy denies ollama.com, and no `OLLAMA_API_KEY` is set); Windows; macOS.
+
 ## 2026-09-30 - Local models: Ollama's context window, model names, timeouts
 
 - **Goal:** make the app and `harness run` work well with a model on the same machine or network (Ollama, or any OpenAI-compatible server), for air-gapped use. Commit 76e60c7 (PR #14). A prompt that does not fit Ollama's small default context window may be cut off without a word, the Custom endpoint asked for a hosted model's name, and a slow local model ran into limits that read like an unreachable server.

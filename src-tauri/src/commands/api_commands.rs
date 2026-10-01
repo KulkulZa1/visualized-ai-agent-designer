@@ -126,6 +126,57 @@ fn openai_reply_text(choice: OpenAIChoice) -> Result<String, String> {
     })
 }
 
+/// The tokens a provider says one call used: the counts in its response, not an estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+}
+
+/// What `call_openai_api`, `call_anthropic_api`, `call_claude_api` and `call_ollama_api` return: the
+/// reply's text and, when the response had them, the tokens it used. `usage` is left out of the JSON
+/// otherwise. (Before token usage these commands returned the bare text.)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TextReply {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+// The usage of a response, by provider. A response that lacks the counts (a local server may leave
+// them out), or has one that is not a whole number, has no usage: that is not an error.
+
+/// OpenAI and OpenAI-compatible servers: `usage.prompt_tokens` and `usage.completion_tokens`.
+pub(crate) fn openai_usage(response: &serde_json::Value) -> Option<Usage> {
+    let usage = &response["usage"];
+    Some(Usage {
+        input: usage["prompt_tokens"].as_u64()?,
+        output: usage["completion_tokens"].as_u64()?,
+    })
+}
+
+/// Anthropic: `usage.input_tokens`, plus the tokens written to and read from the prompt cache when the
+/// response has them (they are input too, and `input_tokens` leaves them out), and `usage.output_tokens`.
+pub(crate) fn anthropic_usage(response: &serde_json::Value) -> Option<Usage> {
+    let usage = &response["usage"];
+    let cached = |field: &str| usage[field].as_u64().unwrap_or(0);
+    Some(Usage {
+        input: usage["input_tokens"]
+            .as_u64()?
+            .saturating_add(cached("cache_creation_input_tokens"))
+            .saturating_add(cached("cache_read_input_tokens")),
+        output: usage["output_tokens"].as_u64()?,
+    })
+}
+
+/// Ollama: `prompt_eval_count` and `eval_count`, at the top of the response.
+pub(crate) fn ollama_usage(response: &serde_json::Value) -> Option<Usage> {
+    Some(Usage {
+        input: response["prompt_eval_count"].as_u64()?,
+        output: response["eval_count"].as_u64()?,
+    })
+}
+
 #[derive(Debug, Deserialize)]
 struct OllamaChatResponse {
     message: OllamaChatMessage,
@@ -399,7 +450,7 @@ pub async fn call_openai_api(
     base_url: Option<String>,
     // Seconds the call may take in total; callers from before this argument send none (600 s).
     request_timeout_secs: Option<u64>,
-) -> Result<String, String> {
+) -> Result<TextReply, String> {
     let client = generation_client(request_timeout_secs)?;
 
     // Build the endpoint URL — use custom base URL if provided, otherwise OpenAI default
@@ -431,17 +482,24 @@ pub async fn call_openai_api(
         is_custom,
     );
 
-    let value = post_openai(&client, &endpoint, &api_key, &body)
+    post_openai(&client, &endpoint, &api_key, &body)
         .await
-        .map_err(|f| f.message)?;
-    let parsed: OpenAIResponse = serde_json::from_value(value)
+        .map_err(|f| f.message)
+        .and_then(openai_text_reply)
+}
+
+/// A Chat Completions response as the text-protocol reply: its text and its usage.
+fn openai_text_reply(response: serde_json::Value) -> Result<TextReply, String> {
+    let usage = openai_usage(&response);
+    let parsed: OpenAIResponse = serde_json::from_value(response)
         .map_err(|e| format!("Failed to parse OpenAI response: {e}"))?;
-    parsed
+    let text = parsed
         .choices
         .into_iter()
         .next()
         .ok_or_else(|| "No content in OpenAI response".to_string())
-        .and_then(openai_reply_text)
+        .and_then(openai_reply_text)?;
+    Ok(TextReply { text, usage })
 }
 
 /// A failed provider request; `status` is None when no HTTP response arrived.
@@ -561,7 +619,7 @@ async fn anthropic_call_inner(
     user_message: &str,
     api_key: &str,
     max_tokens: u32,
-) -> Result<String, String> {
+) -> Result<TextReply, String> {
     let api_key = resolve_api_key(api_key, "ANTHROPIC_API_KEY")?;
     let body = ClaudeRequest {
         model: normalize_anthropic_model(model),
@@ -574,17 +632,24 @@ async fn anthropic_call_inner(
     };
     let body = serde_json::to_value(&body).map_err(|e| e.to_string())?;
 
-    let value = post_anthropic(client, &api_key, &body)
+    post_anthropic(client, &api_key, &body)
         .await
-        .map_err(|f| f.message)?;
-    let parsed: ClaudeResponse = serde_json::from_value(value)
+        .map_err(|f| f.message)
+        .and_then(anthropic_text_reply)
+}
+
+/// A Messages API response as the text-protocol reply: its text and its usage.
+fn anthropic_text_reply(response: serde_json::Value) -> Result<TextReply, String> {
+    let usage = anthropic_usage(&response);
+    let parsed: ClaudeResponse = serde_json::from_value(response)
         .map_err(|e| format!("Failed to parse Anthropic response: {e}"))?;
-    parsed
+    let text = parsed
         .content
         .into_iter()
         .find(|b| b.kind == "text")
         .and_then(|b| b.text)
-        .ok_or_else(|| "No text content in Anthropic response".to_string())
+        .ok_or_else(|| "No text content in Anthropic response".to_string())?;
+    Ok(TextReply { text, usage })
 }
 
 /// Send a Messages API request, retrying rate limits and temporary server errors
@@ -670,7 +735,7 @@ pub async fn call_anthropic_api(
     max_tokens: u32,
     // Seconds the call may take in total; callers from before this argument send none (600 s).
     request_timeout_secs: Option<u64>,
-) -> Result<String, String> {
+) -> Result<TextReply, String> {
     let client = generation_client(request_timeout_secs)?;
     anthropic_call_inner(
         &client,
@@ -692,7 +757,7 @@ pub async fn call_claude_api(
     api_key: String,
     max_tokens: u32,
     request_timeout_secs: Option<u64>,
-) -> Result<String, String> {
+) -> Result<TextReply, String> {
     let client = generation_client(request_timeout_secs)?;
     anthropic_call_inner(
         &client,
@@ -757,7 +822,7 @@ pub async fn call_ollama_api(
     num_ctx: Option<u32>,
     // Seconds the call may take in total; callers from before this argument send none (600 s).
     request_timeout_secs: Option<u64>,
-) -> Result<String, String> {
+) -> Result<TextReply, String> {
     let client = generation_client(request_timeout_secs)?;
     let base_url = if base_url.trim().is_empty() {
         DEFAULT_OLLAMA_BASE_URL.to_string()
@@ -773,16 +838,22 @@ pub async fn call_ollama_api(
 
     let body = ollama_text_body(&model, &system, &user_message, &base_url, max_tokens, num_ctx);
 
-    let value = post_ollama(&client, &base_url, api_key.as_deref(), &body, &model)
+    post_ollama(&client, &base_url, api_key.as_deref(), &body, &model)
         .await
-        .map_err(|f| f.message)?;
-    let parsed: OllamaChatResponse = serde_json::from_value(value)
+        .map_err(|f| f.message)
+        .and_then(ollama_text_reply)
+}
+
+/// An /api/chat response as the text-protocol reply: its text and its usage.
+fn ollama_text_reply(response: serde_json::Value) -> Result<TextReply, String> {
+    let usage = ollama_usage(&response);
+    let parsed: OllamaChatResponse = serde_json::from_value(response)
         .map_err(|e| format!("Failed to parse Ollama response: {e}"))?;
 
     if parsed.message.content.trim().is_empty() {
         Err("No content in Ollama response".to_string())
     } else {
-        Ok(parsed.message.content)
+        Ok(TextReply { text: parsed.message.content, usage })
     }
 }
 
@@ -1884,7 +1955,7 @@ pub(crate) mod tests {
         let (base_url, request_rx) =
             spawn_mock_ollama_server(200, r#"{"message":{"content":"remote ok"}}"#);
 
-        let text = call_ollama_api(
+        let reply = call_ollama_api(
             "gemma4-31b:cloud".to_string(),
             "system".to_string(),
             "hello".to_string(),
@@ -1899,7 +1970,7 @@ pub(crate) mod tests {
 
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let request_lower = request.to_lowercase();
-        assert_eq!(text, "remote ok");
+        assert_eq!(reply.text, "remote ok");
         assert!(request.starts_with("POST /api/chat "));
         assert!(request_lower.contains("authorization: bearer test-remote-token"));
         assert!(request.contains(r#""model":"gemma4:31b-cloud""#));
@@ -1911,7 +1982,7 @@ pub(crate) mod tests {
         let (base_url, request_rx) =
             spawn_mock_ollama_server(200, r#"{"message":{"content":"local ok"}}"#);
 
-        let text = call_ollama_api(
+        let reply = call_ollama_api(
             "qwen2.5-coder:7b".to_string(),
             "system".to_string(),
             "hello".to_string(),
@@ -1925,7 +1996,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(text, "local ok");
+        assert_eq!(reply.text, "local ok");
         assert!(!request.to_lowercase().contains("authorization:"));
     }
 
@@ -2074,7 +2145,7 @@ pub(crate) mod tests {
             r#"{"choices":[{"message":{"content":"air-gapped ok"}}]}"#,
         );
 
-        let text = call_openai_api(
+        let reply = call_openai_api(
             "local-model".to_string(),
             "system".to_string(),
             "hello".to_string(),
@@ -2088,7 +2159,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(text, "air-gapped ok");
+        assert_eq!(reply.text, "air-gapped ok");
         assert!(request.starts_with("POST /chat/completions "));
         assert!(!request.to_lowercase().contains("authorization:"));
         assert!(request.contains(r#""model":"local-model""#));
@@ -2107,6 +2178,7 @@ pub(crate) mod tests {
             None,
         )
         .await
+        .map(|reply| reply.text)
     }
 
     fn tool_call_json(text: &str) -> serde_json::Value {
@@ -2211,7 +2283,7 @@ pub(crate) mod tests {
             r#"{"choices":[{"message":{"content":"authed ok"}}]}"#,
         );
 
-        let text = call_openai_api(
+        let reply = call_openai_api(
             "local-model".to_string(),
             "system".to_string(),
             "hello".to_string(),
@@ -2225,7 +2297,7 @@ pub(crate) mod tests {
         .unwrap();
 
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert_eq!(text, "authed ok");
+        assert_eq!(reply.text, "authed ok");
         assert!(request.starts_with("POST /chat/completions "));
         assert!(request
             .to_lowercase()
@@ -2439,5 +2511,246 @@ pub(crate) mod tests {
         assert!(request.starts_with("POST /chat/completions "));
         assert!(request.contains(r#""model":"my-local-model""#));
         assert!(!request.contains("gpt-4o-mini"));
+    }
+
+    // ── Token usage ─────────────────────────────────────────────────────────────
+
+    use serde_json::json;
+
+    fn counts(input: u64, output: u64) -> Option<Usage> {
+        Some(Usage { input, output })
+    }
+
+    #[test]
+    fn openai_usage_is_the_prompt_and_completion_tokens() {
+        let response = json!({"usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}});
+        assert_eq!(openai_usage(&response), counts(12, 3));
+        // 0 is a count too.
+        let none_used = json!({"usage": {"prompt_tokens": 0, "completion_tokens": 0}});
+        assert_eq!(openai_usage(&none_used), counts(0, 0));
+    }
+
+    #[test]
+    fn openai_usage_is_none_when_a_count_is_missing_or_not_a_whole_number() {
+        for response in [
+            json!({}),
+            json!({"usage": null}),
+            json!({"usage": {}}),
+            json!({"usage": {"prompt_tokens": 12}}),
+            json!({"usage": {"completion_tokens": 3}}),
+            json!({"usage": {"prompt_tokens": "12", "completion_tokens": 3}}),
+            json!({"usage": {"prompt_tokens": 12.5, "completion_tokens": 3}}),
+            json!({"usage": {"prompt_tokens": -12, "completion_tokens": 3}}),
+            json!({"usage": {"prompt_tokens": null, "completion_tokens": 3}}),
+            json!({"usage": [12, 3]}),
+            json!("not an object"),
+        ] {
+            assert_eq!(openai_usage(&response), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn anthropic_usage_counts_the_cache_tokens_as_input() {
+        let plain = json!({"usage": {"input_tokens": 100, "output_tokens": 50}});
+        assert_eq!(anthropic_usage(&plain), counts(100, 50));
+        // Tokens written to the prompt cache and tokens read from it are input as well.
+        let cached = json!({"usage": {
+            "input_tokens": 100, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30, "output_tokens": 50
+        }});
+        assert_eq!(anthropic_usage(&cached), counts(150, 50));
+        let one_kind = json!({"usage": {"input_tokens": 100, "cache_read_input_tokens": 30, "output_tokens": 50}});
+        assert_eq!(anthropic_usage(&one_kind), counts(130, 50));
+        // The API sends null for a cache count that does not apply.
+        let nulls = json!({"usage": {
+            "input_tokens": 100, "cache_creation_input_tokens": null, "cache_read_input_tokens": null, "output_tokens": 50
+        }});
+        assert_eq!(anthropic_usage(&nulls), counts(100, 50));
+        // A count that is as large as it can be does not overflow the sum.
+        let huge = json!({"usage": {"input_tokens": u64::MAX, "cache_read_input_tokens": 5, "output_tokens": 1}});
+        assert_eq!(anthropic_usage(&huge), counts(u64::MAX, 1));
+    }
+
+    #[test]
+    fn anthropic_usage_is_none_when_input_or_output_tokens_is_missing_or_not_a_whole_number() {
+        for response in [
+            json!({}),
+            json!({"usage": null}),
+            json!({"usage": {"input_tokens": 100}}),
+            json!({"usage": {"output_tokens": 50}}),
+            json!({"usage": {"input_tokens": "100", "output_tokens": 50}}),
+            json!({"usage": {"input_tokens": 100, "output_tokens": 5.5}}),
+            json!({"usage": {"input_tokens": null, "output_tokens": 50}}),
+            json!({"usage": {"input_tokens": 100, "output_tokens": -1}}),
+            // Only the cache counts: there is no input to add them to.
+            json!({"usage": {"cache_read_input_tokens": 30, "output_tokens": 50}}),
+        ] {
+            assert_eq!(anthropic_usage(&response), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn ollama_usage_is_the_prompt_eval_and_eval_counts() {
+        let response = json!({"message": {"content": "hi"}, "done": true, "prompt_eval_count": 26, "eval_count": 298});
+        assert_eq!(ollama_usage(&response), counts(26, 298));
+        assert_eq!(ollama_usage(&json!({"prompt_eval_count": 0, "eval_count": 0})), counts(0, 0));
+    }
+
+    #[test]
+    fn ollama_usage_is_none_when_a_count_is_missing_or_not_a_whole_number() {
+        for response in [
+            json!({"message": {"content": "hi"}}),
+            json!({"prompt_eval_count": 26}),
+            json!({"eval_count": 298}),
+            json!({"prompt_eval_count": "26", "eval_count": 298}),
+            json!({"prompt_eval_count": 26.5, "eval_count": 298}),
+            json!({"prompt_eval_count": null, "eval_count": 298}),
+            json!({"prompt_eval_count": -26, "eval_count": 298}),
+        ] {
+            assert_eq!(ollama_usage(&response), None, "{response}");
+        }
+    }
+
+    #[test]
+    fn a_text_reply_leaves_the_usage_out_of_its_json_when_there_is_none() {
+        let with = TextReply { text: "hi".to_string(), usage: counts(12, 3) };
+        assert_eq!(serde_json::to_value(&with).unwrap(), json!({"text": "hi", "usage": {"input": 12, "output": 3}}));
+        let without = TextReply { text: "hi".to_string(), usage: None };
+        assert_eq!(serde_json::to_value(&without).unwrap(), json!({"text": "hi"}));
+    }
+
+    #[test]
+    fn the_text_reply_of_each_provider_has_its_text_and_its_usage() {
+        let openai = openai_text_reply(json!({
+            "choices": [{"message": {"content": "from openai"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+        }))
+        .unwrap();
+        assert_eq!(openai, TextReply { text: "from openai".to_string(), usage: counts(12, 3) });
+
+        let anthropic = anthropic_text_reply(json!({
+            "content": [{"type": "text", "text": "from anthropic"}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 100, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30, "output_tokens": 50}
+        }))
+        .unwrap();
+        assert_eq!(anthropic, TextReply { text: "from anthropic".to_string(), usage: counts(150, 50) });
+
+        let ollama = ollama_text_reply(json!({
+            "message": {"content": "from ollama"}, "done": true, "prompt_eval_count": 26, "eval_count": 298
+        }))
+        .unwrap();
+        assert_eq!(ollama, TextReply { text: "from ollama".to_string(), usage: counts(26, 298) });
+    }
+
+    #[test]
+    fn a_response_without_counts_or_with_some_of_them_still_gives_its_text() {
+        // A local server may leave the counts out; that is no error, only no usage.
+        for (reply, name) in [
+            (openai_text_reply(json!({"choices": [{"message": {"content": "hi"}}]})), "openai, none"),
+            (openai_text_reply(json!({"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": 12}})), "openai, partial"),
+            (openai_text_reply(json!({"choices": [{"message": {"content": "hi"}}], "usage": {"prompt_tokens": "x", "completion_tokens": 1}})), "openai, not a number"),
+            (anthropic_text_reply(json!({"content": [{"type": "text", "text": "hi"}]})), "anthropic, none"),
+            (anthropic_text_reply(json!({"content": [{"type": "text", "text": "hi"}], "usage": {"input_tokens": 9}})), "anthropic, partial"),
+            (ollama_text_reply(json!({"message": {"content": "hi"}})), "ollama, none"),
+            (ollama_text_reply(json!({"message": {"content": "hi"}, "eval_count": 4})), "ollama, partial"),
+            (ollama_text_reply(json!({"message": {"content": "hi"}, "prompt_eval_count": "4", "eval_count": 4})), "ollama, not a number"),
+        ] {
+            assert_eq!(reply, Ok(TextReply { text: "hi".to_string(), usage: None }), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_response_that_has_usage_but_no_text_is_still_an_error() {
+        assert!(openai_text_reply(json!({"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})).is_err());
+        assert!(anthropic_text_reply(json!({"content": [], "usage": {"input_tokens": 1, "output_tokens": 1}})).is_err());
+        assert!(ollama_text_reply(json!({"message": {"content": " "}, "prompt_eval_count": 1, "eval_count": 1})).is_err());
+    }
+
+    #[tokio::test]
+    async fn call_openai_api_returns_the_text_and_the_usage_the_server_reported() {
+        let (base_url, _request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}}"#,
+        );
+
+        let reply = call_openai_api(
+            "local-model".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            String::new(),
+            128,
+            None,
+            Some(base_url),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, TextReply { text: "hi".to_string(), usage: counts(12, 3) });
+    }
+
+    #[tokio::test]
+    async fn call_openai_api_without_counts_from_the_server_returns_the_text_alone() {
+        let (base_url, _request_rx) =
+            spawn_mock_ollama_server(200, r#"{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":12}}"#);
+
+        let reply = call_openai_api(
+            "local-model".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            String::new(),
+            128,
+            None,
+            Some(base_url),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, TextReply { text: "hi".to_string(), usage: None });
+        assert_eq!(serde_json::to_value(&reply).unwrap(), json!({"text": "hi"}));
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_returns_the_text_and_the_usage_the_server_reported() {
+        let (base_url, _request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"message":{"role":"assistant","content":"hi"},"done":true,"prompt_eval_count":26,"eval_count":298}"#,
+        );
+
+        let reply = call_ollama_api(
+            "qwen2.5-coder:7b".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            None,
+            128,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, TextReply { text: "hi".to_string(), usage: counts(26, 298) });
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_without_counts_from_the_server_returns_the_text_alone() {
+        let (base_url, _request_rx) =
+            spawn_mock_ollama_server(200, r#"{"message":{"content":"hi"},"done":true,"eval_count":298}"#);
+
+        let reply = call_ollama_api(
+            "qwen2.5-coder:7b".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            None,
+            128,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reply, TextReply { text: "hi".to_string(), usage: None });
     }
 }

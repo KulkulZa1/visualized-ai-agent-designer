@@ -147,7 +147,23 @@ pub(crate) struct AnthropicStream {
     /// tool_use input JSON arriving in pieces, by block index.
     inputs: Vec<String>,
     stop_reason: String,
+    /// The `usage` of the response the non-streaming API would have returned. `message_start` has the input
+    /// counts (and the output so far), and each `message_delta` the output count, cumulative: the last
+    /// one stands.
+    usage: serde_json::Map<String, Value>,
     events: bool,
+}
+
+impl AnthropicStream {
+    /// Takes the counts of a stream event's `usage` object, each replacing the earlier one of its name. Only
+    /// whole numbers: a `null` (the API sends them for counts that do not apply) never replaces a count.
+    fn add_usage(&mut self, usage: &Value) {
+        for (name, count) in usage.as_object().into_iter().flatten() {
+            if count.is_u64() {
+                self.usage.insert(name.clone(), count.clone());
+            }
+        }
+    }
 }
 
 impl StreamAccumulator for AnthropicStream {
@@ -184,10 +200,12 @@ impl StreamAccumulator for AnthropicStream {
                     _ => {}
                 }
             }
+            "message_start" => self.add_usage(&event["message"]["usage"]),
             "message_delta" => {
                 if let Some(reason) = event["delta"]["stop_reason"].as_str() {
                     self.stop_reason = reason.to_string();
                 }
+                self.add_usage(&event["usage"]);
             }
             "error" => return Err(event_error(&event["error"])),
             _ => {}
@@ -201,7 +219,11 @@ impl StreamAccumulator for AnthropicStream {
                 block["input"] = serde_json::from_str(input).unwrap_or_else(|_| json!({}));
             }
         }
-        json!({"content": self.blocks, "stop_reason": self.stop_reason})
+        let mut response = json!({"content": self.blocks, "stop_reason": self.stop_reason});
+        if !self.usage.is_empty() {
+            response["usage"] = Value::Object(self.usage);
+        }
+        response
     }
 
     fn saw_events(&self) -> bool {
@@ -215,6 +237,9 @@ pub(crate) struct OllamaStream {
     text: String,
     tool_calls: Vec<Value>,
     done_reason: String,
+    /// The counts of the reply, which its last line carries.
+    prompt_eval_count: Option<u64>,
+    eval_count: Option<u64>,
     events: bool,
 }
 
@@ -234,13 +259,23 @@ impl StreamAccumulator for OllamaStream {
         if let Some(reason) = event["done_reason"].as_str() {
             self.done_reason = reason.to_string();
         }
+        self.prompt_eval_count = event["prompt_eval_count"].as_u64().or(self.prompt_eval_count);
+        self.eval_count = event["eval_count"].as_u64().or(self.eval_count);
         let text = event["message"]["content"].as_str().unwrap_or_default();
         self.text.push_str(text);
         Ok(text.to_string())
     }
 
     fn response(self) -> Value {
-        json!({"message": {"content": self.text, "tool_calls": self.tool_calls}, "done_reason": self.done_reason})
+        let mut response =
+            json!({"message": {"content": self.text, "tool_calls": self.tool_calls}, "done_reason": self.done_reason});
+        if let Some(count) = self.prompt_eval_count {
+            response["prompt_eval_count"] = json!(count);
+        }
+        if let Some(count) = self.eval_count {
+            response["eval_count"] = json!(count);
+        }
+        response
     }
 
     fn saw_events(&self) -> bool {
@@ -301,6 +336,7 @@ pub(crate) async fn read_stream<S: StreamAccumulator>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::api_commands::Usage;
     use crate::commands::chat_turn::{parse_anthropic, parse_ollama, parse_openai, ToolCall};
 
     /// Feeds `raw` in small chunks; returns the text pieces and the rebuilt response.
@@ -491,5 +527,72 @@ mod tests {
 
         assert_eq!(error, TIMED_OUT_MESSAGE);
         assert_eq!(pieces, ["Rea"]);
+    }
+
+    // ── Token usage ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn anthropic_stream_has_the_input_counts_of_message_start_and_the_output_count_of_message_delta() {
+        let raw = concat!(
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"content\":[],\"usage\":{\"input_tokens\":100,\"cache_creation_input_tokens\":20,\"cache_read_input_tokens\":30,\"output_tokens\":1}}}\n\n",
+            "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+            // The output count is cumulative; the counts that do not apply are null, and must not erase the input counts.
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":null,\"output_tokens\":15,\"server_tool_use\":{\"web_search_requests\":0}}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        );
+        let (_pieces, response) = feed::<AnthropicStream>(raw).unwrap();
+
+        // The response the non-streaming API would have returned: the usual parser reads it.
+        assert_eq!(response["usage"]["input_tokens"], 100);
+        assert_eq!(response["usage"]["output_tokens"], 15);
+        let reply = parse_anthropic(&response).unwrap();
+        assert_eq!(reply.text, "Hi");
+        assert_eq!(reply.usage, Some(Usage { input: 150, output: 15 }));
+    }
+
+    #[test]
+    fn anthropic_stream_that_never_says_what_it_used_has_no_usage() {
+        let (_pieces, response) = feed::<AnthropicStream>(ANTHROPIC_STREAM).unwrap();
+        assert!(response.get("usage").is_none(), "{response}");
+        assert_eq!(parse_anthropic(&response).unwrap().usage, None);
+
+        // Only the input counts came, with no message_delta after them: the output count is not known, so there is no usage.
+        let raw = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":100}}}\n\n";
+        let (_pieces, response) = feed::<AnthropicStream>(raw).unwrap();
+        let started = response["usage"].clone();
+        assert_eq!(started, json!({"input_tokens": 100}));
+        let with_text = json!({"content": [{"type": "text", "text": "x"}], "usage": started});
+        assert_eq!(parse_anthropic(&with_text).unwrap().usage, None);
+    }
+
+    #[test]
+    fn ollama_stream_has_the_counts_its_last_line_carries() {
+        let raw = concat!(
+            "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"Rea\"},\"done\":false}\n",
+            "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"ding\"},\"done\":false}\n",
+            "{\"model\":\"m\",\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"total_duration\":5,\"prompt_eval_count\":26,\"eval_count\":298}\n",
+        );
+        let (_pieces, response) = feed::<OllamaStream>(raw).unwrap();
+
+        assert_eq!(response["prompt_eval_count"], 26);
+        assert_eq!(response["eval_count"], 298);
+        let reply = parse_ollama(&response).unwrap();
+        assert_eq!(reply.text, "Reading");
+        assert_eq!(reply.usage, Some(Usage { input: 26, output: 298 }));
+    }
+
+    #[test]
+    fn ollama_stream_without_counts_has_no_usage() {
+        let (_pieces, response) = feed::<OllamaStream>(OLLAMA_STREAM).unwrap();
+        assert!(response.get("prompt_eval_count").is_none() && response.get("eval_count").is_none(), "{response}");
+        assert_eq!(parse_ollama(&response).unwrap().usage, None);
+    }
+
+    #[test]
+    fn openai_stream_has_no_usage_because_its_request_does_not_ask_for_one() {
+        let (_pieces, response) = feed::<OpenAiStream>(OPENAI_STREAM).unwrap();
+        assert!(response.get("usage").is_none(), "{response}");
+        assert_eq!(parse_openai(&response).unwrap().usage, None);
     }
 }
