@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from "node:os";
 import { delimiter, resolve, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { DEFAULT_PROVIDER_CATALOG } from "@/services/model-providers/providerCatalog";
 
 const root = resolve(__dirname, "../../..");
 const serverPath = join(root, "mcp", "server.mjs");
@@ -150,6 +151,25 @@ describe("Harness Studio MCP stdio server", () => {
     expect(parsed.providers?.find((provider) => provider.id === "ollama-cloud")?.credentialRef)
       .toBe("env:OLLAMA_API_KEY");
     expect(result.stdout).not.toContain("sk-secret-value-that-must-not-appear");
+  });
+
+  it("reports native tool calling for Ollama and streaming and tool calling for the OpenAI-compatible endpoint, as the app's catalog does", () => {
+    const result = callTool("list_providers", {});
+
+    const parsed = contentJson(result.responses[0]) as {
+      providers?: Array<{ id: string; capabilities: Record<string, boolean> }>;
+    };
+    const providers = parsed.providers ?? [];
+    const capabilities = (id: string) => providers.find((provider) => provider.id === id)?.capabilities;
+    expect(capabilities("ollama")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("ollama-cloud")).toMatchObject({ streaming: true, toolCalling: true });
+    expect(capabilities("openai-compatible")).toMatchObject({ streaming: true, toolCalling: true });
+    // [KEEP-IN-SYNC] the MCP server keeps its own copy of the catalog: no provider's flags may drift from the app's.
+    expect(providers.length).toBeGreaterThan(0);
+    for (const provider of providers) {
+      expect(provider.capabilities, provider.id)
+        .toEqual(DEFAULT_PROVIDER_CATALOG.find((entry) => entry.id === provider.id)?.capabilities);
+    }
   });
 
   it("lists artifact file metadata from a workspace without reading content", () => {

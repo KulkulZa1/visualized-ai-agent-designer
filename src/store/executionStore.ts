@@ -5,6 +5,10 @@ import { recordChange } from "@/services/execution/changeLog";
 import {
   DEFAULT_OLLAMA_BASE_URL,
   DEFAULT_OLLAMA_MODEL,
+  DEFAULT_OLLAMA_NUM_CTX,
+  DEFAULT_REQUEST_TIMEOUT_SECS,
+  parseNumCtx,
+  parseRequestTimeoutSecs,
   type LlmProvider,
 } from "@/utils/providerConfig";
 
@@ -15,11 +19,15 @@ interface ExecutionState {
   ollamaApiKey: string;     // Ollama Cloud / authenticated remote (empty = no auth)
   customApiUrl: string;     // Custom OpenAI-compatible endpoint base URL
   customApiKey: string;     // Custom endpoint API key (optional)
-  customApiModel: string;   // Model name to use with the custom endpoint
+  customApiModel: string;   // Model name to use with the custom endpoint; empty: each node's own model
   isRunning: boolean;
   llmProvider: LlmProvider;
   ollamaBaseUrl: string;
   ollamaModel: string;
+  /** Ollama's context window in tokens, sent as num_ctx; 0: the server's own default. */
+  ollamaNumCtx: number;
+  /** Seconds one model call may take in total (30 to 86400). */
+  requestTimeoutSecs: number;
   continueOnError: boolean;
 }
 
@@ -47,11 +55,20 @@ interface ExecutionActions {
   setLlmProvider: (p: LlmProvider) => void;
   setOllamaBaseUrl: (url: string) => void;
   setOllamaModel: (model: string) => void;
+  /** Ignores a value that is not a whole number of 0 or more. */
+  setOllamaNumCtx: (tokens: number) => void;
+  /** Ignores a value that is not whole seconds from 30 to 86400. */
+  setRequestTimeoutSecs: (secs: number) => void;
   setContinueOnError: (v: boolean) => void;
 }
 
 function loadKey(name: string): string {
   try { return localStorage.getItem(name) ?? ""; } catch { return ""; }
+}
+
+/** A saved number; the default when none is saved or the saved text is not a valid value. */
+function loadNumber(name: string, parse: (text: string) => number | null, fallback: number): number {
+  return parse(loadKey(name)) ?? fallback;
 }
 
 export const useExecutionStore = create<ExecutionState & ExecutionActions>()((set, get) => ({
@@ -61,11 +78,13 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   ollamaApiKey: loadKey("harness_ollama_key"),
   customApiUrl: loadKey("harness_custom_url"),
   customApiKey: loadKey("harness_custom_key"),
-  customApiModel: loadKey("harness_custom_model") || "gpt-4o-mini",
+  customApiModel: loadKey("harness_custom_model"),
   isRunning: false,
   llmProvider: (loadKey("harness_llm_provider") || "auto") as LlmProvider,
   ollamaBaseUrl: loadKey("harness_ollama_url") || DEFAULT_OLLAMA_BASE_URL,
   ollamaModel: loadKey("harness_ollama_model") || DEFAULT_OLLAMA_MODEL,
+  ollamaNumCtx: loadNumber("harness_ollama_num_ctx", parseNumCtx, DEFAULT_OLLAMA_NUM_CTX),
+  requestTimeoutSecs: loadNumber("harness_request_timeout_secs", parseRequestTimeoutSecs, DEFAULT_REQUEST_TIMEOUT_SECS),
   continueOnError: true,
 
   startRun: (workflowName, id = `run-${Date.now()}`, workspacePath) => {
@@ -182,6 +201,18 @@ export const useExecutionStore = create<ExecutionState & ExecutionActions>()((se
   setOllamaModel: (model) => {
     try { localStorage.setItem("harness_ollama_model", model); } catch {}
     set({ ollamaModel: model });
+  },
+
+  setOllamaNumCtx: (tokens) => {
+    if (parseNumCtx(String(tokens)) === null) return;
+    try { localStorage.setItem("harness_ollama_num_ctx", String(tokens)); } catch {}
+    set({ ollamaNumCtx: tokens });
+  },
+
+  setRequestTimeoutSecs: (secs) => {
+    if (parseRequestTimeoutSecs(String(secs)) === null) return;
+    try { localStorage.setItem("harness_request_timeout_secs", String(secs)); } catch {}
+    set({ requestTimeoutSecs: secs });
   },
 
   setContinueOnError: (v) => set({ continueOnError: v }),

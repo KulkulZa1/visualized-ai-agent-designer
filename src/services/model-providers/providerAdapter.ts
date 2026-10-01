@@ -36,6 +36,11 @@ export interface ProviderCallParams {
   customBaseUrl?: string;
   /** Pass "high" / "medium" / "low" for o-series and GPT-5.5 models. */
   reasoningEffort: string | null;
+  /** Ollama's context window in tokens, sent as `num_ctx`; 0 sends none. Left out: the Rust
+   *  command's default (16384). The Rust side leaves it out for ollama.com. */
+  ollamaNumCtx?: number;
+  /** Seconds one model call may take in total. Left out: the Rust commands' default (600). */
+  requestTimeoutSecs?: number;
 }
 
 export interface ProviderCallResult {
@@ -122,6 +127,18 @@ export function buildSystemMessage(p: SystemMessageParams): string {
   ].join("");
 }
 
+// ── Optional call arguments ───────────────────────────────────────────────────
+
+/** `numCtx` for call_ollama_api / chat_turn; absent when the caller has none (the Rust default stands). */
+function numCtxArg({ ollamaNumCtx }: Pick<ProviderCallParams, "ollamaNumCtx">): { numCtx?: number } {
+  return ollamaNumCtx === undefined ? {} : { numCtx: ollamaNumCtx };
+}
+
+/** `requestTimeoutSecs` for every model call; absent when the caller has none (the Rust default stands). */
+function timeoutArg({ requestTimeoutSecs }: Pick<ProviderCallParams, "requestTimeoutSecs">): { requestTimeoutSecs?: number } {
+  return requestTimeoutSecs === undefined ? {} : { requestTimeoutSecs };
+}
+
 // ── Core provider call ────────────────────────────────────────────────────────
 
 /**
@@ -141,6 +158,7 @@ export async function callProvider(
     systemMsg, userMsg, maxTokens,
     ollamaBaseUrl, ollamaModel, ollamaApiKey, customBaseUrl, reasoningEffort,
   } = params;
+  const timeout = timeoutArg(params);
 
   // Ollama call — uses ollamaModel, which is the Ollama-specific model param.
   // For gemma4:31b-cloud, the caller sets ollamaModel = "gemma4-31b:cloud" (or "gemma4:31b-cloud");
@@ -154,6 +172,8 @@ export async function callProvider(
       baseUrl: ollamaBaseUrl,
       apiKey: ollamaApiKey ?? "",
       maxTokens,
+      ...numCtxArg(params),
+      ...timeout,
     });
 
   if (provider === "ollama" || provider === "ollama-cloud") {
@@ -174,6 +194,7 @@ export async function callProvider(
       maxTokens,
       baseUrl: customBaseUrl.trim(),
       reasoningEffort: null,
+      ...timeout,
     });
     return { text, usedOllamaFallback: false };
   }
@@ -194,6 +215,7 @@ export async function callProvider(
         apiKey,
         maxTokens,
         ...(provider === "openai" ? { reasoningEffort, baseUrl: null } : {}),
+        ...timeout,
       }
     );
     return { text, usedOllamaFallback: false };
@@ -271,11 +293,15 @@ export async function callChatTurn(
   } = params;
   const channel = onDelta ? deltaChannel(onDelta) : null;
   const turn = (args: Record<string, unknown>) => invokeFn<ChatReply>("chat_turn", {
-    system: systemMsg, messages, tools, maxTokens, reasoningEffort: null, baseUrl: null, onDelta: channel, ...args,
+    system: systemMsg, messages, tools, maxTokens, reasoningEffort: null, baseUrl: null, onDelta: channel,
+    ...timeoutArg(params), ...args,
   });
 
   if (provider === "ollama" || provider === "ollama-cloud") {
-    return turn({ provider, model: resolveModel(ollamaModel), apiKey: ollamaApiKey ?? "", baseUrl: ollamaBaseUrl });
+    return turn({
+      provider, model: resolveModel(ollamaModel), apiKey: ollamaApiKey ?? "", baseUrl: ollamaBaseUrl,
+      ...numCtxArg(params),
+    });
   }
   if (provider === "openai-compatible") {
     if (!customBaseUrl?.trim()) {

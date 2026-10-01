@@ -40,6 +40,7 @@ import {
   callChatTurn,
   callProvider,
   buildSystemMessage,
+  estimateTokens,
   resolveModel,
   REASONING_EFFORT,
   isReasoningModel,
@@ -86,7 +87,14 @@ export interface ProviderSettings {
   ollamaModel: string;
   customApiUrl: string;
   customApiKey: string;
+  /** The model every agent uses on the Custom endpoint; empty: each agent's own model. */
   customApiModel: string;
+  /** Ollama's context window in tokens, sent as num_ctx on every Ollama call of the run (0: none is
+   *  sent, the server's default stands). One value for the whole run: Ollama reloads the model
+   *  whenever it changes. */
+  ollamaNumCtx: number;
+  /** Seconds one model call may take in total. */
+  requestTimeoutSecs: number;
 }
 
 export interface RunInput {
@@ -254,7 +262,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   const { config, workspacePath, continueOnError } = input;
   const {
     apiKey, openaiApiKey, ollamaApiKey, customApiUrl, customApiKey, customApiModel,
-    llmProvider, ollamaBaseUrl, ollamaModel,
+    llmProvider, ollamaBaseUrl, ollamaModel, ollamaNumCtx, requestTimeoutSecs,
   } = input.provider;
   const invoke = <T>(cmd: string, args?: Record<string, unknown>) => host.invoke<T>(cmd, args);
   // Every audit entry of the run, for its record; a resumed run continues the saved list.
@@ -316,6 +324,13 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     requiredProviders.add(sel.provider === "ollama" ? ollamaProviderType : sel.provider);
   }
 
+  // The model an agent sends to the Custom endpoint: the Custom model setting when there is one (the
+  // app's field, harness run's --model), else the agent's own. The preflight probes the first agent's,
+  // so it asks the server for a model the run really uses, and never one of ours.
+  const customModelFor = (data: AgentNodeData) => customApiModel || data.model || "";
+  const firstAgent = nodes.find((n) => isExecutable(n.data.role));
+  const customProbeModel = firstAgent ? customModelFor(firstAgent.data) : customApiModel;
+
   // Health checks — never contact a hosted provider this run will not use. Local
   // Ollama is probed when the run uses it, or as the billing fallback of OpenAI and
   // Anthropic (a Custom endpoint never falls back).
@@ -331,7 +346,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     probeOllama ? effectiveOllamaUrl : "", effectiveOllamaModel,
     ollamaApiKey, ollamaProviderType,
     requiredProviders.has("openai-compatible") ? customApiUrl : "",
-    customApiKey, customApiModel, usesOllama ? [] : fallbackFor, addEntry,
+    customApiKey, customProbeModel, usesOllama ? [] : fallbackFor, addEntry,
   );
   const healthMap   = new Map(healthResults.map((h) => [h.provider, h]));
   const ollamaHealth = healthMap.get(ollamaProviderType);
@@ -389,6 +404,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
   const gatewayRoutes = new Map<string, string>(); // gatewayId → chosen route
   const noNativeTools = new Set<string>();         // "provider:model" that refused native tools
   const noStreaming   = new Set<string>();         // "provider:model" that could not stream
+  const contextWarned = new Set<string>();         // node ids already told their prompt may not fit Ollama's context window
   // Feedback-edge target → the review it is being re-run for.
   const revisionRequests = new Map<string, { from: string; text: string; reviewed: string; round: number }>();
 
@@ -541,7 +557,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     runId,
     workflow: { name: meta.name, path: input.workflowFile?.path ?? null, hash: input.workflowFile?.hash ?? null },
     task: config.userInput,
-    provider: { llmProvider, ollamaBaseUrl, ollamaModel, customApiUrl, customApiModel },
+    provider: { llmProvider, ollamaBaseUrl, ollamaModel, customApiUrl, customApiModel, ollamaNumCtx },
     status: run.status,
     startedAt: input.resume?.startedAt ?? run.startedAt,
     finishedAt: run.finishedAt,
@@ -730,7 +746,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
     const runtimeProvider = selProv.provider === "ollama" ? ollamaProviderType : selProv.provider;
     const model =
       selProv.provider === "openai"           ? resolveModel(selProv.model) :
-      runtimeProvider === "openai-compatible" ? (customApiModel || rawModel) :
+      runtimeProvider === "openai-compatible" ? customModelFor(data) :
       selProv.model;
     const apiKeyForProvider =
       selProv.provider === "openai"           ? openaiApiKey :
@@ -798,6 +814,26 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
 
       const baseUserMsg = userMsgParts.join("\n\n");
       const maxTok = data.maxTokens || 2048;
+
+      // Ollama cuts a prompt that does not fit its context window (num_ctx) without a word, so say it,
+      // once per node for the run. Only when num_ctx is really sent: not for 0, and not for ollama.com.
+      // The estimate is the first prompt's (the system and user messages, chars / 4); the tool
+      // definitions and the steps after it add to it, so it is a minimum. The reply counts as at most
+      // half the window: Max tokens is a ceiling, not a size, and a generous one (the shipped examples
+      // give some agents 16384, the whole default window) should not warn on its own.
+      if ((runtimeProvider === "ollama" || runtimeProvider === "ollama-cloud") && ollamaNumCtx > 0 &&
+          !isOllamaCloudUrl(effectiveOllamaUrl) && !contextWarned.has(nodeId)) {
+        const promptTokens = estimateTokens(systemMsg, baseUserMsg, "");
+        if (promptTokens + Math.min(maxTok, Math.floor(ollamaNumCtx / 2)) > ollamaNumCtx) {
+          contextWarned.add(nodeId);
+          addEntry({ id: `${nodeId}-ctx-${Date.now()}`, timestamp: new Date().toISOString(),
+            action: "context_window", agentId: nodeId, warning: true, success: true,
+            details: `⚠ ${data.name}: its prompt is about ${promptTokens.toLocaleString()} tokens and it may reply ` +
+              `with up to ${maxTok.toLocaleString()} tokens, but Ollama's context window is ` +
+              `${ollamaNumCtx.toLocaleString()} tokens, so Ollama may cut off the start of the prompt. ` +
+              "Raise the context window (Settings → Ollama context window; harness run: --num-ctx)." });
+        }
+      }
       const effectiveThinkDepth =
         config.thinkDepthOverride !== null ? config.thinkDepthOverride : (data.thinkDepth ?? null);
       const reasoningEffort: string | null =
@@ -813,6 +849,7 @@ export async function runWorkflow(input: RunInput, host: RunHost): Promise<RunOu
         ollamaApiKey: ollamaApiKey || undefined,
         customBaseUrl: runtimeProvider === "openai-compatible" ? customApiUrl : undefined,
         reasoningEffort,
+        ollamaNumCtx, requestTimeoutSecs,
       };
       const nativeKey = `${runtimeProvider}:${model}`;
       let toolCallCount = 0;

@@ -61,6 +61,7 @@ beforeEach(() => {
     currentRun: null, isRunning: false, continueOnError: true,
     llmProvider: "ollama", ollamaBaseUrl: "http://localhost:11434", ollamaModel: "qwen2.5-coder:7b",
     apiKey: "", openaiApiKey: "", ollamaApiKey: "", customApiUrl: "", customApiKey: "",
+    customApiModel: "", ollamaNumCtx: 16384, requestTimeoutSecs: 600,
   });
   mockInvokeHandler("get_provider_defaults", () => ({
     llm_provider: "auto", ollama_base_url: "http://localhost:11434", ollama_model: "qwen2.5-coder:7b",
@@ -1094,6 +1095,42 @@ describe("useWorkflowExecution", () => {
     expect(openaiCalls[0].apiKey).toBe("");
   });
 
+  it("gives Ollama the context window and every model call the timeout set in Settings", async () => {
+    useExecutionStore.setState({ ollamaNumCtx: 4096, requestTimeoutSecs: 900 });
+    const calls: Array<Record<string, unknown>> = [];
+    mockInvokeHandler("call_ollama_api", (args) => { calls.push(args as Record<string, unknown>); return "ok"; });
+
+    const finished = await run();
+
+    expect(finished?.status).toBe("done");
+    expect(calls.map((c) => [c.numCtx, c.requestTimeoutSecs])).toEqual([[4096, 900], [4096, 900]]);
+  });
+
+  it("starts a run with the defaults Settings has: a 16384-token window and a 600 s timeout", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    mockInvokeHandler("call_ollama_api", (args) => { calls.push(args as Record<string, unknown>); return "ok"; });
+
+    await run();
+
+    expect(calls.map((c) => [c.numCtx, c.requestTimeoutSecs])).toEqual([[16384, 600], [16384, 600]]);
+  });
+
+  it("records the window in the run's saved record", async () => {
+    useExecutionStore.setState({ ollamaNumCtx: 8192 });
+    const records: RunRecord[] = [];
+    mockInvokeHandler("write_workspace_file", (args) => {
+      const { relativePath, content } = args as { relativePath: string; content: string };
+      if (relativePath.startsWith(".harness/runs/")) records.push(JSON.parse(content));
+    });
+
+    await run();
+
+    expect(records.at(-1)?.provider).toEqual({
+      llmProvider: "ollama", ollamaBaseUrl: "http://localhost:11434", ollamaModel: "qwen2.5-coder:7b",
+      customApiUrl: "", customApiModel: "", ollamaNumCtx: 8192,
+    });
+  });
+
   it("does not execute a tool call that arrives after the run was stopped", async () => {
     const node = makeNode("A");
     node.data.tools = [ToolPermission.WriteFile];
@@ -1145,6 +1182,7 @@ describe("useWorkflowExecution", () => {
       provider: {
         llmProvider: "ollama", apiKey: "", openaiApiKey: "", ollamaApiKey: "", ollamaBaseUrl: "http://localhost:11434",
         ollamaModel: "qwen2.5-coder:7b", customApiUrl: "", customApiKey: "", customApiModel: "",
+        ollamaNumCtx: 16384, requestTimeoutSecs: 600,
       },
       workspacePath: "/ws", continueOnError: true, resume: record,
     }, {

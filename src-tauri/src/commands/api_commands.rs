@@ -8,10 +8,37 @@ const OPENAI_RATE_LIMIT_MESSAGE: &str =
     "OpenAI API rate limit reached. The application will retry with exponential backoff.";
 const ANTHROPIC_CREDIT_MESSAGE: &str =
     "Anthropic API is configured, but the account has insufficient API credits. Please recharge credits in Anthropic Console Plans & Billing.";
+/// "↻ Models" is the label of the Custom endpoint's model-list button in Settings.
+const CUSTOM_MODEL_MISSING_MESSAGE: &str =
+    "No model name is set, so there is nothing to test. Enter the model name your server serves, or click ↻ Models to list the models it has.";
 pub(crate) const DEFAULT_OLLAMA_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com/api";
 const DEFAULT_OLLAMA_MODEL: &str = "qwen2.5-coder:7b";
 const DEFAULT_OLLAMA_CLOUD_MODEL: &str = "gemma4:31b-cloud";
+
+/// The context window (`options.num_ctx`) asked of Ollama when the caller sends none. Ollama's own
+/// default is a few thousand tokens, and it cuts a longer prompt without saying so; an agent's
+/// prompt and tool results are longer than that. 0 sends no `num_ctx`: the server's default stands.
+const DEFAULT_OLLAMA_NUM_CTX: u32 = 16384;
+
+/// How long one generation call may take in total (connecting, waiting for the model, reading its
+/// reply) when the caller does not say, and the bounds a caller's value is kept within.
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
+const MIN_REQUEST_TIMEOUT_SECS: u64 = 30;
+const MAX_REQUEST_TIMEOUT_SECS: u64 = 86400;
+
+/// Connecting fails fast, so a host that is not there does not hold a run up for the whole timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// A hosted API answers a health probe within seconds.
+const HOSTED_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+/// A local server may have to load its model into memory before it answers, which on slow
+/// hardware takes minutes.
+const LOCAL_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Said when a model call ran out of time, instead of a message about the connection: a local
+/// model on slow hardware may simply need longer than the request timeout.
+pub(crate) const TIMED_OUT_MESSAGE: &str =
+    "The model did not answer within the request timeout. On slow hardware, raise the model call timeout (Settings in the app, --request-timeout in harness run).";
 
 // ── Error classification ──────────────────────────────────────────────────────
 
@@ -132,16 +159,44 @@ pub struct ProviderDefaults {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// HTTP client for generation calls. Without explicit timeouts reqwest waits
-/// forever, hanging the whole workflow if an endpoint accepts the connection
-/// but never responds. Connect fails fast; the response timeout is generous
-/// so slow local CPU models still finish.
-pub(crate) fn generation_client() -> Result<reqwest::Client, String> {
+/// An HTTP client with explicit timeouts. Without them reqwest waits forever, hanging the whole
+/// workflow if an endpoint accepts the connection but never responds. Connecting fails fast; the
+/// total timeout covers the rest of the call.
+fn http_client(total_timeout: Duration) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(600))
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(total_timeout)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+/// The total timeout of a generation call: what the caller asked for in seconds (none: 600 s),
+/// kept between 30 s and 86400 s.
+fn request_timeout(secs: Option<u64>) -> Duration {
+    Duration::from_secs(
+        secs.unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+            .clamp(MIN_REQUEST_TIMEOUT_SECS, MAX_REQUEST_TIMEOUT_SECS),
+    )
+}
+
+/// HTTP client for generation calls. The total timeout is generous so slow local CPU models
+/// still finish, and the caller can raise it (`request_timeout_secs`).
+pub(crate) fn generation_client(request_timeout_secs: Option<u64>) -> Result<reqwest::Client, String> {
+    http_client(request_timeout(request_timeout_secs))
+}
+
+/// The total timeout of `check_provider_health`'s probe of `provider`.
+fn probe_timeout(provider: &str) -> Duration {
+    match provider {
+        "ollama" | "ollama-cloud" | "openai-compatible" => LOCAL_PROBE_TIMEOUT,
+        _ => HOSTED_PROBE_TIMEOUT,
+    }
+}
+
+/// True when a send failed because the request timeout ran out, not because no connection could
+/// be made.
+fn ran_out_of_time(error: &reqwest::Error) -> bool {
+    error.is_timeout() && !error.is_connect()
 }
 
 fn mask_key(key: &str) -> String {
@@ -331,6 +386,7 @@ fn openai_chat_body(
 }
 
 #[cfg_attr(feature = "app", tauri::command)]
+#[allow(clippy::too_many_arguments)]
 pub async fn call_openai_api(
     model: String,
     system: String,
@@ -341,8 +397,10 @@ pub async fn call_openai_api(
     // Optional base URL for custom OpenAI-compatible endpoints.
     // When None or empty, defaults to https://api.openai.com/v1
     base_url: Option<String>,
+    // Seconds the call may take in total; callers from before this argument send none (600 s).
+    request_timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    let client = generation_client()?;
+    let client = generation_client(request_timeout_secs)?;
 
     // Build the endpoint URL — use custom base URL if provided, otherwise OpenAI default
     let endpoint = base_url
@@ -417,7 +475,11 @@ pub(crate) async fn send_openai(
         }
         let response = req.json(body).send().await.map_err(|e| HttpFailure {
             status: None,
-            message: format!("Network error: {}", e.without_url()),
+            message: if ran_out_of_time(&e) {
+                TIMED_OUT_MESSAGE.to_string()
+            } else {
+                format!("Network error: {}", e.without_url())
+            },
         })?;
 
         let status = response.status().as_u16();
@@ -606,8 +668,10 @@ pub async fn call_anthropic_api(
     user_message: String,
     api_key: String,
     max_tokens: u32,
+    // Seconds the call may take in total; callers from before this argument send none (600 s).
+    request_timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    let client = generation_client()?;
+    let client = generation_client(request_timeout_secs)?;
     anthropic_call_inner(
         &client,
         &model,
@@ -627,8 +691,9 @@ pub async fn call_claude_api(
     user_message: String,
     api_key: String,
     max_tokens: u32,
+    request_timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    let client = generation_client()?;
+    let client = generation_client(request_timeout_secs)?;
     anthropic_call_inner(
         &client,
         &model,
@@ -642,7 +707,44 @@ pub async fn call_claude_api(
 
 // ── Ollama ────────────────────────────────────────────────────────────────────
 
+/// The `options` of an Ollama /api/chat request: the reply's length and the context window.
+///
+/// `num_ctx` is the caller's setting: none means 16384, and 0 means send none, so the server's own
+/// default stands. It is left out for ollama.com as well (the same host check as the API key: the
+/// host is ollama.com or a subdomain), which runs the model on its own servers and sizes the
+/// context itself. A server on the LAN or on this machine gets it whatever its URL looks like:
+/// its default context is a few thousand tokens, and a longer prompt is cut without a word.
+pub(crate) fn ollama_options(base_url: &str, max_tokens: u32, num_ctx: Option<u32>) -> serde_json::Value {
+    let mut options = serde_json::json!({ "num_predict": max_tokens });
+    let num_ctx = num_ctx.unwrap_or(DEFAULT_OLLAMA_NUM_CTX);
+    if num_ctx > 0 && !ollama_requires_api_key(base_url) {
+        options["num_ctx"] = serde_json::json!(num_ctx);
+    }
+    options
+}
+
+/// The /api/chat body of a text-protocol call.
+fn ollama_text_body(
+    model: &str,
+    system: &str,
+    user_message: &str,
+    base_url: &str,
+    max_tokens: u32,
+    num_ctx: Option<u32>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_message}
+        ],
+        "stream": false,
+        "options": ollama_options(base_url, max_tokens, num_ctx),
+    })
+}
+
 #[cfg_attr(feature = "app", tauri::command)]
+#[allow(clippy::too_many_arguments)]
 pub async fn call_ollama_api(
     model: String,
     system: String,
@@ -650,8 +752,13 @@ pub async fn call_ollama_api(
     base_url: String,
     api_key: Option<String>,
     max_tokens: u32,
+    // The context window to ask for (`num_ctx`); callers from before this argument send none
+    // (16384). 0: ask for none, and the server's default stands.
+    num_ctx: Option<u32>,
+    // Seconds the call may take in total; callers from before this argument send none (600 s).
+    request_timeout_secs: Option<u64>,
 ) -> Result<String, String> {
-    let client = generation_client()?;
+    let client = generation_client(request_timeout_secs)?;
     let base_url = if base_url.trim().is_empty() {
         DEFAULT_OLLAMA_BASE_URL.to_string()
     } else {
@@ -664,17 +771,7 @@ pub async fn call_ollama_api(
     )?;
     let model = normalize_ollama_model(&model);
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_message}
-        ],
-        "stream": false,
-        "options": {
-            "num_predict": max_tokens
-        },
-    });
+    let body = ollama_text_body(&model, &system, &user_message, &base_url, max_tokens, num_ctx);
 
     let value = post_ollama(&client, &base_url, api_key.as_deref(), &body, &model)
         .await
@@ -724,9 +821,13 @@ pub(crate) async fn send_ollama(
         request = request.header("Authorization", format!("Bearer {api_key}"));
     }
 
-    let response = request.send().await.map_err(|_| HttpFailure {
+    let response = request.send().await.map_err(|e| HttpFailure {
         status: None,
-        message: ollama_unavailable_message(base_url),
+        message: if ran_out_of_time(&e) {
+            TIMED_OUT_MESSAGE.to_string()
+        } else {
+            ollama_unavailable_message(base_url)
+        },
     })?;
 
     let status = response.status();
@@ -1162,10 +1263,9 @@ pub async fn check_provider_health(
     base_url: String,
     model: String,
 ) -> Result<ProviderHealth, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| e.to_string())?;
+    // A hosted API answers within seconds. A local server may first have to load its model, which
+    // on slow hardware takes minutes, so its probe waits longer; connecting still fails fast.
+    let client = http_client(probe_timeout(&provider))?;
 
     let start = Instant::now();
 
@@ -1455,13 +1555,24 @@ pub async fn check_provider_health(
                     pull_command: None,
                 });
             }
+            // The probe asks the server for one token of a model, and a server only has the
+            // models its owner put on it: no hosted model's name is guessed here.
+            if model.trim().is_empty() {
+                return Ok(ProviderHealth {
+                    ok: false,
+                    provider: "openai-compatible".into(),
+                    latency_ms: 0,
+                    message: CUSTOM_MODEL_MISSING_MESSAGE.into(),
+                    model_available: false,
+                    pull_command: None,
+                });
+            }
             let endpoint = format!(
                 "{}/chat/completions",
                 base_url.trim().trim_end_matches('/')
             );
-            let probe_model = if model.trim().is_empty() { "gpt-4o-mini" } else { model.trim() };
             let body = serde_json::json!({
-                "model": probe_model,
+                "model": model.trim(),
                 "messages": [{"role": "user", "content": "ok"}],
                 "max_tokens": 1,
             });
@@ -1780,6 +1891,8 @@ pub(crate) mod tests {
             base_url,
             Some("test-remote-token".to_string()),
             128,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1805,6 +1918,8 @@ pub(crate) mod tests {
             base_url,
             None,
             128,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -1826,6 +1941,7 @@ pub(crate) mod tests {
             16,
             None,
             Some("http://127.0.0.1:9/v1?api-key=hunter2-secret".to_string()),
+            None,
         )
         .await
         .unwrap_err();
@@ -1858,6 +1974,8 @@ pub(crate) mod tests {
             base_url,
             None,
             128,
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1880,6 +1998,8 @@ pub(crate) mod tests {
             base_url,
             Some("test-remote-token".to_string()),
             128,
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -1962,6 +2082,7 @@ pub(crate) mod tests {
             128,
             None,             // no reasoning effort
             Some(base_url),   // custom endpoint base URL
+            None,             // the default request timeout
         )
         .await
         .unwrap();
@@ -1983,6 +2104,7 @@ pub(crate) mod tests {
             128,
             None,
             Some(base_url),
+            None,
         )
         .await
     }
@@ -2097,6 +2219,7 @@ pub(crate) mod tests {
             128,
             None,
             Some(base_url),
+            None,
         )
         .await
         .unwrap();
@@ -2107,5 +2230,214 @@ pub(crate) mod tests {
         assert!(request
             .to_lowercase()
             .contains("authorization: bearer local-token"));
+    }
+
+    // ── Ollama's context window (`num_ctx`) ─────────────────────────────────────
+
+    /// The JSON body `call_ollama_api` sent a local Ollama server (mock).
+    async fn sent_by_call_ollama_api(num_ctx: Option<u32>) -> serde_json::Value {
+        let (base_url, request_rx) =
+            spawn_mock_ollama_server(200, r#"{"message":{"content":"ok"}}"#);
+        call_ollama_api(
+            "qwen2.5-coder:7b".to_string(),
+            "system".to_string(),
+            "hello".to_string(),
+            base_url,
+            None,
+            128,
+            num_ctx,
+            None,
+        )
+        .await
+        .unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_asks_the_server_for_the_context_window_it_was_given() {
+        let sent = sent_by_call_ollama_api(Some(4096)).await;
+        assert_eq!(sent["options"], serde_json::json!({"num_predict": 128, "num_ctx": 4096}));
+        assert_eq!(sent["stream"], false);
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_asks_for_16384_when_the_caller_sends_no_context_window() {
+        // Callers from before the argument existed must not fall back to Ollama's few thousand tokens.
+        let sent = sent_by_call_ollama_api(None).await;
+        assert_eq!(sent["options"]["num_ctx"], DEFAULT_OLLAMA_NUM_CTX);
+        assert_eq!(DEFAULT_OLLAMA_NUM_CTX, 16384);
+    }
+
+    #[tokio::test]
+    async fn call_ollama_api_sends_no_num_ctx_for_zero() {
+        let sent = sent_by_call_ollama_api(Some(0)).await;
+        assert_eq!(sent["options"], serde_json::json!({"num_predict": 128}));
+    }
+
+    #[test]
+    fn num_ctx_is_left_out_for_ollama_com_and_sent_to_every_other_server() {
+        let body = |base_url: &str, num_ctx: Option<u32>| {
+            ollama_text_body("m", "s", "u", base_url, 128, num_ctx)["options"].clone()
+        };
+        let with = serde_json::json!({"num_predict": 128, "num_ctx": 8192});
+        let without = serde_json::json!({"num_predict": 128});
+        // Hosted by Ollama: it sizes its own context.
+        for hosted in [
+            "https://ollama.com",
+            "https://ollama.com/api",
+            "https://OLLAMA.com/api/",
+            "https://api.ollama.com",
+            "https://ollama.com:443/api",
+        ] {
+            assert_eq!(body(hosted, Some(8192)), without, "{hosted}");
+            assert_eq!(body(hosted, None), without, "{hosted}");
+        }
+        // Everything else is a server the user runs, however its URL looks: loopback, LAN, a name
+        // on the company network, and hosts that only look like ollama.com.
+        for own in [
+            "http://localhost:11434",
+            "http://127.0.0.1:11434",
+            "http://[::1]:11434",
+            "http://192.168.1.20:11434",
+            "https://my-ollama.example.com",
+            "https://ollama.com.example.net",
+            "https://notollama.com",
+        ] {
+            assert_eq!(body(own, Some(8192)), with, "{own}");
+        }
+        // 0 sends none anywhere.
+        assert_eq!(body("http://localhost:11434", Some(0)), without);
+        assert_eq!(body("http://192.168.1.20:11434", Some(0)), without);
+    }
+
+    // ── Timeouts ──────────────────────────────────────────────────────────────
+
+    /// A server that takes a connection and never answers it. Returns its base URL.
+    fn spawn_silent_server() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            // Every connection is held open, without a reply, for as long as the test runs.
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                held.push(stream);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn a_generation_call_may_take_600_seconds_unless_the_caller_says_otherwise() {
+        assert_eq!(request_timeout(None), Duration::from_secs(600));
+        assert_eq!(request_timeout(Some(1800)), Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn the_request_timeout_is_kept_between_30_seconds_and_a_day() {
+        assert_eq!(request_timeout(Some(30)), Duration::from_secs(30));
+        assert_eq!(request_timeout(Some(86400)), Duration::from_secs(86400));
+        assert_eq!(request_timeout(Some(0)), Duration::from_secs(30));
+        assert_eq!(request_timeout(Some(29)), Duration::from_secs(30));
+        assert_eq!(request_timeout(Some(86401)), Duration::from_secs(86400));
+        assert_eq!(request_timeout(Some(u64::MAX)), Duration::from_secs(86400));
+    }
+
+    #[test]
+    fn a_local_server_gets_120_seconds_to_answer_a_probe_and_a_hosted_api_10() {
+        for local in ["ollama", "ollama-cloud", "openai-compatible"] {
+            assert_eq!(probe_timeout(local), Duration::from_secs(120), "{local}");
+        }
+        for hosted in ["openai", "anthropic"] {
+            assert_eq!(probe_timeout(hosted), Duration::from_secs(10), "{hosted}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_total_timeout_ends_a_call_the_server_never_answers() {
+        let client = http_client(Duration::from_millis(300)).unwrap();
+        let started = Instant::now();
+
+        let error = client.get(spawn_silent_server()).send().await.unwrap_err();
+
+        assert!(ran_out_of_time(&error), "{error:?}");
+        assert!(started.elapsed() < Duration::from_secs(5), "took {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_call_that_runs_out_of_time_says_so_and_a_refused_connection_still_says_unreachable() {
+        let client = http_client(Duration::from_millis(300)).unwrap();
+        let silent = spawn_silent_server();
+        let body = serde_json::json!({});
+
+        let ollama = send_ollama(&client, &silent, None, &body, "m").await.unwrap_err();
+        let custom = send_openai(&client, &format!("{silent}/chat/completions"), "", &body)
+            .await
+            .unwrap_err();
+        assert_eq!(ollama.message, TIMED_OUT_MESSAGE);
+        assert_eq!(custom.message, TIMED_OUT_MESSAGE);
+        // The words the run's fallbacks look for must not appear in it.
+        let lower = TIMED_OUT_MESSAGE.to_lowercase();
+        for word in ["stream", "billing", "quota", "credit", "insufficient", "exceeded"] {
+            assert!(!lower.contains(word), "{word}");
+        }
+
+        // Port 9 (discard) refuses at once: nothing timed out, and the old messages stand.
+        let ollama = send_ollama(&client, "http://127.0.0.1:9", None, &body, "m").await.unwrap_err();
+        let custom = send_openai(&client, "http://127.0.0.1:9/chat/completions", "", &body)
+            .await
+            .unwrap_err();
+        assert!(ollama.message.contains("not reachable"), "{}", ollama.message);
+        assert!(custom.message.starts_with("Network error"), "{}", custom.message);
+    }
+
+    // ── The Custom endpoint's health probe ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn the_custom_probe_with_no_model_asks_for_one_and_sends_nothing() {
+        let (base_url, request_rx) = spawn_mock_ollama_server(200, r#"{"choices":[]}"#);
+
+        for blank in ["", "   "] {
+            let health = check_provider_health(
+                "openai-compatible".to_string(),
+                String::new(),
+                base_url.clone(),
+                blank.to_string(),
+            )
+            .await
+            .unwrap();
+
+            assert!(!health.ok && !health.model_available, "{health:?}");
+            assert_eq!(health.latency_ms, 0);
+            assert_eq!(health.message, CUSTOM_MODEL_MISSING_MESSAGE);
+            // It names both ways out: the model name field, and the model-list button's label.
+            assert!(health.message.contains("Enter the model name your server serves"));
+            assert!(health.message.contains("↻ Models"));
+        }
+        assert!(
+            request_rx.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the probe sent a request with no model to ask for"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_custom_probe_asks_the_server_for_the_model_it_was_given() {
+        let (base_url, request_rx) =
+            spawn_mock_ollama_server(200, r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+
+        let health = check_provider_health(
+            "openai-compatible".to_string(),
+            String::new(),
+            base_url,
+            " my-local-model ".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(health.ok, "{health:?}");
+        assert!(request.starts_with("POST /chat/completions "));
+        assert!(request.contains(r#""model":"my-local-model""#));
+        assert!(!request.contains("gpt-4o-mini"));
     }
 }

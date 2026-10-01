@@ -148,6 +148,46 @@ describe("createReporter", () => {
       { type: "revision", nodeId: "Reviewer", details, success: true, warning: true });
   });
 
+  describe("a context window warning", () => {
+    // The audit entry's text starts with the ⚠ the app's audit strip shows.
+    const text = "Coder: its prompt is about 4,000 tokens and it may reply with up to 1,000 tokens, but Ollama's " +
+      "context window is 2,048 tokens, so Ollama may cut off the start of the prompt. Raise the context window.";
+    const details = `⚠ ${text}`;
+    const warning = { ...audit("Coder", "context_window", details), warning: true };
+
+    it("goes to stderr as a warning, where the run's other warnings are, and not among the run's lines", () => {
+      const { reporter: { events }, out, err } = capture(false);
+
+      events.onAudit(warning);
+
+      expect(err).toEqual([`warning: ${text}`]);
+      expect(out).toEqual([]);
+    });
+
+    it("has one marker on stderr: the leading ⚠ goes, with its emoji selector when there is one, and the rest is left as it is", () => {
+      const { reporter: { events }, err } = capture(false);
+      // A name that starts with a digit or holds a ⚠ stays whole.
+      const named = text.replace(/^Coder/, "2nd ⚠ Reviewer");
+
+      events.onAudit({ ...warning, details: `\u26A0\uFE0F ${text}` });
+      events.onAudit({ ...warning, details: `\u26A0${text}` });
+      events.onAudit({ ...warning, details: text });
+      events.onAudit({ ...warning, details: `⚠ ${named}` });
+      events.onAudit({ ...warning, details: named });
+
+      expect(err).toEqual([`warning: ${text}`, `warning: ${text}`, `warning: ${text}`, `warning: ${named}`, `warning: ${named}`]);
+    });
+
+    it("is a warning audit event with --json, and nothing on stderr", () => {
+      const { reporter: { events }, out, err } = capture(true);
+
+      events.onAudit(warning);
+
+      expect(out.map((line) => JSON.parse(line))).toEqual([{ type: "audit", nodeId: "Coder", details, success: true, warning: true }]);
+      expect(err).toEqual([]);
+    });
+  });
+
   it("emits one JSON event per line with --json, ending with the summary", () => {
     const { reporter, out } = capture(true);
 

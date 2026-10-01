@@ -45,8 +45,9 @@ const hookNow = (a) => {
 };
 
 const commands = {
+  // Like harness-core, LLM_PROVIDER comes from the environment the CLI passed on.
   get_provider_defaults: () => ({
-    llm_provider: "auto", ollama_base_url: "http://localhost:11434", ollama_model: "qwen2.5-coder:7b",
+    llm_provider: process.env.LLM_PROVIDER || "auto", ollama_base_url: "http://localhost:11434", ollama_model: "qwen2.5-coder:7b",
     openai_api_key_configured: false, anthropic_api_key_configured: false,
     ollama_api_key_configured: false, suggested_ollama_models: [],
   }),
@@ -54,6 +55,7 @@ const commands = {
     ? { ok: false, provider: a.provider, latency_ms: 0, message: "Ollama is not running", model_available: false, pull_command: null }
     : { ok: true, provider: a.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null }),
   call_ollama_api: (a) => modelReply(a.system),
+  call_openai_api: (a) => modelReply(a.system),
   // Every agent uses the text tool protocol.
   chat_turn: () => ({ text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false }),
   read_workspace_file: (a) => {

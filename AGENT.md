@@ -37,11 +37,12 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-30 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1413 tests / 73 files, and 1
-skipped because it needs a non-root user (CI runs it; the suite was 1151 / 72 before
-the offline bundle's tests);
-`cargo test` passed, 143 tests (the 2 Windows-only tests are not compiled on
-Linux); `cargo test --no-default-features --features core` passed, 143 + 2 tests;
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1514 tests / 75 files, and 1
+skipped because it needs a non-root user (CI runs it; the suite was 1413 / 73 before
+the local-model changes, and 1151 / 72 before the offline bundle's tests);
+`cargo test` passed, 162 tests (the 2 Windows-only tests are not compiled on
+Linux; it was 143 before the local-model changes);
+`cargo test --no-default-features --features core` passed, 162 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
 `index`/`monacoLocal` warning remains). The commands of CI's `harness run` step,
 against the real `harness-core` with no key, stopped with exit 3 and `not_started`.
@@ -55,15 +56,33 @@ Offline bundle pass, the same day, on the final script (commit 0e95a27), not par
 the test suite or CI: `npm run offline:bundle`, then `offline:setup` and
 `offline:verify` in a fresh clone in a network namespace with no route out and empty
 npm and cargo caches. Setup installed 271 packages and placed both prebuilt binaries,
-all 7 verify steps passed (with the vitest and `cargo test` counts above), and
-nothing was downloaded. Setup refused a damaged npm cache (naming the package, writing
-nothing) and a changed dependency, and accepted a bump of the project's own version,
-a reformatted lock and CRLF line endings; `create --force` repaired a damaged
-bundle. Details are in `docs/AIRGAPPED.md` and `docs/DEVELOPMENT_LOG.md`.
+all 7 verify steps passed (vitest 1413 tests / 73 files and 1 skipped; `cargo test`
+143, and 143 + 2 with the core build), and nothing was downloaded. Setup refused a
+damaged npm cache (naming the package, writing nothing) and a changed dependency, and
+accepted a bump of the project's own version, a reformatted lock and CRLF line
+endings; `create --force` repaired a damaged bundle. Details are in
+`docs/AIRGAPPED.md` and `docs/DEVELOPMENT_LOG.md`.
 Not run in this pass: Windows (the cmd.exe path refusal, and `.bat`, `.ps1` and
 `.py` hooks), macOS, the Tauri window and its IPC, and a live model. Also not run:
 the offline bundle on Windows, on macOS and on a physically air-gapped machine. It
 does not cover the installer build.
+The local-model changes (Ollama's context window, the Custom endpoint's model name,
+the timeouts, the capability flags) were checked by unit tests, and end to end, by
+hand, with the real `harness run` bundle and a real debug `harness-core` (both built
+from commit 76e60c7 in a separate checkout) against fake Ollama and OpenAI-compatible
+servers that recorded every request, in a network namespace with only loopback:
+`num_ctx` (the default, the flag, the variable, 0, ollama.com and look-alike hosts,
+invalid values), the run record, a Custom endpoint run from the environment alone
+(`gpt-4o-mini` in no request), and the timeouts (a 30 s call timeout, a probe that
+never answered at 120 s, one that answered after 15 s, a 10 s connect). The warning's
+current rule and text were checked the same way on commit 2171368: the shipped
+`examples/spec-to-pr.harness.yaml` at the default window gave no context warning
+(the old rule warned on its Implementer, whose Max tokens is 16384), a prompt that
+did not fit still warned, and the rule's boundaries held. Not run: a real model
+server (Ollama, llama.cpp, vLLM, LM Studio), the streaming turn end to end, the hosted
+probes (OpenAI, Anthropic), real HTTPS to ollama.com, release builds, and nothing on
+Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
+`docs/DEVELOPMENT_LOG.md`.
 `.github/workflows/ci.yml` runs these checks and `harness run` against the real
 `harness-core` on every pull request and push to master.
 
@@ -94,6 +113,12 @@ does not cover the installer build.
 - Sub-agents: `subagent_dispatch` (`src/services/execution/subAgents.ts`) starts helpers with a fresh context and a subset of the parent's tools; one level deep, max 5 per node run, 3 at a time. Helpers are recorded on the node's run (`AgentRun.subAgents`) and listed in `AgentActivityPanel`.
 - Ollama Cloud model `gemma4:31b-cloud`; alias `gemma4-31b:cloud` normalizes to the canonical model.
 - Air-gapped operation against a local OpenAI-compatible server: the "Custom" provider POSTs to `<base-url>/chat/completions` from the Rust backend (not the WebView, so CSP does not block it), key optional. Ship via the offline installer (`build-installer.ps1 -Offline`). See `docs/AIRGAPPED.md`.
+- Local models, on this machine or the network (Ollama, or any OpenAI-compatible server; `docs/AIRGAPPED.md` §5). Checked against fake servers only, not a real model server (see Current Verified Baseline and Honest Limitations):
+  - Ollama's context window: every Ollama `/api/chat` request (text protocol, native turn, streaming turn) sends `options.num_ctx` (`ollama_options` in `api_commands.rs`): 16384 by default, 0 sends none, never to ollama.com. Set in Settings ("Ollama context window (tokens)"), or with `harness run --num-ctx` / `HARNESS_OLLAMA_NUM_CTX`. It overrides the server's `OLLAMA_CONTEXT_LENGTH` and a model's own `num_ctx` (Modelfile): a model built with 32768 is lowered to the app's window (16384 by default) unless the window is 0 or 32768. `provider.ollamaNumCtx` in the run record is the setting, not what went over the wire: it is written for every run (another provider's, an ollama.com run), a resumed run records the value it was resumed with, and a resume never compares it. With P the estimated prompt (chars / 4), M the agent's `maxTokens` (2048 if 0) and W the window, a node gets one `context_window` audit warning when P + min(M, W / 2) > W (`harness run`: `warning: …` on stderr, without the ⚠, or an `audit` event with `--json`). A `harness-core` built before this change ignores the window and the call timeout without saying so: rebuild it (`npm run build:core`).
+  - The Custom endpoint's model has no default (it was `gpt-4o-mini`; blank sends each agent's own model). The run's preflight probes the model the run will send (the Model name, else the first agent node's). Test connection with no model sends nothing and asks for one.
+  - `harness run` reads `HARNESS_CUSTOM_BASE_URL` and `HARNESS_CUSTOM_MODEL` for the Custom endpoint (flags win), so `LLM_PROVIDER=openai-compatible` needs no `--provider`. These two, `HARNESS_OLLAMA_NUM_CTX` and `HARNESS_REQUEST_TIMEOUT_SECS` are read by `harness run` only, never by the app. The Run dialog's Provider Override offers Custom.
+  - Timeouts: a health probe allows 120 s for Ollama, Ollama Cloud and Custom, and 10 s for OpenAI and Anthropic; connecting fails after 10 s. A model call's total timeout is 600 s by default, 30 to 86400 (Settings "Model call timeout (seconds)", `--request-timeout`, `HARNESS_REQUEST_TIMEOUT_SECS`); a call to Ollama or an OpenAI-compatible endpoint that gets no answer in time says so, and so does a streamed reply that runs out of time, even after it began (a non-streamed reply that had begun gives "Failed to parse Ollama response: …" instead, an Anthropic call that gets no answer keeps its old message, and a probe that runs out of its limit still reads like a server that is down). An agent's own `timeoutSeconds` (300 for a new agent) bounds the node's whole run and is enforced: the agent never waits longer than that, but its call may run on, because the call is not cancelled (a local server keeps working on it, and later calls may queue behind it). Raise both on slow hardware.
+  - `harness provider list`, MCP `list_providers` and the provider catalog report native tool calling for Ollama and Ollama Cloud, and tool calling and streaming for OpenAI-compatible endpoints.
 - Offline build and test (`docs/AIRGAPPED.md`): `scripts/offline-bundle.mjs` collects every npm package and Rust crate that `package-lock.json` and `src-tauri/Cargo.lock` name, and prebuilt `harness-run.mjs` and `harness-core` for its own platform, so the source builds and tests with no internet. Only cargo stays offline afterwards (`.cargo/config.toml`); a plain `npm ci` goes to the registry. Verified on Linux x64 with no network route; not run on Windows or macOS.
   - `npm run offline:bundle -- [<dir>] [--no-binaries] [--force]`: on a connected machine, after `npm ci`, from the repo root. Writes `npm-cache/`, `cargo-vendor/`, `bin/<platform>-<arch>/` and `MANIFEST.json`.
   - `npm run offline:setup -- [<dir>]`: on the air-gapped machine, from the repo root. Refuses a bundle made for other dependencies or with a missing or damaged npm package (every refusal comes before the first change), runs `npm ci --offline`, writes a gitignored `.cargo/config.toml` (delete it to go back online), and installs the prebuilt binaries where they are missing.
@@ -133,6 +158,7 @@ does not cover the installer build.
 - `harness run` shows each agent's reply when it is done (no streaming). `harness-core`'s Ctrl+C handling is tested on Linux in CI; on Windows it was checked once with a scripted console Ctrl+C, not by an automated test. No `harness-core` binaries are published: build it, or use the prebuilt one an offline bundle carries, for the platform it was made on only (`docs/AIRGAPPED.md`). The app has no Resume button.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
+- Local model servers (Ollama, llama.cpp, vLLM, LM Studio) have not been run with the app or `harness run`. Ollama's context window, the Custom endpoint's model name, the timeouts and the capability flags were checked by unit tests and, with the real `harness run` and `harness-core`, against fake servers (Linux). Not run: the streaming turn end to end (`harness run` never streams), the Tauri window and its `invoke` arguments, Windows, macOS, the hosted probes (OpenAI, Anthropic), real HTTPS to ollama.com. What the docs say of how a real server behaves (Ollama's small default window, `OLLAMA_CONTEXT_LENGTH`, a model's own `num_ctx`, that Ollama may cut off a prompt that does not fit without saying so, memory use, reloads, that a real server sends nothing until a non-streamed reply is complete, that later calls may queue behind one an agent gave up on) was not tested.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
 - Agent shell commands (`bash`/`run_command`) run only after the user approves the exact command: once, or for the rest of the run ("Allow for this run" grants that exact text). This goes through `commandConsentStore` + `CommandConsentDialog` and the Rust `execute_command`. Keep it that way: no other auto-approval, and sub-agents never get `bash`. Approved commands are not sandboxed. Stop kills a running command's process tree (`cancel_command`).
@@ -170,12 +196,12 @@ does not cover the installer build.
 | `src-tauri/src/commands/core_server.rs` | `harness-core`: the run's Rust commands over stdin/stdout (`npm run build:core`) |
 | `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
 | `src/services/model-providers/providerAdapter.ts` | Provider call adapter |
-| `src/utils/providerConfig.ts` | Provider selection and Ollama URL/key helpers |
+| `src/utils/providerConfig.ts` | Provider selection, Ollama URL/key helpers, the context window and model call timeout defaults and bounds |
 | `src/services/wizard/goalTemplates.ts` | Rule-based goal templates |
 | `src/components/guide/GuidePanel.tsx` | Rule-based guide assistant |
 | `cli/harness.mjs` | CLI: read-only commands, and `run` (headless runs: `src/cli/`, needs `npm run build:cli` and `npm run build:core`) |
 | `mcp/server.mjs` | MCP stdio server |
-| `src-tauri/src/commands/api_commands.rs` | Provider calls and Ollama Cloud handling |
+| `src-tauri/src/commands/api_commands.rs` | Provider calls, Ollama Cloud handling, the Ollama context window (`ollama_options`), timeouts and health probes |
 | `src-tauri/src/commands/process_commands.rs` | Hook execution, the hook script fingerprint (`hook_fingerprint`) and approved agent commands (`execute_command`) |
 | `docs/DEPLOYMENT_READINESS.md` | Current readiness source of truth |
 | `docs/AIRGAPPED.md` | Offline / air-gapped deployment runbook |

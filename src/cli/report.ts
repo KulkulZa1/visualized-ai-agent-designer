@@ -90,6 +90,9 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
         emit({ type, nodeId: entry.agentId, details, success: entry.success, ...(entry.warning ? { warning: true } : {}) });
       }
       else if (type === "command") out(`$ ${details}`);
+      // Ollama may cut the prompt without a word: say it where the user sees warnings. The details
+      // start with the ⚠ the app's audit strip shows; here "warning:" is the marker.
+      else if (entry.action === "context_window") err(`warning: ${details.replace(/^\u26A0\uFE0F?\s*/, "")}`);
       else if (type !== "audit") out(details);
     },
     onFileChange: () => {},

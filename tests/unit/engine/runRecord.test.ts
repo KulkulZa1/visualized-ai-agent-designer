@@ -97,7 +97,7 @@ describe("reusableNodes", () => {
     });
     return {
       version: 1, runId: "run-1", workflow: { name: "W", path: null, hash: null }, task: "t",
-      provider: { llmProvider: "ollama", ollamaBaseUrl: "", ollamaModel: "", customApiUrl: "", customApiModel: "" },
+      provider: { llmProvider: "ollama", ollamaBaseUrl: "", ollamaModel: "", customApiUrl: "", customApiModel: "", ollamaNumCtx: 16384 },
       status: "error", startedAt: 0, attempts: 1, nodes, outputs: {}, memory: {}, gatewayRoutes: {}, changes: [], audit: [],
     };
   };
@@ -119,6 +119,20 @@ describe("reusableNodes", () => {
 
   it("runs a node the saved run never reached", () => {
     expect(reused({ D: null })).toEqual(["A", "B", "C"]);
+  });
+
+  it("does not compare the provider settings, Ollama's context window included", () => {
+    const record = saved({});
+    const everything = () => [...reusableNodes(graph, record, hashes)].map((id) => id.slice(2)).sort();
+
+    record.provider = { ...record.provider, ollamaNumCtx: 2048 };
+    expect(everything()).toEqual(["A", "B", "C", "D"]);
+    record.provider = { ...record.provider, ollamaNumCtx: 0, llmProvider: "openai-compatible" };
+    expect(everything()).toEqual(["A", "B", "C", "D"]);
+    // A record saved before the window was recorded has none.
+    const { ollamaNumCtx: _window, ...older } = record.provider;
+    record.provider = older;
+    expect(everything()).toEqual(["A", "B", "C", "D"]);
   });
 });
 

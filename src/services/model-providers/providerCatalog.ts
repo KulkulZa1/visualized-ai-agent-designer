@@ -73,8 +73,8 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderConfig[] = [
       },
     ],
     capabilities: {
-      streaming: false,
-      toolCalling: false,
+      streaming: true,
+      toolCalling: true,
       modelListing: false,
       tokenCostEstimate: false,
     },
@@ -100,7 +100,7 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderConfig[] = [
     ],
     capabilities: {
       streaming: true,
-      toolCalling: false,
+      toolCalling: true,
       modelListing: true,
       tokenCostEstimate: false,
     },
@@ -150,7 +150,7 @@ export const DEFAULT_PROVIDER_CATALOG: ProviderConfig[] = [
     ],
     capabilities: {
       streaming: true,
-      toolCalling: false,
+      toolCalling: true,
       modelListing: true,
       tokenCostEstimate: false,
     },

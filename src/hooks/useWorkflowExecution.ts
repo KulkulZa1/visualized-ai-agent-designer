@@ -34,7 +34,7 @@ export function useWorkflowExecution() {
   const {
     currentRun, apiKey, openaiApiKey, ollamaApiKey,
     customApiUrl, customApiKey, customApiModel,
-    llmProvider, ollamaBaseUrl, ollamaModel,
+    llmProvider, ollamaBaseUrl, ollamaModel, ollamaNumCtx, requestTimeoutSecs,
     startRun, updateAgent, finishRun, cancelRun, isRunning, continueOnError,
   } = useExecutionStore();
   const addEntry = useAuditStore((s) => s.addEntry);
@@ -60,7 +60,7 @@ export function useWorkflowExecution() {
         config,
         provider: {
           llmProvider, apiKey, openaiApiKey, ollamaApiKey, ollamaBaseUrl, ollamaModel,
-          customApiUrl, customApiKey, customApiModel,
+          customApiUrl, customApiKey, customApiModel, ollamaNumCtx, requestTimeoutSecs,
         },
         workspacePath,
         continueOnError,

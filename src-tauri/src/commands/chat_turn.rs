@@ -6,9 +6,9 @@
 //! the reply back.
 
 use super::api_commands::{
-    generation_client, normalize_anthropic_model, normalize_ollama_model, ollama_requires_api_key,
-    resolve_api_key, resolve_ollama_api_key_for_endpoint, send_anthropic, send_ollama, send_openai,
-    HttpFailure, DEFAULT_OLLAMA_BASE_URL,
+    generation_client, normalize_anthropic_model, normalize_ollama_model, ollama_options,
+    ollama_requires_api_key, resolve_api_key, resolve_ollama_api_key_for_endpoint, send_anthropic,
+    send_ollama, send_openai, HttpFailure, DEFAULT_OLLAMA_BASE_URL,
 };
 use super::chat_stream::{read_stream, AnthropicStream, OllamaStream, OpenAiStream, StreamAccumulator};
 use serde::{Deserialize, Serialize};
@@ -216,12 +216,16 @@ fn openai_body(
     body
 }
 
+/// The /api/chat body of a native turn. `num_ctx` is the caller's setting (see `ollama_options`
+/// for what none, 0 and the ollama.com host mean). Whether the reply streams is set by the caller.
 fn ollama_body(
     model: &str,
     system: &str,
     messages: &[ChatMessage],
     tools: &[ToolSpec],
+    base_url: &str,
     max_tokens: u32,
+    num_ctx: Option<u32>,
 ) -> Value {
     let mut wire = vec![json!({"role": "system", "content": system})];
     for m in messages {
@@ -248,7 +252,7 @@ fn ollama_body(
         "model": normalize_ollama_model(model),
         "messages": wire,
         "stream": false,
-        "options": {"num_predict": max_tokens},
+        "options": ollama_options(base_url, max_tokens, num_ctx),
     });
     if !tools.is_empty() {
         body["tools"] = openai_tools(tools);
@@ -358,6 +362,8 @@ fn rejects_tools(failure: &HttpFailure) -> bool {
 /// One model turn. `provider` is "anthropic", "openai", "openai-compatible",
 /// "ollama" or "ollama-cloud"; `base_url` is the custom or Ollama endpoint. With
 /// `on_delta`, the reply streams and its text is sent to that channel as it arrives.
+/// `num_ctx` is Ollama's context window (none: 16384; 0: ask for none) and
+/// `request_timeout_secs` the seconds the call may take in total (none: 600).
 #[cfg(feature = "app")]
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -373,6 +379,8 @@ pub async fn chat_turn(
     reasoning_effort: Option<String>,
     base_url: Option<String>,
     on_delta: Option<JavaScriptChannelId>,
+    num_ctx: Option<u32>,
+    request_timeout_secs: Option<u64>,
 ) -> Result<ChatReply, String> {
     let on_text = on_delta.map(|id| {
         let channel: Channel<ChatDelta> = id.channel_on(webview);
@@ -380,7 +388,11 @@ pub async fn chat_turn(
             let _ = channel.send(ChatDelta { text: text.to_string() });
         }) as Box<dyn FnMut(&str) + Send>
     });
-    run_turn(provider, model, system, messages, tools, api_key, max_tokens, reasoning_effort, base_url, on_text).await
+    run_turn(
+        provider, model, system, messages, tools, api_key, max_tokens, reasoning_effort, base_url, num_ctx,
+        request_timeout_secs, on_text,
+    )
+    .await
 }
 
 /// chat_turn without Tauri: streams to `on_text` when given.
@@ -395,9 +407,11 @@ pub(crate) async fn run_turn(
     max_tokens: u32,
     reasoning_effort: Option<String>,
     base_url: Option<String>,
+    num_ctx: Option<u32>,
+    request_timeout_secs: Option<u64>,
     mut on_text: Option<Box<dyn FnMut(&str) + Send>>,
 ) -> Result<ChatReply, String> {
-    let client = generation_client()?;
+    let client = generation_client(request_timeout_secs)?;
     let custom_url = base_url.as_deref().map(str::trim).filter(|u| !u.is_empty());
     let refused = |failure: &HttpFailure| !tools.is_empty() && rejects_tools(failure);
     let streaming = on_text.is_some();
@@ -451,7 +465,7 @@ pub(crate) async fn run_turn(
             let base = custom_url.unwrap_or(DEFAULT_OLLAMA_BASE_URL);
             let key = resolve_ollama_api_key_for_endpoint(&api_key, base, ollama_requires_api_key(base))?;
             let model = normalize_ollama_model(&model);
-            let mut body = ollama_body(&model, &system, &messages, &tools, max_tokens);
+            let mut body = ollama_body(&model, &system, &messages, &tools, base, max_tokens, num_ctx);
             body["stream"] = json!(streaming);
             let sent = send_ollama(&client, base, key.as_deref(), &body, &model).await;
             match reply_value::<OllamaStream>(sent, on_text, "Ollama").await {
@@ -539,9 +553,11 @@ mod tests {
         assert_eq!(custom["max_tokens"], 512);
     }
 
+    const LOCAL: &str = "http://localhost:11434";
+
     #[test]
     fn ollama_body_uses_object_arguments_and_tool_name() {
-        let body = ollama_body("gemma4-31b:cloud", "sys", &history(), &[read_file_spec()], 512);
+        let body = ollama_body("gemma4-31b:cloud", "sys", &history(), &[read_file_spec()], LOCAL, 512, None);
         assert_eq!(body["model"], "gemma4:31b-cloud");
         assert_eq!(body["stream"], false);
         assert_eq!(body["options"]["num_predict"], 512);
@@ -564,7 +580,31 @@ mod tests {
         let msgs = &history()[..1];
         assert!(anthropic_body("m", "s", msgs, &[], 1).get("tools").is_none());
         assert!(openai_body("m", "s", msgs, &[], 1, None, true).get("tools").is_none());
-        assert!(ollama_body("m", "s", msgs, &[], 1).get("tools").is_none());
+        assert!(ollama_body("m", "s", msgs, &[], LOCAL, 1, None).get("tools").is_none());
+    }
+
+    #[test]
+    fn ollama_body_asks_for_the_context_window_it_was_given() {
+        let num_ctx = |base_url: &str, asked: Option<u32>| {
+            ollama_body("m", "s", &history()[..1], &[], base_url, 512, asked)["options"]
+                .get("num_ctx")
+                .cloned()
+        };
+        assert_eq!(num_ctx(LOCAL, Some(8192)), Some(json!(8192)));
+        // A caller that sends none gets 16384; Ollama's own default would cut an agent's prompt.
+        assert_eq!(num_ctx(LOCAL, None), Some(json!(16384)));
+        // 0 leaves it to the server: no num_ctx at all.
+        assert_eq!(num_ctx(LOCAL, Some(0)), None);
+        // A server on the LAN is typed "ollama-cloud" by the app, but its context needs asking for too.
+        assert_eq!(num_ctx("http://192.168.1.20:11434", Some(32768)), Some(json!(32768)));
+        assert_eq!(num_ctx("https://my-ollama.example.com", None), Some(json!(16384)));
+        // ollama.com and its subdomains size their own context.
+        assert_eq!(num_ctx("https://ollama.com", Some(8192)), None);
+        assert_eq!(num_ctx("https://ollama.com/api", None), None);
+        assert_eq!(num_ctx("https://api.OLLAMA.com:443/api", Some(8192)), None);
+        // The reply's length is always sent.
+        let options = &ollama_body("m", "s", &history()[..1], &[], "https://ollama.com", 512, None)["options"];
+        assert_eq!(options["num_predict"], 512);
     }
 
     #[test]
@@ -664,6 +704,8 @@ mod tests {
             None,
             Some(base_url),
             None,
+            None,
+            None,
         )
         .await;
         let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
@@ -722,6 +764,8 @@ mod tests {
             None,
             Some(base_url),
             None,
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -745,7 +789,7 @@ mod tests {
         let (pieces, on_text) = collector();
         let reply = run_turn(
             "ollama".into(), "llama3".into(), "sys".into(), history()[..1].to_vec(), vec![],
-            String::new(), 256, None, Some(base_url), Some(on_text),
+            String::new(), 256, None, Some(base_url), None, None, Some(on_text),
         )
         .await
         .unwrap();
@@ -766,7 +810,7 @@ mod tests {
         let (pieces, on_text) = collector();
         let reply = run_turn(
             "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(), vec![],
-            String::new(), 256, None, Some(base_url), Some(on_text),
+            String::new(), 256, None, Some(base_url), None, None, Some(on_text),
         )
         .await
         .unwrap();
@@ -785,7 +829,7 @@ mod tests {
         let (pieces, on_text) = collector();
         let reply = run_turn(
             "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(),
-            vec![read_file_spec()], String::new(), 256, None, Some(base_url), Some(on_text),
+            vec![read_file_spec()], String::new(), 256, None, Some(base_url), None, None, Some(on_text),
         )
         .await
         .unwrap();
@@ -795,5 +839,47 @@ mod tests {
         assert_eq!(sent["stream"], true);
         assert_eq!(*pieces.lock().unwrap(), ["On it."]);
         assert_eq!(reply.tool_calls[0].args, json!({"path": "a.md"}));
+    }
+
+    /// The JSON body run_turn sent a local Ollama server (mock), streaming or not.
+    async fn sent_to_ollama(num_ctx: Option<u32>, streaming: bool) -> Value {
+        let (base_url, request_rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}"#,
+        );
+        let (_pieces, on_text) = collector();
+        run_turn(
+            "ollama".into(), "llama3".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), num_ctx, None, streaming.then_some(on_text),
+        )
+        .await
+        .unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_turn_asks_ollama_for_the_context_window_whether_or_not_the_reply_streams() {
+        for streaming in [false, true] {
+            let sent = sent_to_ollama(Some(8192), streaming).await;
+            assert_eq!(sent["stream"], streaming);
+            assert_eq!(sent["options"], json!({"num_predict": 256, "num_ctx": 8192}), "streaming: {streaming}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_asks_for_16384_when_the_caller_sends_no_context_window() {
+        for streaming in [false, true] {
+            let sent = sent_to_ollama(None, streaming).await;
+            assert_eq!(sent["options"]["num_ctx"], 16384, "streaming: {streaming}");
+        }
+    }
+
+    #[tokio::test]
+    async fn run_turn_sends_no_num_ctx_for_zero() {
+        for streaming in [false, true] {
+            let sent = sent_to_ollama(Some(0), streaming).await;
+            assert_eq!(sent["options"], json!({"num_predict": 256}), "streaming: {streaming}");
+        }
     }
 }

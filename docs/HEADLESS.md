@@ -42,13 +42,18 @@ npm run harness -- run <workflow.harness.yaml> --task "What to do" [options]
 | `--resume <runId>` | Resume a saved run: finished, unchanged agents are reused (see below) |
 | `--workspace <dir>` | The folder the agents work in. Default: the current folder. File tools, commands and hooks stay inside it. |
 | `--provider <name>` | `auto`, `openai`, `anthropic`, `ollama`, `ollama-cloud` or `openai-compatible`. Default: `auto`, which picks each agent's provider from its model, as the app does. |
-| `--base-url <url>` | The Ollama endpoint, or the OpenAI-compatible endpoint (required for `openai-compatible`) |
-| `--model <name>` | The Ollama or OpenAI-compatible model. OpenAI and Anthropic keep each agent's own model. |
+| `--base-url <url>` | The Ollama endpoint, or the OpenAI-compatible endpoint (required for `openai-compatible`, unless `HARNESS_CUSTOM_BASE_URL` gives it) |
+| `--model <name>` | The Ollama or OpenAI-compatible model. OpenAI and Anthropic keep each agent's own model. For an OpenAI-compatible endpoint it can come from `HARNESS_CUSTOM_MODEL`; with none, each agent's own model is sent. |
+| `--num-ctx <n>` | Ollama's context window in tokens, sent as `num_ctx`: a whole number from 0 to 4294967295. Default: 16384. It overrides the server's default (`OLLAMA_CONTEXT_LENGTH`) and a model's own `num_ctx` (Modelfile); `0` sends none, so those stand. Never sent to ollama.com. Can come from `HARNESS_OLLAMA_NUM_CTX`. |
+| `--request-timeout <secs>` | How long one model call may take in total: a whole number of seconds from 30 to 86400. Default: 600. An agent's own `timeoutSeconds` still bounds its whole run. Can come from `HARNESS_REQUEST_TIMEOUT_SECS`. |
 | `--max-parallel <n>` | Agents running at once. Default: the workflow's setting. |
 | `--continue-on-error` | Keep running the other agents after one fails. By default the run stops at the first failure. |
 | `--allow-command "<cmd>"` | Let agents run this exact command. Repeat it for more commands. |
 | `--json` | One JSON event per line on stdout, and nothing else |
 | `--core <path>` | The `harness-core` binary. Default: `HARNESS_CORE`, then `src-tauri/target/release/harness-core`. |
+
+What this page says of Ollama's own behavior, and of how a real server answers, was
+not tested against a real server: see `docs/AIRGAPPED.md` §5.
 
 Examples:
 
@@ -62,6 +67,16 @@ OPENAI_API_KEY=sk-… node cli/harness.mjs run review.harness.yaml --task-file t
 # Any OpenAI-compatible server
 HARNESS_CUSTOM_API_KEY=… node cli/harness.mjs run review.harness.yaml --task "Review src/" \
   --provider openai-compatible --base-url https://llm.example.com/v1 --model my-model
+
+# The same, from the environment alone: no flags
+LLM_PROVIDER=openai-compatible HARNESS_CUSTOM_BASE_URL=https://llm.example.com/v1 \
+  HARNESS_CUSTOM_MODEL=my-model HARNESS_CUSTOM_API_KEY=… \
+  node cli/harness.mjs run review.harness.yaml --task "Review src/"
+
+# Ollama on another machine, with a larger context window and a longer call timeout.
+# Also raise each agent's own timeoutSeconds in the workflow: it still bounds its whole run.
+node cli/harness.mjs run review.harness.yaml --task "Review src/" --provider ollama \
+  --base-url http://192.168.1.20:11434 --model qwen2.5-coder:7b --num-ctx 32768 --request-timeout 1800
 ```
 
 The workflow is checked with the same schema and validation as the app before
@@ -78,13 +93,44 @@ record never contains a key.
 | `ANTHROPIC_API_KEY` | Anthropic |
 | `OLLAMA_API_KEY` | Ollama Cloud (ollama.com) |
 | `OLLAMA_REMOTE_API_KEY` | An authenticated remote Ollama server |
-| `HARNESS_CUSTOM_API_KEY` | An OpenAI-compatible endpoint (`--provider openai-compatible`) |
+| `HARNESS_CUSTOM_API_KEY` | An OpenAI-compatible endpoint (`--provider openai-compatible`, or `LLM_PROVIDER=openai-compatible`) |
 
 `harness-core` reads the first four itself. A custom endpoint never gets your
 OpenAI key: it gets `HARNESS_CUSTOM_API_KEY` or nothing. `harness-core` also
 reads `LLM_PROVIDER`, `OLLAMA_BASE_URL` and `OLLAMA_MODEL`, as the app does.
 
 Agent commands and hooks run without these keys in their environment.
+
+## Options from the environment
+
+Four options can also come from an environment variable, so a CI job or a shell
+profile can set them once. A flag wins over its variable, and a blank variable counts
+as unset.
+
+| Variable | Same as | |
+|---|---|---|
+| `HARNESS_OLLAMA_NUM_CTX` | `--num-ctx` | Ollama's context window |
+| `HARNESS_REQUEST_TIMEOUT_SECS` | `--request-timeout` | How long one model call may take |
+| `HARNESS_CUSTOM_BASE_URL` | `--base-url` | An OpenAI-compatible endpoint only |
+| `HARNESS_CUSTOM_MODEL` | `--model` | An OpenAI-compatible endpoint only |
+
+- The two `HARNESS_CUSTOM_…` variables are read only when the run uses the
+  OpenAI-compatible endpoint: `--provider openai-compatible`, or `--provider auto`
+  (the default) with `LLM_PROVIDER=openai-compatible`. In the second case `--provider`
+  is not needed.
+- A value that is not valid is exit 2 and names the variable, for example
+  `harness run: HARNESS_REQUEST_TIMEOUT_SECS must be a whole number of seconds from 30 to 86400`
+  (`HARNESS_OLLAMA_NUM_CTX must be a whole number of tokens, 0 or more`). The value is
+  checked whichever provider the run uses, before `harness-core` starts. The flags
+  give the same errors, naming the flag.
+- With no URL from a flag or a variable, `--provider openai-compatible` is exit 2:
+  `--provider openai-compatible needs --base-url (or HARNESS_CUSTOM_BASE_URL)`.
+  `LLM_PROVIDER=openai-compatible` alone gets past that check, and the engine then
+  refuses to start the run, before any agent runs: exit 3, `Custom endpoint URL is not
+  configured. Add it in Settings → Custom Endpoint.` That message is the app's
+  wording: set `--base-url` or `HARNESS_CUSTOM_BASE_URL`.
+- The app does not read these four variables: its values are in Settings.
+  `LLM_PROVIDER` is read by both.
 
 ## Agent commands
 
@@ -218,6 +264,24 @@ Resume: harness run fix.harness.yaml --resume run-1790348292064
 When every agent finishes, the summary ends with the final output of the last
 agents. Warnings and errors go to stderr.
 
+One warning comes from the run itself: an agent's prompt may leave no room for its
+reply in Ollama's context window. It is printed on stderr when the agent starts,
+without the ⚠ that the app's audit strip shows:
+
+```
+warning: Coder: its prompt is about 9,000 tokens and it may reply with up to 16,384 tokens, but Ollama's context window is 16,384 tokens, so Ollama may cut off the start of the prompt. Raise the context window (Settings → Ollama context window; harness run: --num-ctx).
+```
+
+It fires when the agent's estimated prompt P (about 4 characters per token, over the
+system and user messages) plus its `maxTokens` M (2048 if it is 0), counted as at
+most half the window W, is more than the window: P + min(M, W / 2) > W. A generous
+`maxTokens` alone does not warn: at the default window an agent with `maxTokens`
+16384 counts its reply as 8192, so it warns when its prompt is more than 8192 tokens.
+The message gives P, M and W. It is said once per agent, and it does not change the
+run or its exit code. The estimate is a minimum: it covers the first prompt only, and
+leaves out the tool definitions and the steps after it. There is no warning with
+`--num-ctx 0`, for ollama.com, or for another provider.
+
 With `--json`, stdout has one JSON object per line and nothing else:
 
 | `type` | Fields |
@@ -225,12 +289,16 @@ With `--json`, stdout has one JSON object per line and nothing else:
 | `run_started` | `runId`, `workflow` |
 | `node_started` | `nodeId`, `agent`, `model`, `provider`, `revision` |
 | `node_finished` | `nodeId`, `agent`, `status` (`done`, `error`, `stopped`, `skipped`), `output` (the full text), `error`, `durationMs`, `revision`, `reused` |
-| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success`, and `warning: true` for a problem the run went on after (a fallback, a revision limit, a branch a gateway chose after a revision that could not run) |
+| `command`, `revision`, `compaction`, `reused`, `audit` | `nodeId`, `details`, `success`, and `warning: true` for a problem the run went on after (a fallback, a revision limit, a branch a gateway chose after a revision that could not run, a prompt that may not fit Ollama's context window) |
 | `run_finished` | `runId`, `status` (`done`, `error`, `cancelled`), `durationMs`, `agents`, `changes` (`path`, `created`, `added`, `removed`), `outputs` (the final agents' text), `trace` (the saved record), `error` (only when the run failed as a whole rather than through an agent, for example a cycle: `Run failed: …`; an agent's own error is on its `node_finished` event) |
 
 `nodeId`s are the agents' places in the workflow file: `agent-0`, `agent-1`, …
 The provider check's `audit` events can come before `run_started`. A run that
 never started ends with `{"type":"run_finished","status":"not_started","error":…}`.
+
+The context window warning above is an `audit` event with `warning: true`,
+`success: true`, the agent's `nodeId` and the warning's text in `details` (it starts
+with the ⚠). Nothing goes to stderr for it.
 
 `node_finished` can repeat for a node. It runs again in each revision round
 (`revision` says which), and a node that finished as `done` gets a later
@@ -263,8 +331,13 @@ too when a workspace is open. Add `.harness/runs/` to your `.gitignore`.
 
 The record holds:
 - the workflow's name, file path and SHA-256;
-- the task, the provider settings (never a key), the status, the times and the
-  number of attempts;
+- the task, the provider settings (never a key, and not the model call timeout), the
+  status, the times and the number of attempts. The settings include Ollama's
+  context window as `provider.ollamaNumCtx`. It is the setting, not what went over
+  the wire: it is written for every run, also a run on another provider (an
+  OpenAI-compatible run given `--num-ctx 64` records 64) and a run on ollama.com
+  (which gets none), and 0 means none was asked for. A resumed run records the value
+  it was resumed with. A record saved before this field has none;
 - each agent's status, output, error, times, model, token estimate, revision,
   helpers and definition hash;
 - the text each agent passed on, the memory, the gateway routes, the files the
@@ -304,7 +377,8 @@ Done in 23.5 s · run run-1790348292064
 - A run id that is not saved in the workspace, or a record of another workflow,
   is an error (exit 2).
 - The provider settings are recorded, not compared. A finished agent is reused
-  even if you resume with another `--provider`, `--base-url` or `--model`.
+  even if you resume with another `--provider`, `--base-url`, `--model` or
+  `--num-ctx`.
 - The hook baselines carry over and a resume takes no new ones (see Hooks). A
   hook refused for its script or `env` is refused again on resume.
 
@@ -334,7 +408,9 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
 ## Limits
 
 - Replies do not stream in the terminal: each agent's output arrives when it is
-  done.
+  done. `harness run` never streams: its requests to Ollama carry `stream: false`,
+  and OpenAI-compatible endpoints are not asked to stream. The app's streaming turn
+  (`stream: true`) carries `num_ctx` too, but only the Rust unit tests cover that.
 - Commands are not sandboxed. Only the exact commands you allow run.
 - The hook script check has gaps: files a script sources or imports, and a change
   in the moment between `execute_hook`'s last read and the interpreter's own
@@ -355,9 +431,50 @@ The job has read-only permissions (`contents: read`) and uses Node 22.
 - **`No API key for the selected provider. Add one in Settings…`**: this
   message comes from the app's engine. For `harness run`, set the key's
   environment variable (see Keys).
-- **An agent times out on a slow endpoint**: free and shared endpoints can take
-  30 seconds or more per call and may answer 429 when busy. Raise the agents'
-  timeouts in the workflow, or use `--max-parallel 1`.
+- **An agent fails with `<name> timed out after <N>s`**: the agent's own
+  `timeoutSeconds` (`<N>`; 300 for an agent made in the app) ran out. It bounds the
+  agent's whole run, all its model calls and tools. Free and shared endpoints can
+  take 30 seconds or more per call and may answer 429 when busy. Raise the agents'
+  `timeoutSeconds` in the workflow (the workflow-level `timeoutSeconds` is not
+  applied), or use `--max-parallel 1`.
+- **`The model did not answer within the request timeout. On slow hardware, raise
+  the model call timeout (Settings in the app, --request-timeout in harness
+  run).`**: one model call to Ollama or an OpenAI-compatible endpoint got no answer
+  within `--request-timeout` (default 600 s). Raise it with `--request-timeout <secs>`
+  (30 to 86400) or `HARNESS_REQUEST_TIMEOUT_SECS`. Raise the agents' `timeoutSeconds`
+  too: an agent gives up at its own timeout even if a call is still going, and an
+  agent's 300 s is shorter than the default call timeout (600 s). An agent that gives
+  up does not cancel its call: a local server keeps working on it until it answers or
+  `--request-timeout` ends it, so later calls to the same server may queue behind it.
+  A reply that had begun when the timeout ended gives `Failed to parse Ollama
+  response: error decoding response body` (or `Failed to parse OpenAI response: …`)
+  instead; real servers normally send nothing until the reply is complete. An
+  Anthropic call that got no answer keeps `Anthropic network error: …`. A refused
+  connection keeps its own message (Ollama: `… is not reachable at <url>`; an
+  OpenAI-compatible endpoint: `Network error: …`), and connecting fails after 10 s.
+- **`warning: <agent>: its prompt is about N tokens and it may reply with up to M
+  tokens, but Ollama's context window is W tokens …`**: the agent's estimated prompt
+  plus its `maxTokens`, counted as at most half the window, is more than the window
+  (`--num-ctx`, default 16384), so Ollama may cut off the start of the prompt. The run
+  goes on. Raise `--num-ctx` (a larger window needs more memory on the Ollama server),
+  shorten what the agent is given, or lower its `maxTokens`. With `--num-ctx 0` the
+  server's own window applies, and there is no warning. A window you set here
+  overrides the server's `OLLAMA_CONTEXT_LENGTH` and a model's own `num_ctx` (its
+  Modelfile): if either sets one, pass `--num-ctx 0` or the same value. Otherwise a
+  model built with a larger window, say 32768, is lowered to the window you pass
+  (16384 by default).
+- **The context window or the call timeout seems to have no effect**: a
+  `harness-core` built before this change ignores both without saying so, while the
+  run record still shows the window. After updating, rebuild it with
+  `npm run build:core` (the same advice as for `hook_fingerprint`), or pass a new one
+  with `--core`.
+- **`harness run: … must be a whole number …` (exit 2)**: `--num-ctx`,
+  `--request-timeout` or one of their variables has a value that is not valid (see
+  Options from the environment).
+- **`Custom endpoint URL is not configured. Add it in Settings…`** (exit 3): the
+  run uses the OpenAI-compatible endpoint (`LLM_PROVIDER=openai-compatible`) but has
+  no URL. This message comes from the app's engine. Set `--base-url` or
+  `HARNESS_CUSTOM_BASE_URL`.
 - **Garbled text in Windows PowerShell** (`??` instead of `▶` and `✓`, broken
   non-English text): `harness run` writes UTF-8, but Windows PowerShell reads a
   program's output with the console's code page, and its `>` saves files as

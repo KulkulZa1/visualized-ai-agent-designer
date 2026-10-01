@@ -7,7 +7,7 @@ Start here:
 
 - `QUICK_START.md` - beginner setup and first workflow.
 - `INSTALLATION.md` - source run and installer build.
-- `AIRGAPPED.md` - offline / air-gapped deployment against a local OpenAI-compatible server, and building and testing from source with an offline bundle.
+- `AIRGAPPED.md` - offline / air-gapped deployment against a local Ollama or OpenAI-compatible server, and building and testing from source with an offline bundle.
 - `PROJECT_STATUS.md` - current verified project state.
 - `DEPLOYMENT_READINESS.md` - release checklist and evidence.
 - `MARKET_RESEARCH.md` - adjacent product scan and gap map.

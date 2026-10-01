@@ -177,6 +177,7 @@ export function WorkflowInputDialog({ onStart, onCancel }: Props) {
     { value: "anthropic",    label: "Anthropic" },
     { value: "ollama",       label: "Ollama" },
     { value: "ollama-cloud", label: "Ollama Cloud" },
+    { value: "openai-compatible", label: "Custom" },
   ];
 
   const thinkOptions: { value: WorkflowRunConfig["thinkDepthOverride"]; label: string; title: string }[] = [

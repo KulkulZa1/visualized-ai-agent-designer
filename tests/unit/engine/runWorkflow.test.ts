@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import type { Edge } from "@xyflow/react";
 import { runWorkflow, type RunHost, type RunInput } from "@/engine/runWorkflow";
 import { UNVERIFIABLE_HOOK, type RunRecord } from "@/engine/runRecord";
+import { buildSystemMessage } from "@/services/model-providers/providerAdapter";
 import { hookFingerprint } from "../../fixtures/hookFingerprint.mjs";
 import { AgentRole, ToolPermission } from "@/types/agent";
 import type { AgentNode } from "@/types/workflow";
@@ -35,6 +36,7 @@ function runInput(nodes: AgentNode[], edges: Edge[] = [], overrides: Partial<Run
       llmProvider: "ollama", apiKey: "", openaiApiKey: "", ollamaApiKey: "",
       ollamaBaseUrl: "http://localhost:11434", ollamaModel: "qwen2.5-coder:7b",
       customApiUrl: "", customApiKey: "", customApiModel: "",
+      ollamaNumCtx: 16384, requestTimeoutSecs: 600,
     },
     workspacePath: "/ws",
     continueOnError: true,
@@ -1834,6 +1836,335 @@ describe("a gateway that routes differently when a revision re-runs it", () => {
     expect(counts).toEqual({ Draft: 2, Gate: 2, Fast: 2, Slow: 0, Review: 2 });
     expect(outcome.run.agents.Slow.status).toBe("skipped");
     expect(record.outputs["agent-2"]).toBe("fast-out 2");
+  });
+});
+
+/** The provider settings of a run, from the defaults of `runInput` with `overrides`. */
+const settings = (overrides: Partial<RunInput["provider"]>): Partial<RunInput> => ({
+  provider: { ...runInput([]).provider, ...overrides },
+});
+
+describe("Ollama's context window and the model call timeout", () => {
+  const unsupported = { text: "", toolCalls: [], finishReason: "tools_unsupported", nativeToolsSupported: false };
+
+  it("gives every Ollama call of the run the window and the timeout it was given", async () => {
+    const seen: Array<[string, unknown, unknown]> = [];
+    // A node with tools starts with a native turn; the model refuses, and the text protocol follows.
+    const { host } = fakeHost({
+      chat_turn: (args) => { seen.push(["chat_turn", args.numCtx, args.requestTimeoutSecs]); return unsupported; },
+      call_ollama_api: (args) => { seen.push(["call_ollama_api", args.numCtx, args.requestTimeoutSecs]); return "ok"; },
+    });
+
+    await runWorkflow(runInput([makeNode("A", [ToolPermission.ReadFile])], [],
+      settings({ ollamaNumCtx: 8192, requestTimeoutSecs: 1800 })), host);
+
+    expect(seen).toEqual([["chat_turn", 8192, 1800], ["call_ollama_api", 8192, 1800]]);
+  });
+
+  it("sends 0 as it is: the user asked for the server's own default", async () => {
+    const windows: unknown[] = [];
+    const { host } = fakeHost({ call_ollama_api: (args) => { windows.push(args.numCtx); return "ok"; } });
+
+    await runWorkflow(runInput([makeNode("A")], [], settings({ ollamaNumCtx: 0 })), host);
+
+    expect(windows).toEqual([0]);
+  });
+
+  it("sends the same window to every node of the run: Ollama reloads the model whenever it changes", async () => {
+    const windows = new Set<unknown>();
+    const { host } = fakeHost({ call_ollama_api: (args) => { windows.add(args.numCtx); return "ok"; } });
+    const a = makeNode("A");
+    const b = makeNode("B");
+    b.data.maxTokens = 4096; // a different reply length does not change the window
+
+    await runWorkflow(runInput([a, b], [{ id: "a-b", source: "A", target: "B" }]), host);
+
+    expect([...windows]).toEqual([16384]);
+  });
+
+  it("gives a Custom endpoint's calls the timeout, and no window: only Ollama truncates silently", async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const { host } = fakeHost({
+      chat_turn: (args) => { calls.push(args); return unsupported; },
+      call_openai_api: (args) => { calls.push(args); return "ok"; },
+    });
+
+    await runWorkflow(runInput([makeNode("A", [ToolPermission.ReadFile])], [], settings({
+      llmProvider: "openai-compatible", customApiUrl: "http://localhost:8080/v1", customApiModel: "served",
+      requestTimeoutSecs: 900,
+    })), host);
+
+    expect(calls.map((c) => c.requestTimeoutSecs)).toEqual([900, 900]);
+    expect(calls.every((c) => !("numCtx" in c))).toBe(true);
+  });
+
+  it("gives the billing fallback to local Ollama the window too", async () => {
+    const windows: unknown[] = [];
+    const { host } = fakeHost({
+      call_openai_api: () => { throw new Error("insufficient_quota: you exceeded your current quota"); },
+      call_ollama_api: (args) => { windows.push(args.numCtx); return "ok"; },
+    });
+    const node = makeNode("A");
+    node.data.model = "gpt-4o-mini";
+
+    await runWorkflow(runInput([node], [], settings({ llmProvider: "openai", openaiApiKey: "sk-test", ollamaNumCtx: 6000 })), host);
+
+    expect(windows).toEqual([6000]);
+  });
+});
+
+describe("the context window warning", () => {
+  const warnings = (audit: AuditEntry[]) => audit.filter((e) => e.action === "context_window");
+  /** The warning's whole text, for agent `name`: its prompt, the most it may reply with, and the window. */
+  const warning = (name: string, prompt: number, reply: number, window: number) =>
+    `⚠ ${name}: its prompt is about ${prompt.toLocaleString()} tokens and it may reply with up to ${reply.toLocaleString()} ` +
+    `tokens, but Ollama's context window is ${window.toLocaleString()} tokens, so Ollama may cut off the start of the prompt. ` +
+    "Raise the context window (Settings → Ollama context window; harness run: --num-ctx).";
+  /** Runs `nodes` with the task `task`; returns the audit and the outcome. */
+  async function runTask(nodes: AgentNode[], overrides: Partial<RunInput["provider"]>, task: string, edges: Edge[] = [],
+    handlers: Record<string, Handler> = {}) {
+    const { host, log } = fakeHost(handlers);
+    const input = runInput(nodes, edges, settings(overrides));
+    input.config = { ...input.config, userInput: task };
+    const outcome = await runWorkflow(input, host);
+    return { outcome, log, warnings: warnings(log.audit) };
+  }
+  /** Runs `nodes` with a task of `taskTokens` tokens (chars / 4). */
+  const run = (nodes: AgentNode[], overrides: Partial<RunInput["provider"]>, taskTokens = 3000, edges: Edge[] = [],
+    handlers: Record<string, Handler> = {}) => runTask(nodes, overrides, "x".repeat(taskTokens * 4), edges, handlers);
+  // The first prompt of a lone agent is its system message and "USER TASK:\n" and the task; the engine's
+  // estimate is that text's length / 4, rounded up. So a task of the right length gives a prompt of exactly `tokens`.
+  const systemLength = (name: string) => buildSystemMessage({
+    agentName: name, role: AgentRole.Worker, workflowName: "W", tools: [], memoryRead: [], memoryWrite: [], promptContent: "",
+  }).length;
+  const promptOf = (name: string, tokens: number) => "x".repeat(4 * tokens - systemLength(name) - "USER TASK:\n".length);
+  /** Runs the lone agent `node` (named "A") whose first prompt is exactly `tokens`. */
+  const runPrompt = (node: AgentNode, overrides: Partial<RunInput["provider"]>, tokens: number) =>
+    runTask([node], overrides, promptOf(node.id, tokens));
+  const withMaxTokens = (maxTokens: number) => {
+    const node = makeNode("A");
+    node.data.maxTokens = maxTokens;
+    return node;
+  };
+
+  it("says that the prompt does not fit the window: a warning, not a failure, in words that name the agent and the three numbers", async () => {
+    // The reply may take 1,024 tokens, which is half of a 2,048 window: 3,000 + 1,024 is over it.
+    const { outcome, warnings } = await runPrompt(makeNode("A"), { ollamaNumCtx: 2048 }, 3000);
+
+    expect(outcome.started && outcome.run.agents.A.status).toBe("done");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({ action: "context_window", agentId: "A", warning: true, success: true });
+    expect(warnings[0].details).toBe(warning("A", 3000, 1024, 2048));
+  });
+
+  it("does not blame the prompt for a generous Max tokens alone: 16,384 against the default window of 16,384, with a short prompt", async () => {
+    // The shipped examples give some agents 16384. It is a ceiling for the reply, not its size.
+    const { outcome, warnings } = await run([withMaxTokens(16384)], { ollamaNumCtx: 16384 }, 100);
+
+    expect(outcome.started && outcome.run.agents.A.status).toBe("done");
+    expect(warnings).toEqual([]);
+  });
+
+  it("says nothing for the Max tokens the shipped examples use, at the default window, with a short prompt", async () => {
+    for (const maxTokens of [16384, 12288, 8192, 4096, 0]) {
+      expect((await run([withMaxTokens(maxTokens)], { ollamaNumCtx: 16384 }, 300)).warnings, String(maxTokens)).toEqual([]);
+    }
+  });
+
+  it("counts a reply as at most half the window: with 16,384 Max tokens a prompt of half the window fits and one over half does not", async () => {
+    const node = withMaxTokens(16384);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 8192)).warnings).toEqual([]);
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 8193);
+    expect(over.warnings).toHaveLength(1);
+    // It says what the agent may reply with (its Max tokens), not the half the check counts.
+    expect(over.warnings[0].details).toBe(warning("A", 8193, 16384, 16384));
+  });
+
+  it("rounds half of an odd window down", async () => {
+    const node = withMaxTokens(20000);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 10001 }, 5001)).warnings).toEqual([]); // 5,001 + 5,000 fits
+    expect((await runPrompt(node, { ollamaNumCtx: 10001 }, 5002)).warnings).toHaveLength(1);
+  });
+
+  it("counts the whole reply when it is less than half the window: a prompt one token over what is left warns, one that just fits does not", async () => {
+    const node = withMaxTokens(2048);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14335)).warnings).toEqual([]); // under
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14336)).warnings).toEqual([]); // 14,336 + 2,048 just fits
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 14337);
+    expect(over.warnings).toHaveLength(1);
+    expect(over.warnings[0].details).toBe(warning("A", 14337, 2048, 16384));
+  });
+
+  it("uses 2,048 for an agent with no Max tokens", async () => {
+    const node = withMaxTokens(0);
+
+    expect((await runPrompt(node, { ollamaNumCtx: 16384 }, 14336)).warnings).toEqual([]);
+    const over = await runPrompt(node, { ollamaNumCtx: 16384 }, 14337);
+    expect(over.warnings.map((e) => e.details)).toEqual([warning("A", 14337, 2048, 16384)]);
+  });
+
+  it("warns once per node for the run, though a revision runs the node again", async () => {
+    let reviews = 0;
+    const { warnings, log } = await run(
+      [makeNode("Draft"), makeNode("Review")],
+      { ollamaNumCtx: 2048 }, 3000,
+      [{ id: "d-r", source: "Draft", target: "Review" },
+        { id: "fb", source: "Review", target: "Draft", data: { edgeKind: "feedback", label: "revise" } }],
+      // The draft is long, so the reviewer's prompt does not fit either.
+      { call_ollama_api: (args) => (who(args) === "Review" ? (++reviews === 1 ? "REVISE" : "PASS") : "d".repeat(12000)) },
+    );
+
+    expect(reviews).toBe(2); // the revision did run them again
+    for (const agent of ["Draft", "Review"]) {
+      expect(log.audit.filter((e) => e.action === "agent_started" && e.agentId === agent)).toHaveLength(2);
+    }
+    expect(warnings.map((e) => e.agentId).sort()).toEqual(["Draft", "Review"]);
+  });
+
+  it("says nothing when the prompt fits", async () => {
+    expect((await run([makeNode("A")], { ollamaNumCtx: 16384 }, 100)).warnings).toHaveLength(0);
+  });
+
+  it("says nothing for 0: no window is sent, so the server's own default stands", async () => {
+    expect((await run([makeNode("A")], { ollamaNumCtx: 0 })).warnings).toHaveLength(0);
+  });
+
+  it("warns for a server on the LAN, which the run types as Ollama Cloud, but not for ollama.com, which is sent no window", async () => {
+    const lan = await run([makeNode("A")], { ollamaBaseUrl: "http://192.168.1.20:11434", ollamaNumCtx: 2048 });
+    expect(lan.warnings).toHaveLength(1);
+
+    const cloud = await run([makeNode("A")], {
+      llmProvider: "ollama-cloud", ollamaBaseUrl: "https://ollama.com/api", ollamaApiKey: "key", ollamaNumCtx: 2048,
+    });
+    expect(cloud.outcome.started && cloud.outcome.run.agents.A.status).toBe("done");
+    expect(cloud.warnings).toHaveLength(0);
+  });
+
+  it("says nothing for providers that are not Ollama: a Custom endpoint has no window to set", async () => {
+    const custom = await run([makeNode("A")], {
+      llmProvider: "openai-compatible", customApiUrl: "http://localhost:8080/v1", customApiModel: "served", ollamaNumCtx: 1,
+    }, 3000, [], { call_openai_api: () => "ok" });
+
+    expect(custom.outcome.started && custom.outcome.run.agents.A.status).toBe("done");
+    expect(custom.warnings).toHaveLength(0);
+  });
+});
+
+describe("the Custom endpoint's model", () => {
+  const custom = (overrides: Partial<RunInput["provider"]> = {}) => settings({
+    llmProvider: "openai-compatible", customApiUrl: "http://localhost:8080/v1", customApiModel: "", ...overrides,
+  });
+  const nodeOn = (id: string, model: string, role = AgentRole.Worker) => {
+    const node = makeNode(id);
+    node.data.model = model;
+    node.data.role = role;
+    return node;
+  };
+  /** Runs `nodes` on the Custom endpoint; returns the models the preflight probed and the calls sent. */
+  async function run(nodes: AgentNode[], provider: Partial<RunInput["provider"]> = {}, edges: Edge[] = []) {
+    const probed: unknown[] = [];
+    const sent: Array<[string, unknown]> = [];
+    const { host } = fakeHost({
+      check_provider_health: (args) => {
+        probed.push(args.model);
+        return { ok: true, provider: args.provider, latency_ms: 1, message: "ok", model_available: true, pull_command: null };
+      },
+      call_openai_api: (args) => { sent.push([who(args), args.model]); return "ok"; },
+    });
+    const outcome = await runWorkflow(runInput(nodes, edges, custom(provider)), host);
+    return { outcome, probed, sent };
+  }
+
+  it("probes the model of the first agent, and each agent is sent its own, when there is no Custom model setting", async () => {
+    const memory = nodeOn("Notes", "", AgentRole.Memory);
+    const { outcome, probed, sent } = await run(
+      [memory, nodeOn("A", "local-a"), nodeOn("B", "local-b")],
+      {}, [{ id: "a-b", source: "A", target: "B" }]);
+
+    expect(outcome.started).toBe(true);
+    expect(probed).toEqual(["local-a"]); // not the memory node's (it never calls a model), and not one of ours
+    expect(sent).toEqual([["A", "local-a"], ["B", "local-b"]]);
+  });
+
+  it("probes the Custom model setting when there is one, which every agent is sent instead of its own", async () => {
+    const { probed, sent } = await run(
+      [nodeOn("A", "local-a"), nodeOn("B", "local-b")], { customApiModel: "served" },
+      [{ id: "a-b", source: "A", target: "B" }]);
+
+    expect(probed).toEqual(["served"]);
+    expect(sent).toEqual([["A", "served"], ["B", "served"]]);
+  });
+
+  it("probes exactly the model it then sends to the first agent", async () => {
+    for (const setting of ["", "served"]) {
+      const { probed, sent } = await run([nodeOn("A", "local-a")], { customApiModel: setting });
+      expect(probed).toEqual([sent[0][1]]);
+    }
+  });
+
+  it("asks for no hosted model's name: with no model anywhere, the probe gets none and the backend says so", async () => {
+    const probed: unknown[] = [];
+    const message = "No model name is set, so there is nothing to test.";
+    const { host, commands } = fakeHost({
+      check_provider_health: (args) => {
+        probed.push(args.model);
+        return { ok: false, provider: args.provider, latency_ms: 0, message, model_available: false, pull_command: null };
+      },
+      call_openai_api: () => "ok",
+    });
+
+    const outcome = await runWorkflow(runInput([nodeOn("A", "")], [], custom()), host);
+
+    expect(outcome).toEqual({ started: false, error: message });
+    expect(probed).toEqual([""]);
+    expect(probed).not.toContain("gpt-4o-mini");
+    expect(commands).not.toContain("call_openai_api");
+  });
+});
+
+describe("the run record's provider block", () => {
+  it("records Ollama's context window, and leaves out keys and the model call timeout", async () => {
+    let record: RunRecord | undefined;
+    const { host } = fakeHost({}, { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
+
+    await runWorkflow(runInput([makeNode("A")], [], settings({
+      ollamaNumCtx: 8192, requestTimeoutSecs: 1800, apiKey: "sk-ant-x", customApiKey: "k",
+    })), host);
+
+    expect(record?.provider).toEqual({
+      llmProvider: "ollama", ollamaBaseUrl: "http://localhost:11434", ollamaModel: "qwen2.5-coder:7b",
+      customApiUrl: "", customApiModel: "", ollamaNumCtx: 8192,
+    });
+  });
+
+  it("records 0 as 0: the user asked for the server's default", async () => {
+    let record: RunRecord | undefined;
+    const { host } = fakeHost({}, { saveRun: async (r) => { record = JSON.parse(JSON.stringify(r)); } });
+
+    await runWorkflow(runInput([makeNode("A")], [], settings({ ollamaNumCtx: 0 })), host);
+
+    expect(record?.provider.ollamaNumCtx).toBe(0);
+  });
+
+  it("does not compare it on resume: a finished node is reused whatever the window was", async () => {
+    let first: RunRecord | undefined;
+    const a = makeNode("A");
+    const b = makeNode("B");
+    const edges: Edge[] = [{ id: "a-b", source: "A", target: "B" }];
+    const failB = (args: Record<string, unknown>) => (who(args) === "B" ? Promise.reject(new Error("model crashed")) : "first-A");
+    await runWorkflow(runInput([a, b], edges, settings({ ollamaNumCtx: 4096 })),
+      fakeHost({ call_ollama_api: failB }, { saveRun: async (r) => { first = JSON.parse(JSON.stringify(r)); } }).host);
+    expect(first?.provider.ollamaNumCtx).toBe(4096);
+
+    const calls: string[] = [];
+    const { host } = fakeHost({ call_ollama_api: (args) => { calls.push(who(args)); return "second"; } });
+    const outcome = await runWorkflow(runInput([a, b], edges, { ...settings({ ollamaNumCtx: 32768 }), resume: first }), host);
+
+    expect(outcome.started && outcome.run.status).toBe("done");
+    expect(calls).toEqual(["B"]); // A was reused
   });
 });
 
