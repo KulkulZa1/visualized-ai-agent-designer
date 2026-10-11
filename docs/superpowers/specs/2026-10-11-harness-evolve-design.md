@@ -433,8 +433,10 @@ Round t, after `loop.py: round`:
 4. **Draft each variant** v = A, B, … in turn.
    - **A reserved slot:** the last `m_draft` variants hold one when `σ_t` = 1 and
      untried components exist.
-   - **The cycle** (§4.3): proposer → parse → apply → checks → precheck → critic →
-     re-tag → reserved-slot check, with repair.
+   - **The cycle** (§4.3): proposer → parse → apply → the checks (the budget, the
+     result, the reserved slot judged by the operations) → precheck → critic, with
+     repair. The slot is known before any model reads the change, so a slot that is
+     not honoured costs no critic run, and it counts as `invalid_proposal`.
    - **Smoke.** Then the candidate file is written, and when the task set has
      smoke tasks, `harness eval --split smoke -k 1` runs. **Smoke fails** if any
      smoke trial is missing or its run ended in error (`runStatus: error`). It is

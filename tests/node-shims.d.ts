@@ -77,6 +77,7 @@ declare module "node:fs" {
   export function statSync(path: string): Stats;
   export function symlinkSync(target: string, path: string, type?: string): void;
   export function writeFileSync(path: string, data: string, encoding?: string): void;
+  export function writeFileSync(path: string, data: string, options: { flag?: string; encoding?: string }): void;
 }
 
 declare module "node:os" {
@@ -108,6 +109,8 @@ declare const __dirname: string;
 declare const process: {
   cwd(): string;
   getuid?(): number;
+  pid: number;
+  kill(pid: number, signal?: number | string): true;
   execPath: string;
   env: Record<string, string | undefined>;
   platform: string;
