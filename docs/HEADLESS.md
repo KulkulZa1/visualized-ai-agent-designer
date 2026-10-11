@@ -99,7 +99,8 @@ record never contains a key.
 OpenAI key: it gets `HARNESS_CUSTOM_API_KEY` or nothing. `harness-core` also
 reads `LLM_PROVIDER`, `OLLAMA_BASE_URL` and `OLLAMA_MODEL`, as the app does.
 
-Agent commands and hooks run without these keys in their environment.
+Agent commands, hooks and `harness eval`'s scorer commands run without these keys
+in their environment, `HARNESS_CUSTOM_API_KEY` included.
 
 ## Options from the environment
 
@@ -338,7 +339,8 @@ The record holds:
   OpenAI-compatible run given `--num-ctx 64` records 64) and a run on ollama.com
   (which gets none), and 0 means none was asked for. A resumed run records the value
   it was resumed with. A record saved before this field has none;
-- each agent's status, output, error, times, model, token estimate, revision,
+- each agent's status, output, error, times, model, token estimate, `usage`,
+  revision,
   helpers and definition hash;
 - the text each agent passed on, the memory, the gateway routes, the files the
   run changed, and the audit;
@@ -404,6 +406,19 @@ master and every pull request, on Linux:
   preflight (exit 3).
 
 The job has read-only permissions (`contents: read`) and uses Node 22.
+
+## Scoring a workflow
+
+`harness eval <tasks.yaml>` runs a workflow on a set of tasks, several times each, in fresh
+copies of each task's folder, and scores every run with checks you write. It writes a report
+with a score and the tokens the runs used. It takes the same provider options, keys and
+`--allow-command` as `harness run`. See `docs/EVAL.md`.
+
+**Token counts.** A run record's `usage` per agent is `{ input, output, calls, callsWithoutUsage }`:
+- the tokens the providers reported for all of the agent's model calls, summed;
+- how many calls came back without counts.
+
+An older `harness-core` reports none; rebuild it with `npm run build:core`.
 
 ## Limits
 

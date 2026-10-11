@@ -17,6 +17,18 @@ export interface SubAgentRecord {
   toolCalls?: number;
 }
 
+/** The tokens a node's model calls used, as the providers reported them (not an estimate), summed over every
+ *  call the node made: its own turns and text calls, the summaries that compact its conversation, its helpers'
+ *  calls, and every attempt of it (a revision runs the node again). A call whose reply carried no counts (a
+ *  local server may leave them out) is in `calls` and `callsWithoutUsage`, and adds nothing to `input` and
+ *  `output`: with `callsWithoutUsage > 0` they are a lower bound, not the node's total. */
+export interface NodeUsage {
+  input: number;
+  output: number;
+  calls: number;
+  callsWithoutUsage: number;
+}
+
 export interface AgentRun {
   agentId: string;
   agentName: string;
@@ -29,6 +41,9 @@ export interface AgentRun {
   providerUsed?: string;
   modelUsed?: string;
   tokenEstimate?: number;
+  /** Set on an agent node that ran (done, failed or stopped), and kept on one a gateway then dropped: its calls were
+   *  paid for. A memory or hook node makes no model call. Unlike `tokenEstimate`, it adds up the node's revision attempts. */
+  usage?: NodeUsage;
   subAgents?: SubAgentRecord[];
   /** Revision round the latest output belongs to (feedback loops); unset for the first run. */
   revision?: number;

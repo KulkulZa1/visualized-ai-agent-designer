@@ -669,6 +669,49 @@ mod tests {
         assert_eq!(reply["finishReason"], "stop");
     }
 
+    #[tokio::test]
+    async fn answers_a_turn_with_the_usage_its_provider_reported_and_with_none_when_it_sent_none() {
+        let with_counts = r#"{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop","prompt_eval_count":26,"eval_count":298}"#;
+        let without = r#"{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop"}"#;
+        for (ollama_reply, usage) in [(with_counts, Some(json!({"input": 26, "output": 298}))), (without, None)] {
+            let (base_url, _request) = spawn_mock_ollama_server(200, ollama_reply);
+            let args = json!({
+                "system": "You are A.", "messages": [{"role": "user", "text": "Say hi"}], "tools": [],
+                "maxTokens": 64, "reasoningEffort": null, "baseUrl": base_url, "onDelta": null,
+                "provider": "ollama", "model": "qwen2.5-coder:7b", "apiKey": ""
+            });
+
+            let reply = dispatch("chat_turn".into(), args).await.unwrap();
+
+            assert_eq!(reply["text"], "hi");
+            // Left out of the reply, not null, when the provider sent no counts.
+            assert_eq!(reply.get("usage"), usage.as_ref(), "{reply}");
+        }
+    }
+
+    #[tokio::test]
+    async fn answers_a_text_call_with_the_text_and_the_usage_if_there_is_one() {
+        let args = |cmd: &str, base_url: &str| match cmd {
+            "call_ollama_api" => json!({"model": "qwen2.5-coder:7b", "system": "s", "userMessage": "u",
+                "baseUrl": base_url, "apiKey": "", "maxTokens": 64}),
+            _ => json!({"model": "local-model", "system": "s", "userMessage": "u", "apiKey": "", "maxTokens": 64,
+                "baseUrl": base_url, "reasoningEffort": null}),
+        };
+        let ollama_counted = r#"{"message":{"content":"hi"},"prompt_eval_count":26,"eval_count":298}"#;
+        let openai_counted = r#"{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#;
+        for (cmd, provider_reply, expected) in [
+            ("call_ollama_api", ollama_counted, json!({"text": "hi", "usage": {"input": 26, "output": 298}})),
+            ("call_ollama_api", r#"{"message":{"content":"hi"}}"#, json!({"text": "hi"})),
+            ("call_openai_api", openai_counted, json!({"text": "hi", "usage": {"input": 12, "output": 3}})),
+            ("call_openai_api", r#"{"choices":[{"message":{"content":"hi"}}]}"#, json!({"text": "hi"})),
+        ] {
+            let (base_url, _request) = spawn_mock_ollama_server(200, provider_reply);
+
+            // An object, not a bare string: providerAdapter.ts reads either.
+            assert_eq!(dispatch(cmd.into(), args(cmd, &base_url)).await, Ok(expected), "{cmd}: {provider_reply}");
+        }
+    }
+
     /// The JSON body a call sent the mock Ollama server.
     fn sent_body(request: &str) -> Value {
         serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap()

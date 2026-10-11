@@ -1,0 +1,40 @@
+# research-synthesis.tasks.yaml: an example task set for `harness eval`.
+#
+# It shows the format; it is not a benchmark. The checks are loose on purpose:
+# they ask for the report's shape and for a fact from the task's notes, not
+# for good judgment. The workflow runs on Ollama, so no key is needed:
+#
+#   node cli/harness.mjs eval examples/evals/research-synthesis.tasks.yaml \
+#     --provider ollama --model qwen2.5-coder:7b -k 3
+#
+# Each trial starts from a fresh copy of the task's `workspace`, where the
+# analysts' read_file and list_files tools find the notes. See docs/HEADLESS.md
+# (harness eval) for every field.
+version: 1
+name: research-synthesis-demo
+workflow: ../research-synthesis.harness.yaml
+trials: 3
+tasks:
+  - id: four-day-week
+    smoke: true
+    task: >
+      Should a 40-person software company move to a four-day work week?
+      Read notes.md in this folder first.
+    workspace: fixtures/four-day-week
+    scorers:
+      - name: report-shape
+        output: { contains: ["## Executive Summary", "## Recommendations"] }
+      - name: uses-the-pilot
+        output: { matches: ["[Pp]ilot"] }
+
+  - id: office-return
+    split: heldout
+    task: >
+      Should a team that has worked remotely for three years return to the
+      office three days a week? Read notes.md in this folder first.
+    workspace: fixtures/office-return
+    scorers:
+      - name: report-shape
+        output: { contains: ["## Executive Summary", "## Recommendations"] }
+      - name: uses-the-survey
+        output: { matches: ["[Ss]urvey"] }

@@ -43,11 +43,26 @@ export interface ProviderCallParams {
   requestTimeoutSecs?: number;
 }
 
+/** The tokens a provider says one call used: the counts in its response, not an estimate. */
+export interface ProviderUsage {
+  input: number;
+  output: number;
+}
+
+/** What the text-protocol commands (call_openai_api, call_anthropic_api, call_claude_api, call_ollama_api) answer:
+ *  `{ text, usage? }` from a current harness-core or app, and a bare string from an older one, from the VS Code
+ *  extension's own `invoke` and from test mocks. A string means no usage. */
+export type TextReply = string | { text: string; usage?: ProviderUsage | null };
+
 export interface ProviderCallResult {
   text: string;
   /** True when the primary hosted call failed with a billing error and
    *  the response came from the Ollama fallback. */
   usedOllamaFallback: boolean;
+  /** What the call used, as the provider reported it; null when the reply carried no counts (an older
+   *  harness-core, or a local server that leaves them out). After a billing fallback: the fallback call's.
+   *  `callProvider` always sets it. */
+  usage?: ProviderUsage | null;
 }
 
 export interface ProviderHealth {
@@ -139,6 +154,26 @@ function timeoutArg({ requestTimeoutSecs }: Pick<ProviderCallParams, "requestTim
   return requestTimeoutSecs === undefined ? {} : { requestTimeoutSecs };
 }
 
+// ── Token usage ───────────────────────────────────────────────────────────────
+
+/** A token count: a whole number, 0 or more. */
+export const isTokenCount = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
+
+/** The counts a reply carries, when it carries a pair of them. Anything else is no usage (null), never an
+ *  error: a local server may leave the counts out, and a reply from an older harness-core, the VS Code
+ *  extension or a test mock has none. */
+export function readProviderUsage(value: unknown): ProviderUsage | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { input, output } = value as Record<string, unknown>;
+  return isTokenCount(input) && isTokenCount(output) ? { input, output } : null;
+}
+
+/** A text-protocol reply, from either shape. */
+function readTextReply(reply: TextReply): { text: string; usage: ProviderUsage | null } {
+  if (typeof reply === "object" && reply !== null) return { text: reply.text, usage: readProviderUsage(reply.usage) };
+  return { text: reply, usage: null };
+}
+
 // ── Core provider call ────────────────────────────────────────────────────────
 
 /**
@@ -146,7 +181,7 @@ function timeoutArg({ requestTimeoutSecs }: Pick<ProviderCallParams, "requestTim
  *
  * @param params     Provider and message params.
  * @param invokeFn   Tauri `invoke` (or a compatible mock for tests / CLI / VS Code).
- * @returns          The raw text response and a fallback flag.
+ * @returns          The raw text response, a fallback flag and the provider's token counts.
  * @throws           When the call fails and no Ollama fallback is available.
  */
 export async function callProvider(
@@ -164,8 +199,8 @@ export async function callProvider(
   // For gemma4:31b-cloud, the caller sets ollamaModel = "gemma4-31b:cloud" (or "gemma4:31b-cloud");
   // resolveModel normalises the dash-form alias to the canonical colon-form.
   // The Rust normalize_ollama_model() applies the same normalisation as a second gate.
-  const callOllama = (): Promise<string> =>
-    invokeFn<string>("call_ollama_api", {
+  const callOllama = async () =>
+    readTextReply(await invokeFn<TextReply>("call_ollama_api", {
       model: resolveModel(ollamaModel),
       system: systemMsg,
       userMessage: userMsg,
@@ -174,11 +209,10 @@ export async function callProvider(
       maxTokens,
       ...numCtxArg(params),
       ...timeout,
-    });
+    }));
 
   if (provider === "ollama" || provider === "ollama-cloud") {
-    const text = await callOllama();
-    return { text, usedOllamaFallback: false };
+    return { ...(await callOllama()), usedOllamaFallback: false };
   }
 
   // Custom OpenAI-compatible endpoint — use OpenAI wire format with a different base URL
@@ -186,7 +220,7 @@ export async function callProvider(
     if (!customBaseUrl?.trim()) {
       throw new Error("Custom endpoint URL is not configured. Add it in Settings → Custom Endpoint.");
     }
-    const text = await invokeFn<string>("call_openai_api", {
+    const reply = await invokeFn<TextReply>("call_openai_api", {
       model,
       system: systemMsg,
       userMessage: userMsg,
@@ -196,7 +230,7 @@ export async function callProvider(
       reasoningEffort: null,
       ...timeout,
     });
-    return { text, usedOllamaFallback: false };
+    return { ...readTextReply(reply), usedOllamaFallback: false };
   }
 
   if (!apiKey && requiresKey) {
@@ -206,7 +240,7 @@ export async function callProvider(
   }
 
   try {
-    const text = await invokeFn<string>(
+    const reply = await invokeFn<TextReply>(
       provider === "openai" ? "call_openai_api" : "call_claude_api",
       {
         model: provider === "anthropic" ? toAnthropicModelId(model) : model,
@@ -218,15 +252,16 @@ export async function callProvider(
         ...timeout,
       }
     );
-    return { text, usedOllamaFallback: false };
+    return { ...readTextReply(reply), usedOllamaFallback: false };
   } catch (primaryErr) {
     const errStr = String(primaryErr);
     // Only fall back to a *local* Ollama server: silently re-sending the prompt to a
     // remote/cloud endpoint the user did not choose for this call would be a hidden
     // cloud call.
     if (shouldFallbackToOllama(errStr) && ollamaBaseUrl && !isRemoteOllamaUrl(ollamaBaseUrl)) {
-      const text = (await callOllama()) + "\n[ran on Ollama fallback]";
-      return { text, usedOllamaFallback: true };
+      // The failed call used no counted tokens; the fallback is a model call of its own, and its usage is the result's.
+      const fallback = await callOllama();
+      return { text: fallback.text + "\n[ran on Ollama fallback]", usage: fallback.usage, usedOllamaFallback: true };
     }
     throw primaryErr;
   }
@@ -259,6 +294,9 @@ export interface ChatReply {
   finishReason: string;
   /** False when the model or server refused the tool definitions. */
   nativeToolsSupported: boolean;
+  /** What the turn used, as the provider reported it. Left out by an older harness-core, by a server that
+   *  sends no counts, and on a streamed OpenAI-compatible reply (the request does not ask for them). */
+  usage?: ProviderUsage | null;
 }
 
 export interface ChatTurnParams extends Omit<ProviderCallParams, "userMsg"> {

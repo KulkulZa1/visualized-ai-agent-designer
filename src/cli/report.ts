@@ -7,6 +7,7 @@ import type { WorkflowGraph } from "@/engine/workflowGraph";
 import { lineCounts } from "@/services/execution/changeLog";
 import { AgentRole } from "@/types/agent";
 import type { AgentRun, AgentStatus, WorkflowRun } from "@/types/execution";
+import type { AgentNode } from "@/types/workflow";
 
 export type Write = (line: string) => void;
 
@@ -26,6 +27,26 @@ const RESULT: Record<WorkflowRun["status"], string> = {
 
 const seconds = (ms: number) => `${(ms / 1000).toFixed(1)} s`;
 
+/** The nodes whose output is the run's result: the agents no other agent runs after (memory and
+ *  hook nodes store or check; they don't answer). `harness eval`'s output scorer reads the same. */
+export function finalNodes(graph: WorkflowGraph): AgentNode[] {
+  const agentIds = new Set(graph.nodes
+    .filter((n) => n.data.role !== AgentRole.Memory && n.data.role !== AgentRole.Hook)
+    .map((n) => n.id));
+  const hasNext = new Set(graph.edges
+    .filter((e) => !isFeedbackEdge(e) && agentIds.has(e.target))
+    .map((e) => e.source));
+  return graph.nodes.filter((n) => agentIds.has(n.id) && !hasNext.has(n.id));
+}
+
+/** The final nodes' outputs, in node order. A final agent with no output (it failed, was skipped or
+ *  said nothing) is not in the list. */
+export function finalOutputs(graph: WorkflowGraph, run: WorkflowRun): Array<{ id: string; name: string; output: string }> {
+  return finalNodes(graph)
+    .filter((n) => run.agents[n.id]?.output)
+    .map((n) => ({ id: n.id, name: n.data.name, output: run.agents[n.id].output ?? "" }));
+}
+
 function endLine(agent: AgentRun, durationMs: number | undefined): string {
   switch (agent.status) {
     case "done": return `✓ ${agent.agentName} done${durationMs === undefined ? "" : ` (${seconds(durationMs)})`}`;
@@ -38,15 +59,6 @@ function endLine(agent: AgentRun, durationMs: number | undefined): string {
 export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, err: Write): Reporter {
   const emit = (event: Record<string, unknown>) => out(JSON.stringify(event));
   const name = (nodeId: string) => graph.nodes.find((n) => n.id === nodeId)?.data.name ?? nodeId;
-  // The run's result is the output of the agents no other agent runs after
-  // (memory and hook nodes store or check; they don't answer).
-  const agentIds = new Set(graph.nodes
-    .filter((n) => n.data.role !== AgentRole.Memory && n.data.role !== AgentRole.Hook)
-    .map((n) => n.id));
-  const hasNext = new Set(graph.edges
-    .filter((e) => !isFeedbackEdge(e) && agentIds.has(e.target))
-    .map((e) => e.source));
-  const finalNodes = graph.nodes.filter((n) => agentIds.has(n.id) && !hasNext.has(n.id));
   const agents: Record<string, AgentRun> = {};
   // Agents a resume reused: their saved result is not news.
   const reusedIds = new Set<string>();
@@ -109,9 +121,7 @@ export function createReporter(graph: WorkflowGraph, json: boolean, out: Write, 
     const changes = (run.changes ?? []).map((c) => ({
       path: c.path, created: c.before === null, ...lineCounts(c.before, c.after),
     }));
-    const outputs = finalNodes
-      .filter((n) => run.agents[n.id]?.output)
-      .map((n) => ({ id: n.id, name: n.data.name, output: run.agents[n.id].output ?? "" }));
+    const outputs = finalOutputs(graph, run);
     if (json) {
       emit({
         type: "run_finished", runId: run.id, status: run.status, durationMs: elapsedMs,

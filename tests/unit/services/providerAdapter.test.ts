@@ -15,6 +15,7 @@ import {
   estimateTokens,
   MODEL_ALIASES,
   REASONING_EFFORT,
+  readProviderUsage,
   type ProviderCallParams,
   type InvokeFn,
 } from "@/services/model-providers/providerAdapter";
@@ -407,5 +408,129 @@ describe("Ollama's context window and the model call timeout", () => {
       expect(args.requestTimeoutSecs, overrides.provider).toBe(900);
       expect(args, overrides.provider).not.toHaveProperty("numCtx");
     }
+  });
+});
+
+// ── Token usage ───────────────────────────────────────────────────────────────
+
+describe("readProviderUsage", () => {
+  it("reads a pair of whole token counts, 0 included", () => {
+    expect(readProviderUsage({ input: 120, output: 30 })).toEqual({ input: 120, output: 30 });
+    expect(readProviderUsage({ input: 0, output: 0 })).toEqual({ input: 0, output: 0 });
+    // Only the two counts: anything else the object holds is not carried on.
+    expect(readProviderUsage({ input: 1, output: 2, total: 3 })).toEqual({ input: 1, output: 2 });
+  });
+
+  it("is null for anything else: nothing, a missing count, a count that is not a whole number or is negative", () => {
+    for (const value of [
+      undefined, null, 5, "120", [], [120, 30], {}, { input: 120 }, { output: 30 }, { input: "120", output: 30 },
+      { input: 120.5, output: 30 }, { input: -1, output: 30 }, { input: 120, output: null }, { input: NaN, output: 30 },
+      { input: Infinity, output: 30 }, { input: 2 ** 60, output: 30 },
+    ]) {
+      expect(readProviderUsage(value), JSON.stringify(value)).toBeNull();
+    }
+  });
+});
+
+describe("callProvider — token usage", () => {
+  const usage = { input: 120, output: 30 };
+  const paths = [
+    ["openai", "call_openai_api", {}],
+    ["anthropic", "call_claude_api", { model: "claude-haiku-4.5" }],
+    ["ollama", "call_ollama_api", {}],
+    ["ollama-cloud", "call_ollama_api", { ollamaBaseUrl: "http://192.168.1.20:11434" }],
+    ["openai-compatible", "call_openai_api", { customBaseUrl: "http://localhost:8080/v1" }],
+  ] as const;
+
+  it("takes the text and the usage from the object a current harness-core or app answers, on every path", async () => {
+    for (const [provider, command, extra] of paths) {
+      const spy = vi.fn().mockResolvedValue({ text: `from ${provider}`, usage });
+
+      const res = await callProvider(makeParams({ provider, ...extra }), spy as unknown as InvokeFn);
+
+      expect(res, provider).toEqual({ text: `from ${provider}`, usage, usedOllamaFallback: false });
+      expect(spy).toHaveBeenCalledWith(command, expect.anything());
+    }
+  });
+
+  it("takes a plain string as a reply with no usage: that is what an older harness-core, the VS Code extension's invoke and test mocks answer", async () => {
+    for (const [provider, , extra] of paths) {
+      const spy = vi.fn().mockResolvedValue(`from ${provider}`);
+
+      const res = await callProvider(makeParams({ provider, ...extra }), spy as unknown as InvokeFn);
+
+      expect(res, provider).toEqual({ text: `from ${provider}`, usage: null, usedOllamaFallback: false });
+    }
+  });
+
+  it("has no usage for an object reply that leaves it out or whose usage is not a pair of token counts, and still has the text", async () => {
+    for (const reply of [
+      { text: "hi" }, { text: "hi", usage: null }, { text: "hi", usage: {} }, { text: "hi", usage: { input: 12 } },
+      { text: "hi", usage: { input: "12", output: 3 } }, { text: "hi", usage: { input: -12, output: 3 } },
+    ]) {
+      const spy = vi.fn().mockResolvedValue(reply);
+
+      const res = await callProvider(makeParams({ provider: "ollama" }), spy as unknown as InvokeFn);
+
+      expect(res, JSON.stringify(reply)).toEqual({ text: "hi", usage: null, usedOllamaFallback: false });
+    }
+  });
+
+  it("passes the arguments of the call on as it did: the command names and the arguments do not change", async () => {
+    const spy = vi.fn().mockResolvedValue({ text: "hi", usage });
+    await callProvider(makeParams({ reasoningEffort: "high", requestTimeoutSecs: 900 }), spy as unknown as InvokeFn);
+    expect(spy).toHaveBeenCalledWith("call_openai_api", {
+      model: "gpt-4o-mini", system: "You are a test agent.", userMessage: "Hello", apiKey: "sk-test", maxTokens: 256,
+      reasoningEffort: "high", baseUrl: null, requestTimeoutSecs: 900,
+    });
+  });
+
+  describe("after a billing error", () => {
+    const billing = new Error("billing: insufficient quota");
+
+    it("is the fallback call's usage: the call that failed had none, and the fallback is a model call of its own", async () => {
+      const spy = vi.fn().mockRejectedValueOnce(billing).mockResolvedValueOnce({ text: "from Ollama", usage });
+
+      const res = await callProvider(makeParams(), spy as unknown as InvokeFn);
+
+      expect(res).toEqual({ text: "from Ollama\n[ran on Ollama fallback]", usage, usedOllamaFallback: true });
+      expect(spy).toHaveBeenLastCalledWith("call_ollama_api", expect.anything());
+    });
+
+    it("is none when the fallback's reply is a plain string", async () => {
+      const spy = vi.fn().mockRejectedValueOnce(billing).mockResolvedValueOnce("from Ollama");
+
+      const res = await callProvider(makeParams(), spy as unknown as InvokeFn);
+
+      expect(res).toEqual({ text: "from Ollama\n[ran on Ollama fallback]", usage: null, usedOllamaFallback: true });
+    });
+
+    it("is not asked of a hosted call that fails for another reason: the error stands, with no usage to count", async () => {
+      const spy = vi.fn().mockRejectedValue(new Error("Network timeout"));
+      await expect(callProvider(makeParams(), spy as unknown as InvokeFn)).rejects.toThrow("Network timeout");
+    });
+  });
+});
+
+describe("callChatTurn — token usage", () => {
+  const turnParams = (): ChatTurnParams => {
+    const { userMsg: _unused, ...base } = makeParams();
+    return { ...base, messages: [{ role: "user", text: "hi" }], tools: [] };
+  };
+
+  it("hands the reply's usage on as chat_turn sent it", async () => {
+    const reply = { text: "ok", toolCalls: [], finishReason: "stop", nativeToolsSupported: true, usage: { input: 120, output: 30 } };
+    const spy = vi.fn(async () => reply);
+
+    expect(await callChatTurn(turnParams(), spy as unknown as InvokeFn)).toEqual(reply);
+  });
+
+  it("has none for a reply from an older harness-core or a server that sent no counts", async () => {
+    const reply = { text: "ok", toolCalls: [], finishReason: "stop", nativeToolsSupported: true };
+    const spy = vi.fn(async () => reply);
+
+    const res = await callChatTurn(turnParams(), spy as unknown as InvokeFn);
+
+    expect(res.usage).toBeUndefined();
   });
 });

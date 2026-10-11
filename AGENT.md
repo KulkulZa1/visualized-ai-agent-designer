@@ -37,12 +37,14 @@ Last Windows execution pass: 2026-09-26 (the `npm run tauri -- dev` and
 | MCP | stdio server and read/test tools tested |
 
 Linux pass, 2026-09-30 (not a Windows re-run: the rows above stand):
-`npx tsc --noEmit` passed; `npx vitest run` passed, 1514 tests / 75 files, and 1
-skipped because it needs a non-root user (CI runs it; the suite was 1413 / 73 before
-the local-model changes, and 1151 / 72 before the offline bundle's tests);
-`cargo test` passed, 162 tests (the 2 Windows-only tests are not compiled on
-Linux; it was 143 before the local-model changes);
-`cargo test --no-default-features --features core` passed, 162 + 2 tests;
+`npx tsc --noEmit` passed; `npx vitest run` passed, 1931 tests / 84 files, and 2
+skipped (one needs a non-root user and runs on CI, one is Windows-only; the suite was
+1514 / 75 before `harness eval`, 1413 / 73 before the local-model changes, and 1151 /
+72 before the offline bundle's tests);
+`cargo test` passed, 191 tests (the 2 Windows-only tests are not compiled on
+Linux; it was 162 before `harness eval`'s token usage, and 143 before the local-model
+changes);
+`cargo test --no-default-features --features core` passed, 191 + 2 tests;
 `npx vite build` passed with no empty `vendor-react` chunk (the large
 `index`/`monacoLocal` warning remains). The commands of CI's `harness run` step,
 against the real `harness-core` with no key, stopped with exit 3 and `not_started`.
@@ -83,6 +85,12 @@ server (Ollama, llama.cpp, vLLM, LM Studio), the streaming turn end to end, the 
 probes (OpenAI, Anthropic), real HTTPS to ollama.com, release builds, and nothing on
 Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
 `docs/DEVELOPMENT_LOG.md`.
+`harness eval` (2026-10-01): its first part was checked end to end with the real
+CLI and `harness-core` against fake model servers in a network namespace (533 of 534
+checks passed; the one that failed is the folder-swap race in `docs/EVAL.md`'s limits,
+which needs a process an approved command left running), and its token counts with
+the real `harness-core` against scripted local servers. No real model server, Windows
+or macOS. Details are in `docs/EVAL.md` and `docs/DEVELOPMENT_LOG.md`.
 `.github/workflows/ci.yml` runs these checks and `harness run` against the real
 `harness-core` on every pull request and push to master.
 
@@ -119,6 +127,8 @@ Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
   - `harness run` reads `HARNESS_CUSTOM_BASE_URL` and `HARNESS_CUSTOM_MODEL` for the Custom endpoint (flags win), so `LLM_PROVIDER=openai-compatible` needs no `--provider`. These two, `HARNESS_OLLAMA_NUM_CTX` and `HARNESS_REQUEST_TIMEOUT_SECS` are read by `harness run` only, never by the app. The Run dialog's Provider Override offers Custom.
   - Timeouts: a health probe allows 120 s for Ollama, Ollama Cloud and Custom, and 10 s for OpenAI and Anthropic; connecting fails after 10 s. A model call's total timeout is 600 s by default, 30 to 86400 (Settings "Model call timeout (seconds)", `--request-timeout`, `HARNESS_REQUEST_TIMEOUT_SECS`); a call to Ollama or an OpenAI-compatible endpoint that gets no answer in time says so, and so does a streamed reply that runs out of time, even after it began (a non-streamed reply that had begun gives "Failed to parse Ollama response: …" instead, an Anthropic call that gets no answer keeps its old message, and a probe that runs out of its limit still reads like a server that is down). An agent's own `timeoutSeconds` (300 for a new agent) bounds the node's whole run and is enforced: the agent never waits longer than that, but its call may run on, because the call is not cancelled (a local server keeps working on it, and later calls may queue behind it). Raise both on slow hardware.
   - `harness provider list`, MCP `list_providers` and the provider catalog report native tool calling for Ollama and Ollama Cloud, and tool calling and streaming for OpenAI-compatible endpoints.
+- Scoring workflows (`docs/EVAL.md`): `harness eval <tasks.yaml>` runs a workflow on each task of a strict task-set file k times, each in a fresh copy of the task's folder, scores each run with command, output and file scorers, and writes `report.json` after every run: a pooled score `S`, `C` (the average tokens of a run, from the providers' own counts), per-task rewards and missing runs, in the shape RRSI's selection reads. Grader files are put back or injected before a command scorer runs, containment is checked against the run folder's real path, and scorer commands need `--allow-scorer`. An example task set: `examples/evals/research-synthesis.tasks.yaml`.
+- Token usage: every model call reads the provider's own token counts (OpenAI-style `usage`, Anthropic `usage`, Ollama `prompt_eval_count`/`eval_count`); each agent's `usage` `{ input, output, calls, callsWithoutUsage }` is in the run record. The `call_*` commands return `{ text, usage }` (an older string reply still works).
 - Offline build and test (`docs/AIRGAPPED.md`): `scripts/offline-bundle.mjs` collects every npm package and Rust crate that `package-lock.json` and `src-tauri/Cargo.lock` name, and prebuilt `harness-run.mjs` and `harness-core` for its own platform, so the source builds and tests with no internet. Only cargo stays offline afterwards (`.cargo/config.toml`); a plain `npm ci` goes to the registry. Verified on Linux x64 with no network route; not run on Windows or macOS.
   - `npm run offline:bundle -- [<dir>] [--no-binaries] [--force]`: on a connected machine, after `npm ci`, from the repo root. Writes `npm-cache/`, `cargo-vendor/`, `bin/<platform>-<arch>/` and `MANIFEST.json`.
   - `npm run offline:setup -- [<dir>]`: on the air-gapped machine, from the repo root. Refuses a bundle made for other dependencies or with a missing or damaged npm package (every refusal comes before the first change), runs `npm ci --offline`, writes a gitignored `.cargo/config.toml` (delete it to go back online), and installs the prebuilt binaries where they are missing.
@@ -158,6 +168,7 @@ Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
 - `harness run` shows each agent's reply when it is done (no streaming). `harness-core`'s Ctrl+C handling is tested on Linux in CI; on Windows it was checked once with a scripted console Ctrl+C, not by an automated test. No `harness-core` binaries are published: build it, or use the prebuilt one an offline bundle carries, for the platform it was made on only (`docs/AIRGAPPED.md`). The app has no Resume button.
 - Artifact viewer still uses mock placeholders during execution; real artifact persistence is not wired into the run loop (so MCP `list_artifacts` is empty for app runs).
 - API keys are stored in localStorage/env during development. OS keychain storage is not implemented.
+- `harness eval` has no sandbox: a process an approved agent command leaves running can change files during scoring, so such runs' scores cannot be trusted (`docs/EVAL.md`, Limits). Not run against a real model server, on Windows or on macOS. The report is not in the exact shape RRSI's own loader reads.
 - Local model servers (Ollama, llama.cpp, vLLM, LM Studio) have not been run with the app or `harness run`. Ollama's context window, the Custom endpoint's model name, the timeouts and the capability flags were checked by unit tests and, with the real `harness run` and `harness-core`, against fake servers (Linux). Not run: the streaming turn end to end (`harness run` never streams), the Tauri window and its `invoke` arguments, Windows, macOS, the hosted probes (OpenAI, Anthropic), real HTTPS to ollama.com. What the docs say of how a real server behaves (Ollama's small default window, `OLLAMA_CONTEXT_LENGTH`, a model's own `num_ctx`, that Ollama may cut off a prompt that does not fit without saying so, memory use, reloads, that a real server sends nothing until a non-streamed reply is complete, that later calls may queue behind one an agent gave up on) was not tested.
 - Gemini is catalog/planned only; no live direct Gemini adapter.
 - MCP has no write tools and no workflow execution.
@@ -178,9 +189,9 @@ Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
 1. Do not create `AGEND.md`; use `AGENT.md`.
 2. Do not claim mock/partial features are production-ready.
 3. Do not commit secrets or print raw API key values.
-4. The CLI's `project`, `workflow` and `provider` commands stay read-only, and MCP stays limited to read/test tools. `harness run` executes workflows: agent commands run only if the user passed that exact command with `--allow-command`, and every command is audited.
+4. The CLI's `project`, `workflow` and `provider` commands stay read-only, and MCP stays limited to read/test tools. `harness run` and `harness eval` execute workflows: agent commands run only if the user passed that exact command with `--allow-command`, and every agent command is audited. `harness eval`'s scorer commands run only if the user passed that exact command with `--allow-scorer`, a separate list; they are recorded in the eval's `trials/<task>/t<i>/scorers.json`, not in the audit log.
 5. Do not add hidden cloud calls or background provider checks.
-6. Do not add command execution without the user's approval of that exact command: once, as a run grant the user chose (agent `bash` goes through `commandConsentStore`), or up front with `harness run --allow-command`. Never auto-approve anything else.
+6. Do not add command execution without the user's approval of that exact command: once, as a run grant the user chose (agent `bash` goes through `commandConsentStore`), or up front with `harness run --allow-command` (and `harness eval --allow-command`, or `--allow-scorer` for its scorer commands). Never auto-approve anything else.
 7. Use `resolve_safe_path()` for Rust file paths.
 8. Hook execution must stay explicit and consent-gated.
 9. Prefer small, reviewable fixes over rewrites.
@@ -193,6 +204,8 @@ Windows, macOS or in the Tauri window and its `invoke` arguments. Details are in
 | `src/engine/runWorkflow.ts` | Workflow run engine (uses `runParallel`); no React, stores or Tauri |
 | `src/engine/runRecord.ts` | Saved run records (`.harness/runs/`), the resume rule and the saved hook baselines (`hookScripts`) |
 | `src/cli/runCli.ts` | `harness run` (bundled by `npm run build:cli`) |
+| `src/cli/evalCli.ts` | `harness eval`; `taskSet.ts` (the strict task-set schema and path checks), `trial.ts` (copies, runs and scorers), `evalReport.ts` (S, C and the report) |
+| `src/services/execution/usage.ts` | Sums each agent's token counts (`AgentRun.usage`) |
 | `src-tauri/src/commands/core_server.rs` | `harness-core`: the run's Rust commands over stdin/stdout (`npm run build:core`) |
 | `src/hooks/useWorkflowExecution.ts` | Runs the canvas workflow in the app through the engine |
 | `src/services/model-providers/providerAdapter.ts` | Provider call adapter |

@@ -6,9 +6,9 @@
 //! the reply back.
 
 use super::api_commands::{
-    generation_client, normalize_anthropic_model, normalize_ollama_model, ollama_options,
-    ollama_requires_api_key, resolve_api_key, resolve_ollama_api_key_for_endpoint, send_anthropic,
-    send_ollama, send_openai, HttpFailure, DEFAULT_OLLAMA_BASE_URL,
+    anthropic_usage, generation_client, normalize_anthropic_model, normalize_ollama_model, ollama_options,
+    ollama_requires_api_key, ollama_usage, openai_usage, resolve_api_key, resolve_ollama_api_key_for_endpoint,
+    send_anthropic, send_ollama, send_openai, HttpFailure, Usage, DEFAULT_OLLAMA_BASE_URL,
 };
 use super::chat_stream::{read_stream, AnthropicStream, OllamaStream, OpenAiStream, StreamAccumulator};
 use serde::{Deserialize, Serialize};
@@ -67,6 +67,11 @@ pub struct ChatReply {
     /// False when the model or server refused the tool definitions; the caller
     /// then uses the text protocol instead.
     pub native_tools_supported: bool,
+    /// The tokens the turn used, as the provider's response says. Left out of the JSON when the response
+    /// had no counts (a local server may leave them out), and for a streamed OpenAI-compatible reply: that
+    /// request does not ask for them (`stream_options.include_usage`, which some servers refuse).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 impl ChatReply {
@@ -76,6 +81,7 @@ impl ChatReply {
             tool_calls: Vec::new(),
             finish_reason: "tools_unsupported".to_string(),
             native_tools_supported: false,
+            usage: None,
         }
     }
 }
@@ -260,14 +266,19 @@ fn ollama_body(
     body
 }
 
-fn reply(text: String, tool_calls: Vec<ToolCall>, finish_reason: String) -> Result<ChatReply, String> {
+fn reply(
+    text: String,
+    tool_calls: Vec<ToolCall>,
+    finish_reason: String,
+    usage: Option<Usage>,
+) -> Result<ChatReply, String> {
     if text.trim().is_empty() && tool_calls.is_empty() {
         let reason = if finish_reason.is_empty() { "unknown" } else { &finish_reason };
         return Err(format!(
             "The model returned no text (finish_reason: {reason}). If it is \"length\", raise Max tokens."
         ));
     }
-    Ok(ChatReply { text, tool_calls, finish_reason, native_tools_supported: true })
+    Ok(ChatReply { text, tool_calls, finish_reason, native_tools_supported: true, usage })
 }
 
 fn str_of(value: &Value) -> String {
@@ -295,7 +306,7 @@ pub(crate) fn parse_anthropic(value: &Value) -> Result<ChatReply, String> {
         .filter(|b| b["type"] == "tool_use")
         .map(|b| ToolCall { id: str_of(&b["id"]), name: str_of(&b["name"]), args: object_or_empty(&b["input"]) })
         .collect();
-    reply(text, tool_calls, str_of(&value["stop_reason"]))
+    reply(text, tool_calls, str_of(&value["stop_reason"]), anthropic_usage(value))
 }
 
 pub(crate) fn parse_openai(value: &Value) -> Result<ChatReply, String> {
@@ -314,7 +325,7 @@ pub(crate) fn parse_openai(value: &Value) -> Result<ChatReply, String> {
             args: args_from_wire(&c["function"]["arguments"]),
         })
         .collect();
-    reply(str_of(&message["content"]), tool_calls, str_of(&choice["finish_reason"]))
+    reply(str_of(&message["content"]), tool_calls, str_of(&choice["finish_reason"]), openai_usage(value))
 }
 
 pub(crate) fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
@@ -330,7 +341,7 @@ pub(crate) fn parse_ollama(value: &Value) -> Result<ChatReply, String> {
             args: args_from_wire(&c["function"]["arguments"]),
         })
         .collect();
-    reply(str_of(&message["content"]), tool_calls, str_of(&value["done_reason"]))
+    reply(str_of(&message["content"]), tool_calls, str_of(&value["done_reason"]), ollama_usage(value))
 }
 
 /// The provider's reply as the non-streaming API returns it: read whole, or
@@ -881,5 +892,176 @@ mod tests {
             let sent = sent_to_ollama(Some(0), streaming).await;
             assert_eq!(sent["options"], json!({"num_predict": 256}), "streaming: {streaming}");
         }
+    }
+
+    // ── Token usage ─────────────────────────────────────────────────────────────
+
+    fn counts(input: u64, output: u64) -> Option<Usage> {
+        Some(Usage { input, output })
+    }
+
+    #[test]
+    fn a_turn_reports_the_tokens_its_provider_says_it_used() {
+        let anthropic = parse_anthropic(&json!({
+            "content": [
+                {"type": "text", "text": "Reading."},
+                {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "a.md"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 100, "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30, "output_tokens": 50}
+        }))
+        .unwrap();
+        assert_eq!(anthropic.usage, counts(150, 50));
+
+        let openai = parse_openai(&json!({
+            "choices": [{"message": {"content": null, "tool_calls": [
+                {"id": "call_a", "function": {"name": "read_file", "arguments": "{\"path\": \"a.md\"}"}}
+            ]}, "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15}
+        }))
+        .unwrap();
+        assert_eq!(openai.usage, counts(12, 3));
+
+        let ollama = parse_ollama(&json!({
+            "message": {"role": "assistant", "content": "hi"}, "done_reason": "stop",
+            "prompt_eval_count": 26, "eval_count": 298
+        }))
+        .unwrap();
+        assert_eq!(ollama.usage, counts(26, 298));
+        // The tool calls and the text are read as before.
+        assert_eq!(anthropic.tool_calls.len(), 1);
+        assert_eq!(openai.tool_calls[0].name, "read_file");
+        assert_eq!(ollama.text, "hi");
+    }
+
+    #[test]
+    fn a_turn_whose_response_has_no_counts_or_some_of_them_has_no_usage_and_is_no_error() {
+        // A local server may leave them out.
+        let anthropic = |usage: Value| parse_anthropic(&json!({"content": [{"type": "text", "text": "hi"}], "usage": usage}));
+        let openai = |usage: Value| parse_openai(&json!({"choices": [{"message": {"content": "hi"}}], "usage": usage}));
+        let ollama = |extra: Value| {
+            let mut response = json!({"message": {"content": "hi"}});
+            response.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            parse_ollama(&response)
+        };
+        for (name, reply) in [
+            ("anthropic, none", parse_anthropic(&json!({"content": [{"type": "text", "text": "hi"}]}))),
+            ("anthropic, partial", anthropic(json!({"input_tokens": 100}))),
+            ("anthropic, not a number", anthropic(json!({"input_tokens": "100", "output_tokens": 5}))),
+            ("openai, none", parse_openai(&json!({"choices": [{"message": {"content": "hi"}}]}))),
+            ("openai, null", openai(Value::Null)),
+            ("openai, partial", openai(json!({"completion_tokens": 3}))),
+            ("openai, not a number", openai(json!({"prompt_tokens": "12", "completion_tokens": 3}))),
+            ("ollama, none", ollama(json!({}))),
+            ("ollama, partial", ollama(json!({"eval_count": 298}))),
+            ("ollama, not a number", ollama(json!({"prompt_eval_count": "26", "eval_count": 298}))),
+        ] {
+            let reply = reply.unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!((name, reply.usage, reply.text.as_str()), (name, None, "hi"));
+        }
+    }
+
+    #[test]
+    fn the_replys_json_has_a_usage_only_when_the_response_had_one() {
+        let with = parse_ollama(&json!({"message": {"content": "hi"}, "prompt_eval_count": 26, "eval_count": 298})).unwrap();
+        assert_eq!(serde_json::to_value(&with).unwrap()["usage"], json!({"input": 26, "output": 298}));
+
+        let without = parse_ollama(&json!({"message": {"content": "hi"}})).unwrap();
+        let wire = serde_json::to_value(&without).unwrap();
+        assert!(wire.get("usage").is_none(), "{wire}");
+        // The rest of the reply is what it was.
+        assert_eq!(wire["text"], "hi");
+        assert_eq!(wire["nativeToolsSupported"], true);
+
+        // A server that refused the tool definitions used no tokens: its reply has no usage key either.
+        let refused = serde_json::to_value(ChatReply::tools_unsupported()).unwrap();
+        assert!(refused.get("usage").is_none(), "{refused}");
+        assert_eq!(refused["nativeToolsSupported"], false);
+    }
+
+    #[tokio::test]
+    async fn chat_turn_returns_the_usage_a_custom_endpoint_and_ollama_report() {
+        let (reply, _) = custom_turn(
+            200,
+            r#"{"choices":[{"message":{"content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3}}"#,
+            vec![],
+        )
+        .await;
+        assert_eq!(reply.unwrap().usage, counts(12, 3));
+
+        let (base_url, _rx) = spawn_mock_ollama_server(
+            200,
+            r#"{"message":{"role":"assistant","content":"hi"},"done":true,"done_reason":"stop","prompt_eval_count":26,"eval_count":298}"#,
+        );
+        let reply = run_turn(
+            "ollama".into(), "llama3".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), None, None, None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply.usage, counts(26, 298));
+    }
+
+    #[tokio::test]
+    async fn run_turn_reports_the_usage_of_a_streamed_ollama_reply() {
+        let (base_url, _rx) = spawn_mock_ollama_server(200, concat!(
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"Rea\"},\"done\":false}\n",
+            "{\"message\":{\"role\":\"assistant\",\"content\":\"ding\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":26,\"eval_count\":298}\n",
+        ));
+        let (pieces, on_text) = collector();
+        let reply = run_turn(
+            "ollama".into(), "llama3".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), None, None, Some(on_text),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(*pieces.lock().unwrap(), ["Rea", "ding"]);
+        assert_eq!(reply.text, "Reading");
+        assert_eq!(reply.usage, counts(26, 298));
+    }
+
+    #[tokio::test]
+    async fn run_turn_does_not_ask_a_streaming_openai_compatible_server_for_usage() {
+        // OpenAI streams its counts only when the request says `stream_options.include_usage`, and some
+        // OpenAI-compatible servers refuse that option: the request stays as it was, and the reply has none.
+        let (base_url, request_rx) = spawn_mock_ollama_server(200, concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ));
+        let (_pieces, on_text) = collector();
+        let reply = run_turn(
+            "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), None, None, Some(on_text),
+        )
+        .await
+        .unwrap();
+        let request = request_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let sent: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+
+        assert_eq!(sent["stream"], true);
+        assert!(sent.get("stream_options").is_none(), "{sent}");
+        assert_eq!(reply.text, "Hi");
+        assert_eq!(reply.usage, None);
+    }
+
+    #[tokio::test]
+    async fn run_turn_reads_the_usage_of_a_whole_reply_sent_to_a_streaming_request() {
+        // A server that ignores `stream: true` and answers with one JSON body.
+        let (base_url, _rx) = spawn_mock_ollama_server(
+            200,
+            "{\n  \"choices\": [{\"message\": {\"role\": \"assistant\", \"content\": \"Hi\"}, \"finish_reason\": \"stop\"}],\n  \"usage\": {\"prompt_tokens\": 12, \"completion_tokens\": 3}\n}",
+        );
+        let (pieces, on_text) = collector();
+        let reply = run_turn(
+            "openai-compatible".into(), "openai".into(), "sys".into(), history()[..1].to_vec(), vec![],
+            String::new(), 256, None, Some(base_url), None, None, Some(on_text),
+        )
+        .await
+        .unwrap();
+
+        assert!(pieces.lock().unwrap().is_empty());
+        assert_eq!((reply.text.as_str(), reply.usage), ("Hi", counts(12, 3)));
     }
 }

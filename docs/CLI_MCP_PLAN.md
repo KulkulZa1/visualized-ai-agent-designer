@@ -32,7 +32,7 @@ Verified 2026-09-24:
 - `npm run harness -- workflow validate missing-file-does-not-exist.harness.yaml`
 - `node cli/harness.mjs --workspace . project status`
 
-Safety boundary:
+Safety boundary (the three commands above):
 
 - No writes.
 - No workflow execution.
@@ -42,6 +42,8 @@ Safety boundary:
 - No MCP write tools.
 - No command execution.
 - No MATLAB execution.
+
+`harness run` and `harness eval` are the exceptions: they execute workflows (provider calls, file writes in the workspace). Agent commands run only when passed exactly with `--allow-command`, and `harness eval`'s scorer commands only when passed exactly with `--allow-scorer` (`docs/HEADLESS.md`, `docs/EVAL.md`).
 
 ## Current MCP v0
 
