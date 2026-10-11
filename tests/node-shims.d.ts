@@ -58,6 +58,7 @@ declare module "node:fs" {
     size: number;
   }
 
+  export function appendFileSync(path: string, data: string): void;
   export function chmodSync(path: string, mode: number): void;
   export function copyFileSync(from: string, to: string): void;
   export function existsSync(path: string): boolean;

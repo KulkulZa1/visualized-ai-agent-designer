@@ -240,7 +240,8 @@ It returns `{ ev } | { invalid } | { stop } | { fatal }`.
 The round runs for t from `trajectory.length − 1` up to `T − 1`. This is RRSI's
 `round`, reading the spec's §5.
 1. **The incumbent's evaluation.**
-   - `incEv` is `fromReport(outDir/fr.incumbent.eval_dir/report.json)`.
+   - `incEv` is `fromReport(job, raw)`, with `raw` the parsed
+     `outDir/fr.incumbent.eval_dir/report.json`.
    - `incReport` is the raw report.
 2. **The traces.** `pickTraces`, then `renderTrace` into
    `r<t>/evidence/traces/<task>-t<i>.md`. The results go to
