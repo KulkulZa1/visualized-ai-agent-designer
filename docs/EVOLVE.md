@@ -26,6 +26,10 @@ It uses the same engine, provider options, keys and approvals as `harness eval`.
 **Your workflow file is never written.** The best workflow is
 `incumbent.harness.yaml` in the run's folder; copy it over yours when you choose.
 
+**Its layout is the loop's.** The run writes the workflow back through a YAML parser, so
+the first copy over your file may reformat it: flow lists (`[a, b]` becomes `[ a, b ]`)
+and folded text. Its values are the same, and its comments are kept.
+
 The design is in `docs/superpowers/specs/2026-10-11-harness-evolve-design.md`.
 
 ## What it can change
