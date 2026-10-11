@@ -176,8 +176,11 @@ Markdown:
 - **Read the frontier.**
   - When there is one and `pinDiff(fr.pins, ctx.pins)` is not empty, return exit 2:
     "this folder holds a run with different settings: …; use a new --out".
-  - When there is none, write `base.harness.yaml` (the starting workflow's text)
-    if it is missing, then do the baseline (§2).
+  - When there is none, write `base.harness.yaml` if it is missing, then do the
+    baseline (§2). `base.harness.yaml` is the starting workflow's text, written
+    once through the YAML document: `parseDocument(text).toString({ lineWidth: 0 })`.
+    The values stay the same. The layout becomes what `applyProposal` writes, so a
+    candidate's `diff.txt` shows only its edit and not reformatting.
 - **Check the incumbent's file.** `sha256(read(outDir/fr.incumbent.file))` must
   equal `fr.incumbent.hash`, else exit 2: "<file> changed since round t; restore it
   or use a new --out".
@@ -321,7 +324,8 @@ the folder and draft.
 
 **When an attempt passes:**
 - **Write** `candidate.harness.yaml` (the applied text), `diff.txt` (`diffFile`)
-  and `change.txt` (`renderChange`).
+  and `change.txt` (`renderChange`, which needs the incumbent the edits applied to:
+  call it only after `applyProposal` succeeded).
 - **Smoke**, when `ctx.hasSmoke`: `evaluateInto(smoke/, candidate, smoke, 1)`.
   - A `smokeProblem` gives `smoke_fail`.
   - An invalid smoke evaluation gives `smoke_fail` too, with its reason.

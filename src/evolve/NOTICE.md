@@ -20,11 +20,14 @@ Harness Studio:
 | `history.ts` | `rrsi/history.py` |
 | `selection.ts` | `rrsi/selection.py` |
 | `attribution.ts` | `rrsi/loop.py` (`attribute`) |
+| `edits.ts` | `rrsi/propose.py` (the checks of `done`: the budget and the reserved slot) and `rrsi/loop.py` (the reserved-slot rejection) |
+| `precheck.ts` | `rrsi/critic.py` (`precheck` and its credential pattern) |
 | `tests/unit/evolve/*.test.ts` | `tests/test_core.py` (its cases, ported or adapted) |
 
 **The main changes:**
 - **The components.** K names the parts of a workflow file, not of a code harness. A change is classified
   by its operations, not by regular expressions over a diff.
+- **The precheck's patterns** come from the task set, not from hand-written lists per domain.
 - **The config file** is strict: an unknown key is an error.
 - **The bootstrap** uses a seeded mulberry32 generator, not Python's `random`.
 - **Timestamps** are ISO 8601.
