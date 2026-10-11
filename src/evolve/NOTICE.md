@@ -22,6 +22,8 @@ Harness Studio:
 | `attribution.ts` | `rrsi/loop.py` (`attribute`) |
 | `edits.ts` | `rrsi/propose.py` (the checks of `done`: the budget and the reserved slot) and `rrsi/loop.py` (the reserved-slot rejection) |
 | `precheck.ts` | `rrsi/critic.py` (`precheck` and its credential pattern) |
+| `examples/evolve/proposer.harness.yaml` | `rrsi/propose.py` (the proposer's `SYSTEM_TMPL`) |
+| `examples/evolve/critic.harness.yaml` | `rrsi/critic.py` (the critic's `SYSTEM_TMPL`) |
 | `brief.ts` | `rrsi/propose.py` (the proposer's context and the rules of its `done`), `rrsi/critic.py` (the reviewer's payload and verdict) and `rrsi/loop.py` (`build_traces`) |
 | `loop.ts` | `rrsi/loop.py` (`baseline`, `calibrate`, `heldout`, `round`, `_draft`, `_evaluate`) and `rrsi/driver.py` (a round is settled once the trajectory has its entry; stop after consecutive infrastructure failures) |
 | `tests/unit/evolve/*.test.ts` | `tests/test_core.py` (its cases, ported or adapted) |

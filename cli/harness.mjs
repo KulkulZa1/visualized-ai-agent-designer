@@ -8,6 +8,7 @@
  *   node cli/harness.mjs provider list                    [--json]
  *   node cli/harness.mjs run <workflow> --task "…"        (see run --help)
  *   node cli/harness.mjs eval <tasks.yaml>                (see eval --help)
+ *   node cli/harness.mjs evolve <tasks.yaml>              (see evolve --help)
  *
  * project, workflow and provider are read-only: no Tauri runtime, no API calls.
  * Their schemas are duplicated from src/schemas/ — see comments marked [KEEP-IN-SYNC].
@@ -20,6 +21,11 @@
  * workspace, and scores every trial: the agents' commands as for run (--allow-command), and the
  * scorers' commands only when passed exactly with --allow-scorer. It uses the same bundle and
  * harness-core as run.
+ *
+ * evolve improves a workflow on a task set (src/evolve/): it starts this CLI again for every
+ * measurement (eval) and every proposer or critic run (run), with the same environment. Only the
+ * evaluated workflow's agents get the commands passed with --allow-command, and the scorers' commands
+ * run only when passed exactly with --allow-scorer, as for eval. It uses the same bundle as run.
  */
 
 import { readFileSync, readdirSync, lstatSync, realpathSync, existsSync } from "node:fs";
@@ -534,6 +540,23 @@ async function cmdEval(evalArgs) {
   }
 }
 
+// harness evolve: the same bundle and engine as run and eval (src/cli/evolveCli.ts).
+async function cmdEvolve(evolveArgs) {
+  const bundle = new URL("./dist/harness-run.mjs", import.meta.url);
+  if (!existsSync(bundle)) {
+    process.stderr.write("harness evolve: build it first with npm run build:cli\n");
+    return 3;
+  }
+  try {
+    const { runEvolve } = await import(bundle.href);
+    return await runEvolve(evolveArgs);
+  } catch (e) {
+    // A bundle that cannot be loaded is a 3: the run could not go on.
+    process.stderr.write(`harness evolve: ${e instanceof Error ? e.message : e}\n`);
+    return 3;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -550,6 +573,8 @@ if (args[0] === "run") {
   process.exitCode = await cmdRun(args.slice(1));
 } else if (args[0] === "eval") {
   process.exitCode = await cmdEval(args.slice(1));
+} else if (args[0] === "evolve") {
+  process.exitCode = await cmdEvolve(args.slice(1));
 } else if (cmd === "project" && sub === "status") {
   cmdProjectStatus();
 } else if (cmd === "workflow" && sub === "validate") {
@@ -566,6 +591,7 @@ Commands:
   provider list                       Show the provider catalog
   run <workflow> --task "…"           Run a workflow headless (run --help for options)
   eval <tasks.yaml>                   Score a workflow on a task set (eval --help for options)
+  evolve <tasks.yaml>                 Improve a workflow on a task set (evolve --help for options)
 
 Options:
   --workspace <path>   Override workspace (default: cwd or HARNESS_WORKSPACE env);

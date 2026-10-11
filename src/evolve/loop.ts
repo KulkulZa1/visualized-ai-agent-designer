@@ -368,7 +368,7 @@ async function baseline(run: Run): Promise<Frontier> {
   const minutes = evalMinutes(measured.raw);
   say(run, `baseline: ${scoreText(ev.S, ev.C)} (${ev.n_expected} runs${minutes === undefined ? "" : `, ${minutesText(minutes)}`})`);
   if (minutes !== undefined) {
-    say(run, `measuring a candidate takes about ${minutesText(minutes)}; a round about ${ctx.cfg.m} × that, plus the proposer's and critic's runs`);
+    say(run, `measuring a candidate takes ${minutes < 1 ? "under a minute" : `about ${minutesText(minutes)}`}; a round about ${ctx.cfg.m} × that, plus the proposer's and critic's runs`);
   }
   return fr;
 }
