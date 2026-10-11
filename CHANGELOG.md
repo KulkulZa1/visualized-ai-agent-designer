@@ -6,6 +6,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (harness evolve)
+- **`harness evolve <tasks.yaml>`** (`docs/EVOLVE.md`) improves a workflow against a task set, offline, by Google's RRSI method (ported from <https://github.com/google-research/rrsi>, Apache License 2.0; `src/evolve/NOTICE.md`).
+  - **Each round:** a proposer workflow drafts candidate edits, a critic workflow screens them, `harness eval` measures the survivors, and RRSI's selection keeps the best admissible one. Selection is a noise floor `S* − δ`, then a cost rule, with novelty breaking a tie within the band.
+  - **Edits are data.** They are operations on the workflow file by agent name: text, limits, roles, tools, memory keys, agents, edges. The loop applies them with the file's comments kept, classifies each edit by its operations, and checks the result as `harness eval` loads it.
+  - **What cannot be changed:** the model, fields the engine ignores, hooks, `bash` and file prompts.
+  - **A deterministic precheck** rejects a change that adds a task id, a scorer's literal, a grader file's name or a credential.
+  - **RRSI's regularizers:** an annealed edit budget, the per-edit history, stall-driven exploration, pruning, attribution of predictions, a held-out check of the base and final workflows, and the noise band by bootstrap or repeated evaluations.
+  - **A run is resumable** after a crash or Ctrl+C, pinned to its settings and locked. Your workflow file is never written: the result is `incumbent.harness.yaml`.
+  - **The shipped proposer and critic** are in `examples/evolve/`. The example task set now has four evolve tasks.
+- Checked on Linux with the project's tests (RRSI's own test cases for the method) and end to end with the built CLI against a fake model core. Not run against a real model server, on Windows or on macOS.
+
 ### Added (harness eval)
 - **`harness eval <tasks.yaml>`** (`docs/EVAL.md`) runs a workflow on each task of a task set k times (`--trials`, `-k`), each in a fresh copy of the task's folder, and scores each run.
   - **Task sets** are YAML files with a strict schema (an unknown key is an error), with evolve, held-out and smoke splits.

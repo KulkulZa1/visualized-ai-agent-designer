@@ -278,6 +278,8 @@ scorer.
   model gets a repair round less often this way.
 - **Unknown keys** are an error, in a proposal, an edit or an operation. A
   misspelled `agnet` must not be ignored.
+- **An optional field written as `null`** reads as absent, so it costs no repair
+  round.
 
 ### 3.2 The operations
 
@@ -317,7 +319,7 @@ rejects such edits as degenerate; here the loop catches them first.
 |---|---|
 | `model`, `fallback` | The policy model is frozen; that is RRSI's premise. |
 | `temperature`, `condition`, `executionSettings` timeouts and retries | The engine ignores them, so an edit would be a no-op. |
-| `preHook`, `postHook`, the `hook` role | They run scripts. |
+| `preHook`, `postHook`, the `hook` role; a hook agent and its edges; an agent with a hook's place and role | They run scripts. No operation may name a hook agent, and an agent with a pre- or post-hook cannot be removed or change role. |
 | `bash` (adding it) | An agent's commands run only under the user's `--allow-command`. Adding `bash` to another agent would widen that approval. |
 | Tools that never run (`web_search`, `web_fetch`, `git`, `test`, …) | `runnableTools` drops them, so adding one is a no-op. |
 | `meta`, `nodePositions`, `tokens`, `status`, `comment` | Not behaviour. `nodePositions` is kept in step by the loop. |

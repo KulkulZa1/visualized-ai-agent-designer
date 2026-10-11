@@ -1,5 +1,41 @@
 ﻿# Development Log
 
+## 2026-10-11 - harness evolve: the RRSI loop
+
+- **Goal:** phase P2 of the air-gapped self-improvement plan: a port of RRSI's loop that improves
+  a workflow against a task set, offline, with `harness eval` as its measurement. PR #16;
+  design in `docs/superpowers/specs/2026-10-11-harness-evolve-design.md`.
+- **A change from the plan:** no git worktrees. File prompts are read from the trial's frozen
+  fixture, so the harness the loop can change is the workflow file itself; a candidate is one
+  file in the run's folder.
+- **Built, in four parts:**
+  - the method core (`src/evolve/`: config, schedule, measure, calibrate, components, history,
+    selection, attribution), ported from RRSI with its test cases;
+  - machine edits: a strict proposal schema of operations by agent name, applied to the YAML
+    document with comments kept and positional ids rebuilt, classified by the most structural
+    operation, checked as `harness eval` loads a workflow; the precheck from the task set;
+  - the loop (`loop.ts`): baseline, band, rounds with repair, smoke, selection, history and
+    attribution, held-out, resume after a crash at any step, behind an injected children
+    interface; and the command (`src/cli/evolveCli.ts`) with its checks, pins, lock and child
+    processes; the shipped proposer and critic (`examples/evolve/`);
+  - `docs/EVOLVE.md`, and three more evolve tasks in the example task set.
+- **Decided in review:**
+  - an agent that runs a script stays as it is: a hook agent and its edges are never edited, and
+    an agent with a pre- or post-hook keeps its place and role;
+  - a proposal's optional fields may be null;
+  - the reserved exploration slot is checked before the critic, which saves a critic run;
+  - the novelty counts of a resumed round are those before it, so a crash cannot change a
+    decision.
+- **Verification** (Linux):
+  - `npx tsc --noEmit` clean; `npx vitest run` 2701 tests / 101 files and 2 skipped.
+  - The built CLI against the fake core, by hand: baseline 0, a prompt edit accepted (S 1), an
+    edit with no gain rejected by the cost rule, held-out 0 → 1.
+  - At the user's request, no model-based review or verification was spent: the director
+    reviewed the diffs and ran the checks.
+- **Not verified:** a real model server. Ollama Cloud, the planned check, was not reachable from
+  this environment (the network policy answers 403 for ollama.com, and no `OLLAMA_API_KEY` is
+  set). Windows and macOS were not run.
+
 ## 2026-10-01 - harness eval: measure a workflow on a task set
 
 - **Goal:** the measurement step of the air-gapped self-improvement plan

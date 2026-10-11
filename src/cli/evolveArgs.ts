@@ -49,7 +49,7 @@ best admissible one becomes the workflow of the next round. The workflow file it
 incumbent.harness.yaml in the run's folder, to copy over it when you choose. Run again with the same --out to resume.
 
   --workflow <file>          The workflow to improve (default: the task set's \`workflow\`)
-  --out <dir>                The run's folder (default: .harness/evolve/<task set name>/); run again with the same folder to resume.
+  --out <dir>                The run's folder (default: .harness/evolve/<the task-set file's name>/); run again with the same folder to resume.
                              Not inside a task's workspace or grader files, which every trial copies
   --rounds <T>               Rounds (default 20)
   --trials <n>               Trials per task in each evaluation, also -k <n> (default: the task set's \`trials\`, else 2)

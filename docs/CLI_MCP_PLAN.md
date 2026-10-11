@@ -43,7 +43,7 @@ Safety boundary (the three commands above):
 - No command execution.
 - No MATLAB execution.
 
-`harness run` and `harness eval` are the exceptions: they execute workflows (provider calls, file writes in the workspace). Agent commands run only when passed exactly with `--allow-command`, and `harness eval`'s scorer commands only when passed exactly with `--allow-scorer` (`docs/HEADLESS.md`, `docs/EVAL.md`).
+`harness run`, `harness eval` and `harness evolve` are the exceptions: they execute workflows (provider calls, file writes in the workspace). Agent commands run only when passed exactly with `--allow-command`, and `harness eval`'s scorer commands only when passed exactly with `--allow-scorer` (`docs/HEADLESS.md`, `docs/EVAL.md`). `harness evolve` runs `harness eval` and `harness run` as child processes and passes those approvals to its evals only (`docs/EVOLVE.md`).
 
 ## Current MCP v0
 

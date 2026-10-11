@@ -1,11 +1,18 @@
-# research-synthesis.tasks.yaml: an example task set for `harness eval`.
+# research-synthesis.tasks.yaml: an example task set for `harness eval` and
+# `harness evolve`.
 #
 # It shows the format; it is not a benchmark. The checks are loose on purpose:
 # they ask for the report's shape and for a fact from the task's notes, not
-# for good judgment. The workflow runs on Ollama, so no key is needed:
+# for good judgment. Four tasks are in the evolve split, which harness evolve
+# tunes against, and one is held out to see whether a gain carries over. That
+# is still a small set: with few tasks the noise band is wide, so it shows how
+# the loop works more than it can show a real gain (docs/EVOLVE.md). The
+# workflow runs on Ollama, so no key is needed:
 #
 #   node cli/harness.mjs eval examples/evals/research-synthesis.tasks.yaml \
 #     --provider ollama --model qwen2.5-coder:7b -k 3
+#   node cli/harness.mjs evolve examples/evals/research-synthesis.tasks.yaml \
+#     --provider ollama --model qwen2.5-coder:7b --num-ctx 32768 --rounds 5
 #
 # Each trial starts from a fresh copy of the task's `workspace`, where the
 # analysts' read_file and list_files tools find the notes. See docs/HEADLESS.md
@@ -26,6 +33,39 @@ tasks:
         output: { contains: ["## Executive Summary", "## Recommendations"] }
       - name: uses-the-pilot
         output: { matches: ["[Pp]ilot"] }
+
+  - id: open-source-tool
+    task: >
+      Should a company release its internal deployment tool as open source?
+      Read notes.md in this folder first.
+    workspace: fixtures/open-source-tool
+    scorers:
+      - name: report-shape
+        output: { contains: ["## Executive Summary", "## Recommendations"] }
+      - name: uses-the-license
+        output: { matches: ["[Ll]icen[cs]e"] }
+
+  - id: ai-review
+    task: >
+      Should a 60-engineer company require an AI review on every pull request
+      before a human review? Read notes.md in this folder first.
+    workspace: fixtures/ai-review
+    scorers:
+      - name: report-shape
+        output: { contains: ["## Executive Summary", "## Recommendations"] }
+      - name: uses-the-false-positives
+        output: { matches: ["[Ff]alse positive"] }
+
+  - id: on-call
+    task: >
+      Should a five-person platform team move from a weekly to a daily on-call
+      rotation? Read notes.md in this folder first.
+    workspace: fixtures/on-call
+    scorers:
+      - name: report-shape
+        output: { contains: ["## Executive Summary", "## Recommendations"] }
+      - name: uses-the-handoffs
+        output: { matches: ["[Hh]and-?offs?"] }
 
   - id: office-return
     split: heldout
