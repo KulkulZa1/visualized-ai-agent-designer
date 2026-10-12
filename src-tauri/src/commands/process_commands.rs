@@ -1674,7 +1674,12 @@ mod tests {
         });
         let grandchild = grandchild_pid(dir.path());
         assert!(is_alive(grandchild));
-        assert!(is_running("cancel-tree-test"));
+        // The shell can write the pid file before execute_command has registered it: wait for that too.
+        let started = Instant::now();
+        while !is_running("cancel-tree-test") {
+            assert!(started.elapsed() < Duration::from_secs(10), "the command was never registered");
+            thread::sleep(Duration::from_millis(20));
+        }
 
         assert!(cancel_command("cancel-tree-test".to_string()));
         let output = result.recv_timeout(Duration::from_secs(10)).expect("Stop did not end the command").unwrap();
