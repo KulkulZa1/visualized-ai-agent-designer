@@ -3,7 +3,7 @@
  * (src-tauri/src/commands/core_server.rs) with canned model replies.
  *
  * FAKE_CORE_SCENARIO: a JSON file { replies: { <agent>: (string | { text, usage? })[] }, usage?: { <agent>: { input, output } },
- *   healthFails?: true, healthFailsOn?: number[], olderCore?: true }.
+ *   when?: { <agent>: { contains, text }[] }, healthFails?: true, healthFailsOn?: number[], olderCore?: true }.
  *   An agent's replies are used in order, and the last one repeats. A reply whose text
  *   starts with "ERROR:" is returned as that call's error. The text-protocol commands (call_ollama_api and
  *   call_openai_api) answer in one of the two shapes the real ones have had: a string reply is answered as a bare
@@ -15,6 +15,10 @@
  *   healthFailsOn: only the checks with these numbers (1 is the first) do. healthPull: the pull_command the failing
  *   checks carry (the engine adds "\nRun: <it>" to the error of a run that cannot start). olderCore: a harness-core
  *   from before hook_fingerprint, which answers that command with "Unknown command".
+ *   when: { <agent>: { contains, text }[] }: for a model call by that agent, the first rule whose `contains` occurs in
+ *   the call's system prompt (it holds the agent's prompt text) answers with its `text`, as a string reply; a call that
+ *   no rule matches takes the agent's next reply, and a call a rule answers does not use one up. So a reply can depend
+ *   on the agent's prompt, as a workflow evolving its own prompts needs.
  *   hookRewrites: { <hook path>: { path, content } }: that hook, when it runs, writes `content` to
  *   the workspace file `path`, as an approved shell command in an agent would.
  *   commands: { <command line>: { exitCode?, stdout?, stderr?, timeout?: true, fail?: string, delayMs?, snapshot?: true, run?: true } }:
@@ -43,9 +47,15 @@ let healthChecks = 0; // the provider checks so far, for healthFailsOn
 
 function modelReply(system) {
   const agent = /^You are (.+?),/.exec(system ?? "")?.[1] ?? "?";
-  const replies = scenario.replies?.[agent] ?? ["ok"];
-  calls[agent] = (calls[agent] ?? 0) + 1;
-  const reply = replies[Math.min(calls[agent], replies.length) - 1];
+  const rule = scenario.when?.[agent]?.find((r) => (system ?? "").includes(r.contains));
+  let reply;
+  if (rule) {
+    reply = rule.text;
+  } else {
+    const replies = scenario.replies?.[agent] ?? ["ok"];
+    calls[agent] = (calls[agent] ?? 0) + 1;
+    reply = replies[Math.min(calls[agent], replies.length) - 1];
+  }
   const text = typeof reply === "string" ? reply : reply.text;
   if (text.startsWith("ERROR:")) throw text.slice("ERROR:".length).trim();
   if (typeof reply !== "string") return reply;

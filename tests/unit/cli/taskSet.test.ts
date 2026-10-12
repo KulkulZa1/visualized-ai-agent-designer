@@ -672,11 +672,12 @@ describe("unapprovedScorerCommands", () => {
 });
 
 describe("the shipped example task set", () => {
-  it("examples/evals/research-synthesis.tasks.yaml loads, with an evolve, a smoke and a heldout task", () => {
+  it("examples/evals/research-synthesis.tasks.yaml loads, with four evolve tasks (one of them smoke) and a heldout task", () => {
     const loaded = loadTaskSet(resolve("examples/evals/research-synthesis.tasks.yaml"));
     if ("errors" in loaded) throw new Error(loaded.errors.join("\n"));
     expect(loaded.taskSet.tasks.map((t) => [t.id, t.split, t.smoke])).toEqual([
-      ["four-day-week", "evolve", true], ["office-return", "heldout", false],
+      ["four-day-week", "evolve", true], ["open-source-tool", "evolve", false], ["ai-review", "evolve", false], ["on-call", "evolve", false],
+      ["office-return", "heldout", false],
     ]);
   });
 });

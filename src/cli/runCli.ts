@@ -3,7 +3,8 @@
  * engine is the app's (src/engine/runWorkflow.ts); the Rust commands come from
  * harness-core over its pipes. Bundled by `npm run build:cli` into
  * cli/dist/harness-run.mjs, which `node cli/harness.mjs run` loads. The bundle
- * also exports `runEval` (harness eval, src/cli/evalCli.ts).
+ * also exports `runEval` (harness eval, src/cli/evalCli.ts) and `runEvolve`
+ * (harness evolve, src/cli/evolveCli.ts).
  */
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -17,6 +18,7 @@ import { checkWorkflowGraph, createInterrupt, EXIT, loadWorkflow, openCore } fro
 
 export { corePath, createInterrupt, EXIT } from "@/cli/shared";
 export { runEval } from "@/cli/evalCli";
+export { runEvolve } from "@/cli/evolveCli";
 
 /** The exit code for a run's outcome. harness-core stopping during the run counts as not starting. */
 export function exitCode(outcome: RunOutcome, coreStopped: boolean): number {

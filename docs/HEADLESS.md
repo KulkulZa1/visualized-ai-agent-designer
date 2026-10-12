@@ -420,6 +420,17 @@ with a score and the tokens the runs used. It takes the same provider options, k
 
 An older `harness-core` reports none; rebuild it with `npm run build:core`.
 
+## Improving a workflow
+
+`harness evolve <tasks.yaml>` improves a workflow against a task set, round after round:
+- a proposer workflow drafts edits;
+- a critic workflow screens them;
+- `harness eval` measures them.
+
+A candidate is kept only when it beats the noise and pays for its tokens. Your workflow file is never written:
+the result is `incumbent.harness.yaml` in the run's folder. It takes the same provider options, keys,
+`--allow-command` and `--allow-scorer` as `harness eval`. See `docs/EVOLVE.md`.
+
 ## Limits
 
 - Replies do not stream in the terminal: each agent's output arrives when it is

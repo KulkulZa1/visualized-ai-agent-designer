@@ -49,14 +49,15 @@ const placeHolding = (tasks: TaskDef[], path: string) => copiedPlaces(tasks).fin
 
 /** Why the output folder cannot be used, or undefined: it may be new, or an empty folder (the way there may go
  *  through links). And it may not be inside what the trials of the eval copy (`copiedPlaces`): every trial would
- *  find the results of the trials before it. `explicit` is whether --out gave it. */
-function outDirProblem(dir: string, explicit: boolean, tasks: TaskDef[]): string | undefined {
+ *  find the results of the trials before it. `explicit` is whether --out gave it. `reuse`: the folder may hold
+ *  results already, so it need not be empty (`harness evolve` resumes in its folder). */
+export function outDirProblem(dir: string, explicit: boolean, tasks: TaskDef[], reuse = false): string | undefined {
   const name = explicit ? `--out ${dir}` : `the output folder ${dir} (the default; --out puts it elsewhere)`;
   try {
     const { existing, rest } = nearestExisting(dir);
     const real = realpathSync.native(existing);
     if (kindOf(real) !== "folder") return rest.length === 0 ? `${name} exists and is not a folder` : `${name} cannot be made: ${existing} is not a folder`;
-    if (rest.length === 0 && readdirSync(real).length > 0) return `${name} is not empty: give a new or an empty folder`;
+    if (!reuse && rest.length === 0 && readdirSync(real).length > 0) return `${name} is not empty: give a new or an empty folder`;
     const inside = placeHolding(tasks, join(real, ...rest));
     if (inside) {
       return `${name} is inside ${inside.label}: every trial ${inside.copied}, so it would find the results of the trials before it. ` +

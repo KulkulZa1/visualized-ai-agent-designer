@@ -616,6 +616,15 @@ endpoint as for `harness run`. Every run checks the server first; for a Custom e
 a one-token completion, which can take up to 120 s while the model loads. The token counts come
 from the server's own replies; a server that leaves them out gives none (`C` is `null`).
 
+## Improve a workflow offline
+
+`harness evolve` improves a workflow against a task set with the same local server and no network
+(`docs/EVOLVE.md`). The proposer, the critic and every measurement run against that server:
+- The proposer reads a brief and traces, so give the server room: `--num-ctx 32768` or more.
+- `--proposer-model` and `--critic-model` can name a bigger local model than the workflow's.
+
+A run is resumable, so a long run can be stopped with Ctrl+C and continued later.
+
 ## Notes and limitations
 
 - **CSP still lists cloud hosts** (`api.openai.com`, `api.anthropic.com`,
